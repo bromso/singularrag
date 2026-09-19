@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod store;
 pub mod time;
 
 pub use error::{Error, Result};
