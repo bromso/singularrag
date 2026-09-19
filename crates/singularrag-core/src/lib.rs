@@ -7,5 +7,6 @@ pub mod config;
 pub mod error;
 pub mod store;
 pub mod time;
+pub mod walk;
 
 pub use error::{Error, Result};
