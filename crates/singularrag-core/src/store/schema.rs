@@ -1,4 +1,6 @@
-pub const SCHEMA_VERSION: i64 = 1;
+/// Bumped whenever the DDL below changes. The index is derived data: on a mismatch
+/// `Store::init` drops every table and rebuilds from scratch.
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -35,7 +37,7 @@ CREATE TABLE IF NOT EXISTS refs (
 CREATE INDEX IF NOT EXISTS refs_name ON refs(name);
 CREATE INDEX IF NOT EXISTS refs_file ON refs(file_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
-  name, name_tokens, signature, path, tokenize='unicode61'
+  name, name_tokens, signature, path, tokenize='porter unicode61'
 );
 CREATE TABLE IF NOT EXISTS retrievals (
   id            INTEGER PRIMARY KEY,
@@ -43,7 +45,8 @@ CREATE TABLE IF NOT EXISTS retrievals (
   tool          TEXT NOT NULL,
   query         TEXT,
   focus_files   TEXT NOT NULL,
-  budget        INTEGER NOT NULL,
+  budget        INTEGER,
+  limit_n       INTEGER,
   index_version TEXT NOT NULL,
   git_head      TEXT,
   stale_count   INTEGER NOT NULL,
@@ -51,7 +54,12 @@ CREATE TABLE IF NOT EXISTS retrievals (
 );
 CREATE TABLE IF NOT EXISTS retrieval_items (
   retrieval_id INTEGER NOT NULL REFERENCES retrievals(id) ON DELETE CASCADE,
+  -- symbol_id is a best-effort pointer only: symbols.id is reused after a reindex,
+  -- so the identity of a recorded item lives in these denormalised columns.
   symbol_id    INTEGER NOT NULL,
+  path         TEXT NOT NULL,
+  name         TEXT NOT NULL,
+  line_start   INTEGER NOT NULL,
   rank         INTEGER NOT NULL,
   score        REAL NOT NULL,
   served       INTEGER NOT NULL,

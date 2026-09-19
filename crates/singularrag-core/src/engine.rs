@@ -142,7 +142,8 @@ impl Engine {
             "repo_map",
             req.query.as_deref(),
             &req.focus_files,
-            budget,
+            Some(budget),
+            None,
             &version,
             head.as_deref(),
             stats.remaining,
@@ -202,7 +203,8 @@ impl Engine {
             "find_symbol",
             Some(&req.name),
             &[],
-            req.limit,
+            None,
+            Some(req.limit),
             &version,
             head.as_deref(),
             stats.remaining,
@@ -222,13 +224,19 @@ impl Engine {
         })
     }
 
+    /// Writes one `retrievals` row plus its served items and the `CUT_RECORDED`
+    /// candidates below the line. `budget` is the token budget (`repo_map`) and
+    /// `limit_n` the item limit (`find_symbol`); exactly one is set, so the two
+    /// tools' rows stay comparable. Items carry `path`/`name`/`line_start` because
+    /// `symbols.id` is reused after a reindex and would silently re-point.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_retrieval(
         &self,
         tool: &str,
         query: Option<&str>,
         focus_files: &[String],
-        budget: usize,
+        budget: Option<usize>,
+        limit_n: Option<usize>,
         index_version: &str,
         git_head: Option<&str>,
         stale: usize,
@@ -238,14 +246,15 @@ impl Engine {
         let conn = self.store.conn();
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO retrievals(session_key, tool, query, focus_files, budget, index_version, git_head, stale_count, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO retrievals(session_key, tool, query, focus_files, budget, limit_n, index_version, git_head, stale_count, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 self.session_key,
                 tool,
                 query,
                 serde_json::to_string(focus_files).unwrap_or_else(|_| "[]".into()),
-                budget as i64,
+                budget.map(|b| b as i64),
+                limit_n.map(|l| l as i64),
                 index_version,
                 git_head,
                 stale as i64,
@@ -255,12 +264,16 @@ impl Engine {
         let id = tx.last_insert_rowid();
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO retrieval_items(retrieval_id, symbol_id, rank, score, served, reasons_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO retrieval_items(retrieval_id, symbol_id, path, name, line_start, rank, score, served, reasons_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for (i, s) in ranked.iter().take(served + CUT_RECORDED).enumerate() {
                 stmt.execute(params![
                     id,
                     s.symbol_id,
+                    s.path,
+                    s.name,
+                    s.line_start,
                     (i + 1) as i64,
                     s.score,
                     i < served,
@@ -342,6 +355,60 @@ mod tests {
             .query_row("SELECT tool FROM retrievals", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tool, "repo_map");
+    }
+
+    /// `symbols.id` is reused after a reindex (SQLite hands out `max(rowid)+1`), so a
+    /// recorded item identified only by `symbol_id` would silently re-point at another
+    /// symbol. The denormalised `path`/`name`/`line_start` columns are the identity.
+    #[test]
+    fn recorded_items_keep_their_identity_across_a_reindex() {
+        let (dir, e) = engine();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("log".into()),
+                focus_files: vec![],
+                budget_tokens: 1024,
+            })
+            .unwrap();
+        let item = |e: &Engine| -> (i64, String, String, i64) {
+            e.store()
+                .conn()
+                .query_row(
+                    "SELECT symbol_id, path, name, line_start FROM retrieval_items
+                     WHERE retrieval_id = ?1 AND rank = 1",
+                    params![resp.retrieval_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap()
+        };
+        let before = item(&e);
+        assert!(!before.1.is_empty() && !before.2.is_empty());
+
+        // Rewrite two files so their symbols are deleted and reinserted with new ids.
+        for (rel, body) in [
+            ("src/util/log.ts", "export function log(msg: string): void {\n  emit(msg);\n}\nexport function logTwice(msg: string): void {\n  emit(msg);\n}\n"),
+            ("src/cli/login.ts", "export function login(userId: string): void {}\n"),
+        ] {
+            let p = dir.path().join(rel);
+            std::fs::write(&p, body).unwrap();
+            let t = std::time::SystemTime::now() + Duration::from_secs(2);
+            std::fs::File::open(&p).unwrap().set_modified(t).unwrap();
+        }
+        e.refresh(Duration::from_secs(5)).unwrap();
+
+        let after = item(&e);
+        assert_eq!(before, after, "recorded provenance must not move");
+        // The tools are comparable: one fills `budget`, the other `limit_n`.
+        let (budget, limit_n): (Option<i64>, Option<i64>) = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT budget, limit_n FROM retrievals WHERE id = ?1",
+                params![resp.retrieval_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((budget, limit_n), (Some(1024), None));
     }
 
     /// Spec §9: rendered rows carry identifiers, signatures and paths only. One-line

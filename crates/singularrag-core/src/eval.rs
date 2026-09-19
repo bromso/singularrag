@@ -38,10 +38,10 @@ pub fn load_questions(path: &Path) -> Result<Vec<Question>> {
 }
 
 fn served_keys(engine: &Engine, retrieval_id: i64) -> Result<Vec<String>> {
+    // Straight off the recorded row: `symbol_id` is not stable across a reindex.
     let mut stmt = engine.store().conn().prepare(
-        "SELECT f.path || '::' || s.name FROM retrieval_items i
-         JOIN symbols s ON s.id = i.symbol_id JOIN files f ON f.id = s.file_id
-         WHERE i.retrieval_id = ?1 AND i.served = 1",
+        "SELECT path || '::' || name FROM retrieval_items
+         WHERE retrieval_id = ?1 AND served = 1",
     )?;
     let keys = stmt
         .query_map(params![retrieval_id], |r| r.get::<_, String>(0))?

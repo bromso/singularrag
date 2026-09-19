@@ -231,5 +231,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tool, "find_symbol");
+        let (budget, limit_n): (Option<i64>, Option<i64>) = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT budget, limit_n FROM retrievals ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((budget, limit_n), (None, Some(10)));
     }
 }
