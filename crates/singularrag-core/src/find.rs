@@ -61,6 +61,11 @@ pub fn find_symbol(
         ))
     })?;
 
+    let mut rs = conn.prepare(
+        "SELECT f.path, COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
+         WHERE r.name = ?1 AND r.file_id != ?2 GROUP BY f.path ORDER BY COUNT(*) DESC, f.path",
+    )?;
+
     let mut hits = Vec::new();
     for row in rows {
         let (symbol_id, path, line, k, sym_name, signature, file_id) = row?;
@@ -70,10 +75,6 @@ pub fn find_symbol(
         if kind.is_some_and(|want| want != k) {
             continue;
         }
-        let mut rs = conn.prepare(
-            "SELECT f.path, COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
-             WHERE r.name = ?1 AND r.file_id != ?2 GROUP BY f.path ORDER BY COUNT(*) DESC, f.path",
-        )?;
         let all: Vec<RefBy> = rs
             .query_map(params![sym_name, file_id], |r| {
                 Ok(RefBy {
@@ -82,6 +83,11 @@ pub fn find_symbol(
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
+        // Excluded files must never appear in reference lists or counts (graph.rs never lets them in either).
+        let all: Vec<RefBy> = all
+            .into_iter()
+            .filter(|r| !config.is_excluded(&r.path))
+            .collect();
         let total_ref_files = all.len();
         let mut referenced_from = all;
         referenced_from.truncate(5);
@@ -161,6 +167,18 @@ mod tests {
         assert_eq!(hits[0].total_ref_files, 2);
         assert_eq!(hits[0].referenced_from[0].path, "src/http/middleware.ts");
         assert_eq!(hits[0].referenced_from[0].count, 2);
+    }
+
+    #[test]
+    fn excluded_files_are_dropped_from_references() {
+        let (_dir, e) = engine();
+        let cfg = MapConfig::parse("[[exclude]]\npath = \"src/cli/\"\n").unwrap();
+        let hits = find_symbol(e.store(), &cfg, "createSession", None, 10).unwrap();
+        assert_eq!(hits[0].total_ref_files, 1);
+        assert!(hits[0]
+            .referenced_from
+            .iter()
+            .all(|r| !r.path.starts_with("src/cli/")));
     }
 
     #[test]
