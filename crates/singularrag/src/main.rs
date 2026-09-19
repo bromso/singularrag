@@ -43,6 +43,15 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Tier-one eval: recall of gold symbols inside the budgeted map
+    Eval {
+        #[arg(long, default_value = "eval/questions.toml")]
+        questions: PathBuf,
+        #[arg(long, default_value_t = DEFAULT_BUDGET)]
+        budget: usize,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -72,6 +81,19 @@ fn main() -> anyhow::Result<()> {
         Cmd::Find { name, kind, limit } => {
             let r = engine.find_symbol(&FindRequest { name, kind, limit })?;
             print!("{}", r.text);
+        }
+        Cmd::Eval {
+            questions,
+            budget,
+            json,
+        } => {
+            let qs = singularrag_core::eval::load_questions(&questions)?;
+            let results = singularrag_core::eval::run(&engine, &qs, budget)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                print!("{}", singularrag_core::eval::render_report(&results));
+            }
         }
     }
     Ok(())

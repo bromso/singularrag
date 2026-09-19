@@ -70,6 +70,27 @@ fn find_prints_hits() {
 }
 
 #[test]
+fn eval_runs_on_fixture_questions() {
+    let dir = fixture();
+    let q = dir.path().join("q.toml");
+    std::fs::write(&q, "[[question]]\nid = \"L1\"\ncategory = \"locate\"\nquery = \"where are sessions created\"\ngold = [\"src/auth/session.ts::createSession\"]\n").unwrap();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "eval",
+            "--questions",
+            q.to_str().unwrap(),
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "mean recall 1.000 over 1 questions",
+        ));
+}
+
+#[test]
 fn budget_over_cap_is_clamped_not_rejected() {
     let dir = fixture();
     Command::cargo_bin("singularrag")
