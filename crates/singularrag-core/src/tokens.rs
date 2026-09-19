@@ -39,11 +39,15 @@ pub fn approx_tokens(s: &str) -> usize {
     s.chars().count().div_ceil(4)
 }
 
+/// Extracts query terms: splits on identifiers, lowercases, filters stopwords and short terms (< 2 chars), deduplicates.
 pub fn query_terms(q: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for word in q.split(|c: char| !c.is_alphanumeric() && c != '_') {
         for part in split_identifier(word) {
-            if part.len() >= 2 && !STOPWORDS.contains(&part.as_str()) && !out.contains(&part) {
+            if part.chars().count() >= 2
+                && !STOPWORDS.contains(&part.as_str())
+                && !out.contains(&part)
+            {
                 out.push(part);
             }
         }
@@ -84,5 +88,7 @@ mod tests {
             query_terms("SessionStore SessionStore"),
             vec!["session", "store"]
         );
+        // Lone non-ASCII character (1 char, 2 bytes) should be filtered; longer terms kept
+        assert_eq!(query_terms("ä session"), vec!["session"]);
     }
 }
