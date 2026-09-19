@@ -25,3 +25,36 @@ mean recall 0.357 over 12 questions
 ```
 
 Known weakness: test files with many identically named local constants (e.g. many `const request` helpers, or the standalone `class Context` in `src/middleware/cache/index.test.ts`) can flood the top of the ranked map and crowd out the `src/` definitions these questions are actually asking about.
+
+## Baseline (after ranking fixes, 2026-09-20)
+
+```
+id    category  recall  missed
+L1    locate     0.50  src/router.ts::match, src/hono-base.ts::Hono
+L2    locate     1.00  
+L3    locate     0.50  src/context.ts::JSONRespond, src/context.ts::NewResponse
+T1    trace      0.50  src/router.ts::add, src/compose.ts::compose
+T2    trace      0.50  src/hono-base.ts::Hono, src/request.ts::param
+T3    trace      0.50  src/compose.ts::dispatch, src/http-exception.ts::HTTPException
+B1    blast      0.67  src/router/smart-router/router.ts::match, src/hono-base.ts::Hono
+B2    blast      0.20  src/hono-base.ts::Hono, src/compose.ts::compose, src/compose.ts::dispatch, src/request.ts::HonoRequest
+B3    blast      0.20  src/compose.ts::dispatch, src/middleware/logger/index.ts::logger, src/middleware/cors/index.ts::cors, src/middleware/jwt/jwt.ts::jwt
+P1    placement  0.00  src/hono-base.ts::use, src/middleware/powered-by/index.ts::poweredBy, src/middleware/logger/index.ts::logger, src/middleware/etag/index.ts::etag
+P2    placement  1.00  
+P3    placement  0.75  src/context.ts::JSONRespond
+mean recall 0.526 over 12 questions
+```
+
+Mean recall 0.357 → 0.526 on the same questions and the same commit, from four
+changes: a file's rank is now divided among the symbols sharing a name instead of
+replicated to each of them, an FTS bonus is divided among a file's hits, references
+from a symbol's own file count for its score and its reasons, and `symbols_fts` is
+porter-stemmed (so "composed" reaches `compose` and carries the ×10 query-identifier
+multiplier with it). The schema bump to v2 means the first run after this change
+rebuilds the index.
+
+Remaining weakness: the question set's hardest misses are all one symbol —
+`src/hono-base.ts::Hono`, a class defined in a file that mostly *makes* references
+rather than receiving them, so PageRank never lifts it. P1 ("where should a new
+middleware go") is still 0.00: the middleware packages it asks for are leaves that
+nothing in `src/` references.

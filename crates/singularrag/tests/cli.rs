@@ -91,6 +91,21 @@ fn eval_runs_on_fixture_questions() {
 }
 
 #[test]
+fn missing_repo_says_which_path_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such-repo");
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["index", "--repo", missing.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!(
+            "opening repo at {}",
+            missing.display()
+        )));
+}
+
+#[test]
 fn budget_over_cap_is_clamped_not_rejected() {
     let dir = fixture();
     Command::cargo_bin("singularrag")

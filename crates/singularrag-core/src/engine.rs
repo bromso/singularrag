@@ -15,6 +15,9 @@ use crate::time::now_ms;
 use crate::Result;
 
 pub const DB_FILE: &str = ".singularrag/index.db";
+/// Spec §8: a refresh that exceeds this answers with the stale count in the header.
+/// The other half of §8 — finishing the remaining files in the background — lands with
+/// the MCP server (plan 2); here the leftover is simply reported as `remaining`.
 pub const REFRESH_BUDGET: Duration = Duration::from_secs(2);
 pub const LOCK_WAIT_MS: u64 = 500;
 pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
@@ -81,7 +84,9 @@ pub struct FindResponse {
 
 impl Engine {
     pub fn open(root: &Path, session_key: &str) -> Result<Engine> {
-        let root = root.canonicalize()?;
+        let root = root.canonicalize().map_err(|e| {
+            crate::Error::Config(format!("opening repo at {}: {e}", root.display()))
+        })?;
         let store = Store::open(&root.join(DB_FILE))?;
         let config = MapConfig::load(&root)?;
         let config_mtime = map_toml_mtime(&root);
@@ -194,6 +199,7 @@ impl Engine {
         )?;
         let served = map::fit(&ranked, budget);
         let body = map::render(&ranked, served);
+        let cut_recorded = (ranked.len() - served).min(CUT_RECORDED);
         let (version, head) = self.index_meta()?;
 
         let retrieval_id = self.record_retrieval(
@@ -212,14 +218,14 @@ impl Engine {
             "{}\n{}{}\n",
             map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
             body,
-            map::footer(served, ranked.len())
+            map::footer(served, ranked.len(), cut_recorded)
         );
         Ok(MapResponse {
             retrieval_id,
             text,
             served,
             total: ranked.len(),
-            cut_recorded: (ranked.len() - served).min(CUT_RECORDED),
+            cut_recorded,
             stale_count: stats.remaining,
         })
     }
@@ -399,7 +405,7 @@ mod tests {
             .contains("export function createSession(user: User, ttl: number): Session\n"));
         assert!(resp.text.ends_with(&format!(
             "{}\n",
-            crate::map::footer(resp.served, resp.total)
+            crate::map::footer(resp.served, resp.total, resp.cut_recorded)
         )));
         assert_eq!(resp.stale_count, 0);
         assert!(
@@ -534,7 +540,11 @@ mod tests {
             resp.cut_recorded,
             (resp.total - resp.served).min(crate::map::CUT_RECORDED)
         );
-        assert!(resp.text.contains("more ranked below budget"));
+        assert!(resp.text.contains(&format!(
+            "{} more ranked below budget · {} recorded ·",
+            resp.total - resp.served,
+            resp.cut_recorded
+        )));
     }
 
     /// `map.toml` used to be read once at `Engine::open`, so a pin or exclude authored

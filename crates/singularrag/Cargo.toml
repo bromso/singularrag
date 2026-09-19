@@ -3,6 +3,7 @@ name = "singularrag"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 description = "Repo map with retrieval provenance for coding agents"
 
 [[bin]]

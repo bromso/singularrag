@@ -96,7 +96,7 @@ browser ◀──SSE/JSON──  singularrag serve  ◀── notify watcher ─
 2. Personalised PageRank (power iteration, ~40 lines, no graph crate). Personalisation boosts: files named in `focus_files` or the query; files with FTS5 hits for query terms; pinned files. Excluded files are removed before ranking.
 3. Distribute file rank to defined symbols by incoming edge weight; sort.
 4. Greedy fill of `path:` groups with `line  signature` rows; binary search on item count to fit the token budget (approximate tokens = chars / 4; budget is soft and the header says so).
-5. Record reasons per item: `{pagerank, seeds: [...], referenced_by: [{path, count}], pinned, fts_hit}`. Rule: a ranking feature that cannot be expressed in this structure does not ship, because the map cannot draw it.
+5. Record reasons per item: `{score, file_rank, seeds: [...], referenced_by: [{path, count}], pinned, fts_hit}`. Rule: a ranking feature that cannot be expressed in this structure does not ship, because the map cannot draw it. *(Amended 2026-09-20: the field first called `pagerank` held the symbol's final score, not the PageRank value, so it is named `score` and the PageRank value it is derived from is `file_rank`.)*
 
 Sources: [Aider repo map design](https://aider.chat/2023/10/22/repomap.html), [docs](https://aider.chat/docs/repomap.html).
 
@@ -133,9 +133,10 @@ src/auth/session.ts:
 src/http/middleware.ts:
    20  export const requireSession: Middleware
 …
-# 42 of 310 symbols shown · 25 more ranked below budget · widen with a larger budget or a focus file
+# 42 of 310 symbols shown · 268 more ranked below budget · 25 recorded · widen with a larger budget or a focus file
 ```
 - Never includes bodies, comments or string literals.
+- *(Amended 2026-09-20: the footer states two different numbers — how many ranked symbols are below the budget line, and how many of those were recorded in `retrieval_items` (at most 25) — because the earlier one-number example read as if they were the same.)*
 
 ### `find_symbol`
 - Inputs: `name` (string, required; prefix and split-token match), `kind` (enum optional: function, class, method, type, const, module), `limit` (int, default 10, max 50).

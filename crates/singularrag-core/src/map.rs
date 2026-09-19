@@ -68,12 +68,15 @@ pub fn header(
     format!("# singularrag · index {idx} · HEAD {head} · {fresh} · retrieval r_{retrieval_id:06}")
 }
 
-pub fn footer(served: usize, total: usize) -> String {
+/// `recorded` is how many of the cut candidates were written to `retrieval_items`
+/// (at most `CUT_RECORDED`), which is a different number from the remainder: the
+/// footer states both so the arithmetic on the line is consistent.
+pub fn footer(served: usize, total: usize, recorded: usize) -> String {
     if served >= total {
         format!("# {served} of {total} symbols shown")
     } else {
         format!(
-            "# {served} of {total} symbols shown · {} more ranked below budget · widen with a larger budget or a focus file",
+            "# {served} of {total} symbols shown · {} more ranked below budget · {recorded} recorded · widen with a larger budget or a focus file",
             total - served
         )
     }
@@ -138,10 +141,10 @@ mod tests {
             "# singularrag · index 7f3a2c · HEAD none · STALE: 4 files changed since index · retrieval r_000007"
         );
         assert_eq!(
-            footer(42, 310),
-            "# 42 of 310 symbols shown · 268 more ranked below budget · widen with a larger budget or a focus file"
+            footer(42, 310, 25),
+            "# 42 of 310 symbols shown · 268 more ranked below budget · 25 recorded · widen with a larger budget or a focus file"
         );
-        assert_eq!(footer(5, 5), "# 5 of 5 symbols shown");
+        assert_eq!(footer(5, 5, 0), "# 5 of 5 symbols shown");
     }
 
     #[test]
