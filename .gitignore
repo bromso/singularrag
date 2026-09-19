@@ -1,3 +1,5 @@
 .singularrag/index.db
 target/
 node_modules/
+.claude/worktrees/
+.superpowers/
