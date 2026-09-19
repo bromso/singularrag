@@ -27,6 +27,9 @@ pub struct IndexStats {
     pub skipped: usize,
     pub removed: usize,
     pub remaining: usize,
+    /// True when the advisory lock was held by another live process for longer than the
+    /// caller was willing to wait, so nothing was indexed and `remaining` is the backlog.
+    pub lock_timeout: bool,
 }
 
 pub struct Indexer<'a> {

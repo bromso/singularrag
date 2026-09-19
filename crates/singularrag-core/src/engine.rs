@@ -19,18 +19,36 @@ pub const REFRESH_BUDGET: Duration = Duration::from_secs(2);
 pub const LOCK_WAIT_MS: u64 = 500;
 pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
 
+/// One `Engine` per connection: it owns a `rusqlite::Connection`, which is `Send` but
+/// not `Sync`, so an `Engine` cannot be shared between threads. Plan 2 (the MCP server)
+/// decides between `Mutex<Connection>` and one `Engine` per request; nothing here
+/// assumes either.
 pub struct Engine {
     root: PathBuf,
     store: Store,
     config: MapConfig,
+    /// mtime of `map.toml` when the config was last read (`None` when absent).
+    config_mtime: Option<std::time::SystemTime>,
     session_key: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MapRequest {
     pub query: Option<String>,
     pub focus_files: Vec<String>,
     pub budget_tokens: usize,
+}
+
+impl Default for MapRequest {
+    /// `budget_tokens: 0` would be clamped up to `MIN_BUDGET` (64 tokens), which is not
+    /// what "unspecified" means: the documented default is `DEFAULT_BUDGET`.
+    fn default() -> Self {
+        MapRequest {
+            query: None,
+            focus_files: Vec::new(),
+            budget_tokens: map::DEFAULT_BUDGET,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,10 +81,12 @@ impl Engine {
         let root = root.canonicalize()?;
         let store = Store::open(&root.join(DB_FILE))?;
         let config = MapConfig::load(&root)?;
+        let config_mtime = map_toml_mtime(&root);
         Ok(Engine {
             root,
             store,
             config,
+            config_mtime,
             session_key: session_key.to_string(),
         })
     }
@@ -84,9 +104,22 @@ impl Engine {
         &self.session_key
     }
 
+    /// `map.toml` is authored while this process is alive (the UI writes it), so its
+    /// mtime is checked before every refresh and the config re-read when it moved.
+    /// An absent file is a state too: creating or deleting it counts as a change.
+    fn reload_config_if_changed(&mut self) -> Result<()> {
+        let mtime = map_toml_mtime(&self.root);
+        if mtime != self.config_mtime {
+            self.config = MapConfig::load(&self.root)?;
+            self.config_mtime = mtime;
+        }
+        Ok(())
+    }
+
     /// Refresh under the advisory lock. If the lock is held by a live process for
     /// longer than `LOCK_WAIT_MS`, index nothing and report how many files are stale.
-    pub fn refresh(&self, budget: Duration) -> Result<IndexStats> {
+    pub fn refresh(&mut self, budget: Duration) -> Result<IndexStats> {
+        self.reload_config_if_changed()?;
         let pid = std::process::id();
         let indexer = Indexer::new(&self.store, &self.root, &self.config)?;
         let wait_until = Instant::now() + Duration::from_millis(LOCK_WAIT_MS);
@@ -98,6 +131,7 @@ impl Engine {
                 let remaining = indexer.stale_count()?;
                 return Ok(IndexStats {
                     remaining,
+                    lock_timeout: true,
                     ..IndexStats::default()
                 });
             }
@@ -125,7 +159,7 @@ impl Engine {
         Ok((version, head))
     }
 
-    pub fn repo_map(&self, req: &MapRequest) -> Result<MapResponse> {
+    pub fn repo_map(&mut self, req: &MapRequest) -> Result<MapResponse> {
         let stats = self.refresh(REFRESH_BUDGET)?;
         let budget = map::clamp_budget(req.budget_tokens);
         let ranked = rank_symbols(
@@ -166,7 +200,7 @@ impl Engine {
         })
     }
 
-    pub fn find_symbol(&self, req: &FindRequest) -> Result<FindResponse> {
+    pub fn find_symbol(&mut self, req: &FindRequest) -> Result<FindResponse> {
         let stats = self.refresh(REFRESH_BUDGET)?;
         // `find` shares `repo_map`'s cut semantics: look up the served hits plus the
         // candidates just below the limit, serve the first `limit` and record the rest
@@ -293,6 +327,15 @@ impl Engine {
     }
 }
 
+/// mtime of the repo's `map.toml`, or `None` when it does not exist (or cannot be
+/// stat'ed). Filesystem mtime granularity bounds this: two writes inside one tick
+/// look identical, as they do to the indexer's own stat walk.
+fn map_toml_mtime(root: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(root.join(crate::config::MAP_FILE))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,7 +355,7 @@ mod tests {
 
     #[test]
     fn repo_map_indexes_renders_and_records_provenance() {
-        let (_dir, e) = engine();
+        let (_dir, mut e) = engine();
         let resp = e
             .repo_map(&MapRequest {
                 query: Some("session".into()),
@@ -369,7 +412,7 @@ mod tests {
     /// symbol. The denormalised `path`/`name`/`line_start` columns are the identity.
     #[test]
     fn recorded_items_keep_their_identity_across_a_reindex() {
-        let (dir, e) = engine();
+        let (dir, mut e) = engine();
         let resp = e
             .repo_map(&MapRequest {
                 query: Some("log".into()),
@@ -429,7 +472,7 @@ mod tests {
             "export const onNotFound = (c: Context) => c.text('NotFound', 404)\nexport const isRawRequest = (request: Request): request is Request => 'headers' in request // 'headers' exists only on Request\n",
         )
         .unwrap();
-        let e = Engine::open(dir.path(), "test-session").unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
         let resp = e
             .repo_map(&MapRequest {
                 query: None,
@@ -454,7 +497,7 @@ mod tests {
 
     #[test]
     fn small_budget_cuts_and_records_up_to_25() {
-        let (_dir, e) = engine();
+        let (_dir, mut e) = engine();
         let resp = e
             .repo_map(&MapRequest {
                 query: None,
@@ -470,9 +513,11 @@ mod tests {
         assert!(resp.text.contains("more ranked below budget"));
     }
 
+    /// `map.toml` used to be read once at `Engine::open`, so a pin or exclude authored
+    /// while an MCP process was alive never applied. The same Engine must pick it up.
     #[test]
     fn excludes_from_map_toml_change_the_next_retrieval() {
-        let (dir, e) = engine();
+        let (dir, mut e) = engine();
         let before = e
             .repo_map(&MapRequest {
                 query: None,
@@ -487,20 +532,37 @@ mod tests {
             "[[exclude]]\npath = \"src/util/\"\n",
         )
         .unwrap();
-        let e2 = Engine::open(dir.path(), "test-session").unwrap();
-        let after = e2
+        let after = e
             .repo_map(&MapRequest {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
             })
             .unwrap();
-        assert!(!after.text.contains("src/util/log.ts:"));
+        assert!(!after.text.contains("src/util/log.ts:"), "{}", after.text);
+        assert!(e.config().is_excluded("src/util/log.ts"));
+
+        // Deleting it is a change too.
+        std::fs::remove_file(dir.path().join(".singularrag/map.toml")).unwrap();
+        let back = e
+            .repo_map(&MapRequest {
+                query: None,
+                focus_files: vec![],
+                budget_tokens: 4096,
+            })
+            .unwrap();
+        assert!(back.text.contains("src/util/log.ts:"));
+    }
+
+    #[test]
+    fn map_request_default_is_the_documented_budget() {
+        assert_eq!(MapRequest::default().budget_tokens, map::DEFAULT_BUDGET);
+        assert!(MapRequest::default().query.is_none());
     }
 
     #[test]
     fn held_lock_yields_stale_header_without_indexing() {
-        let (_dir, e) = engine();
+        let (_dir, mut e) = engine();
         let other_pid = std::process::id() + 1;
         assert!(lock::try_acquire(e.store(), other_pid, crate::time::now_ms()).unwrap());
         let started = std::time::Instant::now();
@@ -513,6 +575,9 @@ mod tests {
             .unwrap();
         assert!(started.elapsed() >= Duration::from_millis(LOCK_WAIT_MS));
         assert!(resp.stale_count > 0);
+        let stats = e.refresh(REFRESH_BUDGET).unwrap();
+        assert!(stats.lock_timeout, "{stats:?}");
+        assert_eq!(stats.indexed, 0);
         assert!(resp.text.contains(&format!(
             "STALE: {} files changed since index",
             resp.stale_count
@@ -529,7 +594,7 @@ mod tests {
 
     #[test]
     fn refresh_heartbeats_the_lock() {
-        let (_dir, e) = engine();
+        let (_dir, mut e) = engine();
         let stats = e.refresh(Duration::from_secs(5)).unwrap();
         assert_eq!(stats.remaining, 0);
         assert_eq!(count(&e, "SELECT COUNT(*) FROM indexer_lock"), 0);

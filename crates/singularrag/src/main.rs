@@ -57,12 +57,17 @@ enum Cmd {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let root = cli.repo.unwrap_or(std::env::current_dir()?);
-    let engine = Engine::open(&root, &format!("cli-{}", std::process::id()))?;
+    let mut engine = Engine::open(&root, &format!("cli-{}", std::process::id()))?;
     match cli.cmd {
         Cmd::Index => {
             let s = engine.refresh(Duration::from_secs(600))?;
+            let held = if s.lock_timeout {
+                " · lock held by another process"
+            } else {
+                ""
+            };
             println!(
-                "scanned {} · indexed {} · unchanged {} · skipped {} · removed {} · remaining {}",
+                "scanned {} · indexed {} · unchanged {} · skipped {} · removed {} · remaining {}{held}",
                 s.scanned, s.indexed, s.unchanged, s.skipped, s.removed, s.remaining
             );
         }
@@ -88,7 +93,7 @@ fn main() -> anyhow::Result<()> {
             json,
         } => {
             let qs = singularrag_core::eval::load_questions(&questions)?;
-            let results = singularrag_core::eval::run(&engine, &qs, budget)?;
+            let results = singularrag_core::eval::run(&mut engine, &qs, budget)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else {

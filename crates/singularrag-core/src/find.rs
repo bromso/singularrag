@@ -163,7 +163,7 @@ mod tests {
     fn engine() -> (tempfile::TempDir, Engine) {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
-        let e = Engine::open(dir.path(), "t").unwrap();
+        let mut e = Engine::open(dir.path(), "t").unwrap();
         e.refresh(std::time::Duration::from_secs(5)).unwrap();
         (dir, e)
     }
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn engine_find_records_retrieval_with_header() {
-        let (_dir, e) = engine();
+        let (_dir, mut e) = engine();
         let resp = e
             .find_symbol(&FindRequest {
                 name: "log".into(),
@@ -278,7 +278,7 @@ mod tests {
     /// recorded as `served = 0` instead of everything being recorded as served.
     #[test]
     fn candidates_below_the_limit_are_recorded_as_cut() {
-        let (_dir, e) = engine();
+        let (_dir, mut e) = engine();
         let resp = e
             .find_symbol(&FindRequest {
                 name: "session".into(),

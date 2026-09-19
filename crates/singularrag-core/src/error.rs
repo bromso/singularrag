@@ -10,8 +10,6 @@ pub enum Error {
     PathEscape(String),
     #[error("tags: {0}")]
     Tags(String),
-    #[error("index is locked by another process")]
-    Locked,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

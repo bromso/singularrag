@@ -49,7 +49,7 @@ fn served_keys(engine: &Engine, retrieval_id: i64) -> Result<Vec<String>> {
     Ok(keys)
 }
 
-pub fn run(engine: &Engine, questions: &[Question], budget: usize) -> Result<Vec<EvalResult>> {
+pub fn run(engine: &mut Engine, questions: &[Question], budget: usize) -> Result<Vec<EvalResult>> {
     let mut out = Vec::new();
     for q in questions {
         let resp = engine.repo_map(&MapRequest {
@@ -131,8 +131,8 @@ gold = ["src/http/middleware.ts::requireSession", "src/http/middleware.ts::attac
         let qs = load_questions(&qpath).unwrap();
         assert_eq!(qs.len(), 2);
 
-        let e = Engine::open(dir.path(), "eval").unwrap();
-        let results = run(&e, &qs, 2048).unwrap();
+        let mut e = Engine::open(dir.path(), "eval").unwrap();
+        let results = run(&mut e, &qs, 2048).unwrap();
         assert_eq!(results[0].id, "L1");
         assert!((results[0].recall - 1.0).abs() < 1e-9, "{:?}", results[0]);
         assert!((results[1].recall - 0.75).abs() < 1e-9, "{:?}", results[1]);
@@ -150,9 +150,9 @@ gold = ["src/http/middleware.ts::requireSession", "src/http/middleware.ts::attac
         let qpath = dir.path().join("questions.toml");
         std::fs::write(&qpath, Q).unwrap();
         let qs = load_questions(&qpath).unwrap();
-        let e = Engine::open(dir.path(), "eval").unwrap();
-        let big = mean_recall(&run(&e, &qs, 4096).unwrap());
-        let small = mean_recall(&run(&e, &qs, 64).unwrap());
+        let mut e = Engine::open(dir.path(), "eval").unwrap();
+        let big = mean_recall(&run(&mut e, &qs, 4096).unwrap());
+        let small = mean_recall(&run(&mut e, &qs, 64).unwrap());
         assert!(small <= big);
     }
 }
