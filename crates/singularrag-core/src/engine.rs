@@ -17,6 +17,7 @@ use crate::Result;
 pub const DB_FILE: &str = ".singularrag/index.db";
 pub const REFRESH_BUDGET: Duration = Duration::from_secs(2);
 pub const LOCK_WAIT_MS: u64 = 500;
+pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
 
 pub struct Engine {
     root: PathBuf,
@@ -87,9 +88,17 @@ impl Engine {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let result = indexer.refresh(Some(Instant::now() + budget));
-        lock::release(&self.store, pid)?;
-        result
+        let mut last_beat = Instant::now();
+        let result = indexer.refresh_with(Some(Instant::now() + budget), || {
+            if last_beat.elapsed() >= HEARTBEAT_EVERY {
+                let _ = lock::heartbeat(&self.store, pid, now_ms());
+                last_beat = Instant::now();
+            }
+        });
+        let released = lock::release(&self.store, pid);
+        let stats = result?;
+        released?;
+        Ok(stats)
     }
 
     fn index_meta(&self) -> Result<(String, Option<String>)> {
@@ -155,7 +164,8 @@ impl Engine {
         served: usize,
     ) -> Result<i64> {
         let conn = self.store.conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO retrievals(session_key, tool, query, focus_files, budget, index_version, git_head, stale_count, created_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -170,20 +180,23 @@ impl Engine {
                 now_ms()
             ],
         )?;
-        let id = conn.last_insert_rowid();
-        let mut stmt = conn.prepare(
-            "INSERT INTO retrieval_items(retrieval_id, symbol_id, rank, score, served, reasons_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
-        for (i, s) in ranked.iter().take(served + CUT_RECORDED).enumerate() {
-            stmt.execute(params![
-                id,
-                s.symbol_id,
-                (i + 1) as i64,
-                s.score,
-                i < served,
-                serde_json::to_string(&s.reasons).unwrap_or_else(|_| "{}".into())
-            ])?;
+        let id = tx.last_insert_rowid();
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO retrieval_items(retrieval_id, symbol_id, rank, score, served, reasons_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for (i, s) in ranked.iter().take(served + CUT_RECORDED).enumerate() {
+                stmt.execute(params![
+                    id,
+                    s.symbol_id,
+                    (i + 1) as i64,
+                    s.score,
+                    i < served,
+                    serde_json::to_string(&s.reasons).unwrap_or_else(|_| "{}".into())
+                ])?;
+            }
         }
+        tx.commit()?;
         Ok(id)
     }
 }
@@ -332,6 +345,14 @@ mod tests {
             crate::time::now_ms() + lock::LOCK_STALE_MS + 1
         )
         .unwrap());
+    }
+
+    #[test]
+    fn refresh_heartbeats_the_lock() {
+        let (_dir, e) = engine();
+        let stats = e.refresh(Duration::from_secs(5)).unwrap();
+        assert_eq!(stats.remaining, 0);
+        assert_eq!(count(&e, "SELECT COUNT(*) FROM indexer_lock"), 0);
     }
 
     #[test]

@@ -101,6 +101,17 @@ impl<'a> Indexer<'a> {
     }
 
     pub fn refresh(&self, deadline: Option<Instant>) -> Result<IndexStats> {
+        self.refresh_with(deadline, || {})
+    }
+
+    /// Same as `refresh`, but calls `on_file` once after every entry in the walk's
+    /// entry list is processed (indexed, unchanged, skipped-by-content or cut off by
+    /// the deadline). Callers use this to send a lock heartbeat during long refreshes.
+    pub fn refresh_with(
+        &self,
+        deadline: Option<Instant>,
+        mut on_file: impl FnMut(),
+    ) -> Result<IndexStats> {
         let mut stats = IndexStats::default();
         let known = self.known_files()?;
         let w = walk(&self.root, &self.config.deny_patterns())?;
@@ -118,10 +129,12 @@ impl<'a> Indexer<'a> {
             seen.push(&e.rel_path);
             if !Self::changed(&known, e) {
                 stats.unchanged += 1;
+                on_file();
                 continue;
             }
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 stats.remaining += 1;
+                on_file();
                 continue;
             }
             let prior = known.get(&e.rel_path);
@@ -130,6 +143,7 @@ impl<'a> Indexer<'a> {
                 Outcome::Unchanged => stats.unchanged += 1,
                 Outcome::Skipped => stats.skipped += 1,
             }
+            on_file();
         }
 
         // Remove rows for files that no longer exist (or are now gitignored), and write
@@ -487,6 +501,18 @@ mod tests {
         assert_eq!(stats.indexed, 0);
         assert!(stats.remaining >= 4, "{stats:?}");
         assert_eq!(ix.stale_count().unwrap(), stats.remaining);
+    }
+
+    #[test]
+    fn refresh_with_calls_on_file_once_per_walked_entry() {
+        let (dir, store) = setup();
+        let cfg = MapConfig::default();
+        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let w = walk(&dir.path().canonicalize().unwrap(), &cfg.deny_patterns()).unwrap();
+        let mut count = 0usize;
+        let stats = ix.refresh_with(None, || count += 1).unwrap();
+        assert_eq!(count, w.entries.len());
+        assert_eq!(count, stats.scanned - w.skipped.len());
     }
 
     #[test]
