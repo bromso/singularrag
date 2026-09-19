@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use rusqlite::params;
+use rusqlite::{params, Connection};
 
 use crate::config::MapConfig;
 use crate::lang::{extract_tags, Language};
@@ -41,6 +41,13 @@ struct Known {
     mtime_ms: i64,
     size: u64,
     content_hash: Option<String>,
+}
+
+/// What `index_file` did with one changed file.
+enum Outcome {
+    Indexed,
+    Unchanged,
+    Skipped,
 }
 
 impl<'a> Indexer<'a> {
@@ -99,7 +106,6 @@ impl<'a> Indexer<'a> {
         let w = walk(&self.root, &self.config.deny_patterns())?;
         stats.scanned = w.entries.len() + w.skipped.len();
         let now = now_ms();
-        let conn = self.store.conn();
 
         // Skipped-by-walk files become rows with a reason and no symbols.
         for s in &w.skipped {
@@ -119,28 +125,31 @@ impl<'a> Indexer<'a> {
                 continue;
             }
             let prior = known.get(&e.rel_path);
-            if self.index_file(e, prior, now)? {
-                stats.indexed += 1;
-            } else {
-                stats.skipped += 1;
+            match self.index_file(e, prior, now)? {
+                Outcome::Indexed => stats.indexed += 1,
+                Outcome::Unchanged => stats.unchanged += 1,
+                Outcome::Skipped => stats.skipped += 1,
             }
         }
 
-        // Remove rows for files that no longer exist (or are now gitignored).
+        // Remove rows for files that no longer exist (or are now gitignored), and write
+        // meta, atomically: either both land or neither does.
         let present: std::collections::HashSet<&str> = seen
             .iter()
             .copied()
             .chain(w.skipped.iter().map(|s| s.rel_path.as_str()))
             .collect();
+        let conn = self.store.conn();
+        let tx = conn.unchecked_transaction()?;
         for (path, k) in &known {
             if !present.contains(path.as_str()) {
-                conn.execute("DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)", [k.id])?;
-                conn.execute("DELETE FROM files WHERE id = ?1", [k.id])?;
+                delete_symbols_for(&tx, k.id)?;
+                tx.execute("DELETE FROM files WHERE id = ?1", [k.id])?;
                 stats.removed += 1;
             }
         }
-
         self.write_meta(now)?;
+        tx.commit()?;
         Ok(stats)
     }
 
@@ -153,60 +162,63 @@ impl<'a> Indexer<'a> {
         now: i64,
     ) -> Result<i64> {
         let conn = self.store.conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason)
              VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5)
              ON CONFLICT(path) DO UPDATE SET lang = NULL, content_hash = NULL, mtime_ms = excluded.mtime_ms,
                size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = excluded.skipped_reason",
             params![path, mtime_ms, size as i64, now, reason],
         )?;
-        let id: i64 =
-            conn.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))?;
-        conn.execute(
-            "DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
-            [id],
-        )?;
-        conn.execute("DELETE FROM symbols WHERE file_id = ?1", [id])?;
-        conn.execute("DELETE FROM refs WHERE file_id = ?1", [id])?;
+        let id: i64 = tx.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))?;
+        delete_symbols_for(&tx, id)?;
+        tx.commit()?;
         Ok(id)
     }
 
-    /// Returns true when symbols were (re)written, false when the file was skipped.
-    fn index_file(&self, e: &WalkEntry, prior: Option<&Known>, now: i64) -> Result<bool> {
+    /// Parses, hashes and (re)writes one changed file's row, symbols, refs and FTS rows,
+    /// all atomically. `Outcome::Unchanged` means the content hash matched what was already
+    /// stored (only mtime/size moved) so nothing besides those two columns was touched;
+    /// `Outcome::Skipped` means the file was written to `files` with a `skipped_reason` and
+    /// has no symbols; `Outcome::Indexed` means symbols/refs/FTS rows were (re)written.
+    fn index_file(&self, e: &WalkEntry, prior: Option<&Known>, now: i64) -> Result<Outcome> {
         if e.size > MAX_FILE_BYTES {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "too-large", now)?;
-            return Ok(false);
+            return Ok(Outcome::Skipped);
         }
         let Some(lang) = Language::from_path(&e.rel_path) else {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "unsupported-language", now)?;
-            return Ok(false);
+            return Ok(Outcome::Skipped);
         };
         let bytes = std::fs::read(&e.abs_path)?;
         if bytes.iter().take(8192).any(|&b| b == 0) {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "binary", now)?;
-            return Ok(false);
+            return Ok(Outcome::Skipped);
         }
         let Ok(source) = std::str::from_utf8(&bytes) else {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "not-utf8", now)?;
-            return Ok(false);
+            return Ok(Outcome::Skipped);
         };
         if looks_secret(source).is_some() {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "secret-like content", now)?;
-            return Ok(false);
+            return Ok(Outcome::Skipped);
         }
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let conn = self.store.conn();
 
         if prior.and_then(|p| p.content_hash.as_deref()) == Some(hash.as_str()) {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
                 "UPDATE files SET mtime_ms = ?2, size = ?3 WHERE path = ?1",
                 params![e.rel_path, e.mtime_ms, e.size as i64],
             )?;
-            return Ok(true);
+            tx.commit()?;
+            return Ok(Outcome::Unchanged);
         }
 
         let tags = extract_tags(lang, source)?;
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
              ON CONFLICT(path) DO UPDATE SET lang = excluded.lang, content_hash = excluded.content_hash,
@@ -214,35 +226,31 @@ impl<'a> Indexer<'a> {
             params![e.rel_path, lang.as_str(), hash, e.mtime_ms, e.size as i64, now],
         )?;
         let file_id: i64 =
-            conn.query_row("SELECT id FROM files WHERE path = ?1", [&e.rel_path], |r| {
+            tx.query_row("SELECT id FROM files WHERE path = ?1", [&e.rel_path], |r| {
                 r.get(0)
             })?;
-        conn.execute(
-            "DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
-            [file_id],
-        )?;
-        conn.execute("DELETE FROM symbols WHERE file_id = ?1", [file_id])?;
-        conn.execute("DELETE FROM refs WHERE file_id = ?1", [file_id])?;
+        delete_symbols_for(&tx, file_id)?;
 
         for t in &tags {
             if t.is_definition {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO symbols(file_id, name, kind, line_start, line_end, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![file_id, t.name, t.kind, t.line_start, t.line_end, t.signature],
                 )?;
-                let id = conn.last_insert_rowid();
-                conn.execute(
+                let id = tx.last_insert_rowid();
+                tx.execute(
                     "INSERT INTO symbols_fts(rowid, name, name_tokens, signature, path) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![id, t.name, split_identifier(&t.name).join(" "), t.signature, e.rel_path],
                 )?;
             } else {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO refs(file_id, name, line) VALUES (?1, ?2, ?3)",
                     params![file_id, t.name, t.line_start],
                 )?;
             }
         }
-        Ok(true)
+        tx.commit()?;
+        Ok(Outcome::Indexed)
     }
 
     fn write_meta(&self, now: i64) -> Result<()> {
@@ -266,6 +274,18 @@ impl<'a> Indexer<'a> {
         }
         Ok(())
     }
+}
+
+/// Deletes a file's symbols, refs and FTS rows (but not the `files` row itself),
+/// so the caller can either re-insert fresh ones or leave the file skipped.
+fn delete_symbols_for(conn: &Connection, file_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
+        [file_id],
+    )?;
+    conn.execute("DELETE FROM symbols WHERE file_id = ?1", [file_id])?;
+    conn.execute("DELETE FROM refs WHERE file_id = ?1", [file_id])?;
+    Ok(())
 }
 
 /// Resolve `.git/HEAD` without a git dependency. Handles symbolic refs, loose refs
@@ -411,6 +431,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn same_content_new_mtime_is_unchanged_not_indexed() {
+        let (dir, store) = setup();
+        let cfg = MapConfig::default();
+        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        ix.refresh(None).unwrap();
+
+        let p = dir.path().join("src/util/log.ts");
+        let content = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(&p, &content).unwrap();
+        // Force a distinct mtime even on coarse filesystems; content is byte-identical.
+        let t = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        std::fs::File::open(&p).unwrap().set_modified(t).unwrap();
+
+        let stats = ix.refresh(None).unwrap();
+        assert_eq!(stats.indexed, 0, "{stats:?}");
+        assert!(stats.unchanged >= 1, "{stats:?}");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM symbols WHERE name = 'log'"),
+            1
+        );
     }
 
     #[test]
