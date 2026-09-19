@@ -6,6 +6,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod find;
 pub mod fixture;
 pub mod graph;
 pub mod index;

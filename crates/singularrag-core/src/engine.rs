@@ -43,6 +43,21 @@ pub struct MapResponse {
     pub stale_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct FindRequest {
+    pub name: String,
+    pub kind: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct FindResponse {
+    pub retrieval_id: i64,
+    pub text: String,
+    pub hits: usize,
+    pub stale_count: usize,
+}
+
 impl Engine {
     pub fn open(root: &Path, session_key: &str) -> Result<Engine> {
         let root = root.canonicalize()?;
@@ -146,6 +161,63 @@ impl Engine {
             served,
             total: ranked.len(),
             cut_recorded: (ranked.len() - served).min(CUT_RECORDED),
+            stale_count: stats.remaining,
+        })
+    }
+
+    pub fn find_symbol(&self, req: &FindRequest) -> Result<FindResponse> {
+        let stats = self.refresh(REFRESH_BUDGET)?;
+        let hits = crate::find::find_symbol(
+            &self.store,
+            &self.config,
+            &req.name,
+            req.kind.as_deref(),
+            req.limit,
+        )?;
+        let (version, head) = self.index_meta()?;
+        // Record hits as served items with minimal reasons (exact/prefix match).
+        let ranked: Vec<ScoredSymbol> = hits
+            .iter()
+            .enumerate()
+            .map(|(i, h)| ScoredSymbol {
+                symbol_id: h.symbol_id,
+                file_id: 0,
+                path: h.path.clone(),
+                name: h.name.clone(),
+                kind: h.kind.clone(),
+                line_start: h.line,
+                line_end: h.line,
+                signature: h.signature.clone(),
+                score: 1.0 / (i as f64 + 1.0),
+                reasons: crate::rank::Reasons {
+                    fts_hit: true,
+                    query_ident_match: h.name.eq_ignore_ascii_case(&req.name),
+                    referenced_by: h.referenced_from.clone(),
+                    seeds: vec![format!("find:{}", req.name)],
+                    ..Default::default()
+                },
+            })
+            .collect();
+        let retrieval_id = self.record_retrieval(
+            "find_symbol",
+            Some(&req.name),
+            &[],
+            req.limit,
+            &version,
+            head.as_deref(),
+            stats.remaining,
+            &ranked,
+            ranked.len(),
+        )?;
+        let text = format!(
+            "{}\n{}",
+            map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+            crate::find::render_find(&hits)
+        );
+        Ok(FindResponse {
+            retrieval_id,
+            text,
+            hits: hits.len(),
             stale_count: stats.remaining,
         })
     }
