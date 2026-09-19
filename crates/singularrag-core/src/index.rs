@@ -15,7 +15,7 @@ use crate::store::Store;
 use crate::time::now_ms;
 use crate::tokens::split_identifier;
 use crate::walk::{walk, WalkEntry};
-use crate::Result;
+use crate::{Error, Result};
 
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -138,10 +138,22 @@ impl<'a> Indexer<'a> {
                 continue;
             }
             let prior = known.get(&e.rel_path);
-            match self.index_file(e, prior, now)? {
-                Outcome::Indexed => stats.indexed += 1,
-                Outcome::Unchanged => stats.unchanged += 1,
-                Outcome::Skipped => stats.skipped += 1,
+            // One unreadable or unparseable file must never abort the refresh: it becomes
+            // a skip row like any other skipped file, and the walk carries on. Only store
+            // errors (which mean the index itself is unusable) propagate.
+            match self.index_file(e, prior, now) {
+                Ok(Outcome::Indexed) => stats.indexed += 1,
+                Ok(Outcome::Unchanged) => stats.unchanged += 1,
+                Ok(Outcome::Skipped) => stats.skipped += 1,
+                Err(Error::Io(_)) => {
+                    self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "unreadable", now)?;
+                    stats.skipped += 1;
+                }
+                Err(Error::Tags(_)) => {
+                    self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "parse-error", now)?;
+                    stats.skipped += 1;
+                }
+                Err(other) => return Err(other),
             }
             on_file();
         }
@@ -399,6 +411,43 @@ mod tests {
             5
         );
         assert!(store.get_meta("index_version").unwrap().is_some());
+    }
+
+    /// A file the process cannot read (or that fails to parse) must not abort the
+    /// whole refresh: it becomes a skip row and every later file still indexes.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_becomes_a_skip_row_without_aborting() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, store) = setup();
+        let bad = dir.path().join("src/aaa_unreadable.ts");
+        std::fs::write(&bad, "export function nope(): void {}\n").unwrap();
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&bad).is_ok() {
+            return; // running as root: the file is readable anyway
+        }
+        let cfg = MapConfig::default();
+        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let stats = ix.refresh(None).unwrap();
+        let reason: Option<String> = store
+            .conn()
+            .query_row(
+                "SELECT skipped_reason FROM files WHERE path = ?1",
+                ["src/aaa_unreadable.ts"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason.as_deref(), Some("unreadable"));
+        // Files sorted after the unreadable one still made it in.
+        assert!(stats.indexed >= 4, "{stats:?}");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM symbols WHERE name = 'createSession'"
+            ),
+            1
+        );
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     #[test]
