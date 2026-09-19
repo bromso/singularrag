@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod error;
+pub mod lang;
 pub mod secrets;
 pub mod store;
 pub mod time;
