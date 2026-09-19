@@ -332,6 +332,35 @@ app.use(cache({ cacheName: 'variants', keyGenerator: (c: Context) => c.req.url }
     }
 
     #[test]
+    fn tsx_definitions_and_call_references() {
+        let src = r#"import { useTitle } from "./hooks";
+export function Panel({ title }: { title: string }) {
+  const heading = useTitle(title);
+  return <section><h1>{heading}</h1></section>;
+}
+export const Badge = (props: { n: number }) => <span>{props.n}</span>;
+"#;
+        let tags = extract_tags(Language::Tsx, src).unwrap();
+        let defs = names(&tags, true);
+        assert!(
+            defs.contains(&("Panel".into(), "function".into())),
+            "{defs:?}"
+        );
+        assert!(defs.iter().any(|(n, _)| n == "Badge"), "{defs:?}");
+        let refs = names(&tags, false);
+        assert!(refs.iter().any(|(n, _)| n == "useTitle"), "{refs:?}");
+        let panel = tags
+            .iter()
+            .find(|t| t.name == "Panel" && t.is_definition)
+            .unwrap();
+        assert_eq!(
+            panel.signature,
+            "export function Panel({ title }: { title: string })"
+        );
+        assert_eq!(panel.line_start, 2);
+    }
+
+    #[test]
     fn rust_definitions_and_scoped_call_references() {
         let src = "pub fn parse(s: &str) -> u32 { helper(s) + util::len(s) }\nfn helper(s: &str) -> u32 { 0 }\n";
         let tags = extract_tags(Language::Rust, src).unwrap();

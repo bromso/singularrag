@@ -30,6 +30,9 @@ pub struct Engine {
     /// mtime of `map.toml` when the config was last read (`None` when absent).
     config_mtime: Option<std::time::SystemTime>,
     session_key: String,
+    heartbeat_every: Duration,
+    heartbeats: std::cell::Cell<usize>,
+    last_heartbeat_ms: std::cell::Cell<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +91,9 @@ impl Engine {
             config,
             config_mtime,
             session_key: session_key.to_string(),
+            heartbeat_every: HEARTBEAT_EVERY,
+            heartbeats: std::cell::Cell::new(0),
+            last_heartbeat_ms: std::cell::Cell::new(0),
         })
     }
 
@@ -102,6 +108,20 @@ impl Engine {
     }
     pub fn session_key(&self) -> &str {
         &self.session_key
+    }
+
+    /// How often the advisory lock's heartbeat is written during a long refresh.
+    /// Injectable so a test does not have to spend `HEARTBEAT_EVERY` to observe one.
+    pub fn set_heartbeat_every(&mut self, every: Duration) {
+        self.heartbeat_every = every;
+    }
+    /// Heartbeats written since this Engine was opened.
+    pub fn heartbeats(&self) -> usize {
+        self.heartbeats.get()
+    }
+    /// Timestamp of the last heartbeat written, or 0 if none.
+    pub fn last_heartbeat_ms(&self) -> i64 {
+        self.last_heartbeat_ms.get()
     }
 
     /// `map.toml` is authored while this process is alive (the UI writes it), so its
@@ -138,9 +158,13 @@ impl Engine {
             std::thread::sleep(Duration::from_millis(50));
         }
         let mut last_beat = Instant::now();
+        let every = self.heartbeat_every;
         let result = indexer.refresh_with(Some(Instant::now() + budget), || {
-            if last_beat.elapsed() >= HEARTBEAT_EVERY {
-                let _ = lock::heartbeat(&self.store, pid, now_ms());
+            if last_beat.elapsed() >= every {
+                let now = now_ms();
+                let _ = lock::heartbeat(&self.store, pid, now);
+                self.heartbeats.set(self.heartbeats.get() + 1);
+                self.last_heartbeat_ms.set(now);
                 last_beat = Instant::now();
             }
         });
@@ -595,9 +619,30 @@ mod tests {
     #[test]
     fn refresh_heartbeats_the_lock() {
         let (_dir, mut e) = engine();
+        // The default interval is longer than a fixture refresh takes, so nothing beats.
         let stats = e.refresh(Duration::from_secs(5)).unwrap();
         assert_eq!(stats.remaining, 0);
+        assert_eq!(e.heartbeats(), 0);
         assert_eq!(count(&e, "SELECT COUNT(*) FROM indexer_lock"), 0);
+
+        let t0 = crate::time::now_ms();
+        e.set_heartbeat_every(Duration::ZERO);
+        std::fs::write(
+            _dir.path().join("src/extra.ts"),
+            "export function extra(): void {}\n",
+        )
+        .unwrap();
+        e.refresh(Duration::from_secs(5)).unwrap();
+        assert!(e.heartbeats() > 0, "a long refresh must heartbeat");
+        assert!(e.last_heartbeat_ms() >= t0);
+        // The lock row itself moves with each heartbeat, and is released afterwards.
+        assert_eq!(count(&e, "SELECT COUNT(*) FROM indexer_lock"), 0);
+        assert!(lock::try_acquire(e.store(), 7, 1_000).unwrap());
+        lock::heartbeat(e.store(), 7, 2_000).unwrap();
+        assert_eq!(
+            count(&e, "SELECT heartbeat_at_ms FROM indexer_lock WHERE pid = 7"),
+            2_000
+        );
     }
 
     #[test]

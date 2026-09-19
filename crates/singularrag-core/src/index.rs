@@ -346,7 +346,7 @@ pub fn git_head(root: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::MapConfig;
-    use crate::fixture::write_ts_mini;
+    use crate::fixture::{write_rust_mini, write_ts_mini};
     use crate::store::Store;
 
     fn setup() -> (tempfile::TempDir, Store) {
@@ -451,6 +451,67 @@ mod tests {
             1
         );
         std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// The mirror of `full_index_records_files_symbols_refs_and_skips` for Rust, which
+    /// was never exercised end to end (`write_rust_mini` was dead code).
+    #[test]
+    fn full_index_of_a_rust_repo_records_files_symbols_refs_and_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rust_mini(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let cfg = MapConfig::default();
+        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let stats = ix.refresh(None).unwrap();
+        assert_eq!(stats.indexed, 2, "{stats:?}");
+        assert_eq!(stats.remaining, 0);
+
+        let reason: Option<String> = store
+            .conn()
+            .query_row(
+                "SELECT skipped_reason FROM files WHERE path = ?1",
+                ["Cargo.toml"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason.as_deref(), Some("unsupported-language"));
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM files WHERE lang = 'rust' AND skipped_reason IS NULL"
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM symbols WHERE name = 'parse' AND kind = 'function'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM symbols WHERE name = 'helper'"),
+            1
+        );
+        // `helper(s)` from lib.rs and the scoped `mini::parse(..)` call from main.rs.
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id WHERE r.name = 'parse' AND f.path = 'src/main.rs'"),
+            1
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM refs WHERE name = 'helper'"),
+            1
+        );
+        let sig: String = store
+            .conn()
+            .query_row(
+                "SELECT signature FROM symbols WHERE name = 'parse'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sig, "pub fn parse(s: &str) -> u32");
+        assert!(store.get_meta("index_version").unwrap().is_some());
     }
 
     #[test]
@@ -590,6 +651,38 @@ mod tests {
         assert_eq!(
             git_head(dir.path()).as_deref(),
             Some("fedcba9876543210fedcba9876543210fedcba98")
+        );
+    }
+
+    /// A packed repository has no loose `refs/heads/<branch>` file; HEAD then resolves
+    /// through `.git/packed-refs`.
+    #[test]
+    fn git_head_resolves_through_packed_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            dir.path().join(".git/packed-refs"),
+            "# pack-refs with: peeled fully-peeled sorted\n\
+             1111111111111111111111111111111111111111 refs/heads/other\n\
+             2222222222222222222222222222222222222222 refs/heads/main\n\
+             ^3333333333333333333333333333333333333333\n",
+        )
+        .unwrap();
+        assert_eq!(
+            git_head(dir.path()).as_deref(),
+            Some("2222222222222222222222222222222222222222")
+        );
+        // A loose ref still wins over packed-refs.
+        std::fs::create_dir_all(dir.path().join(".git/refs/heads")).unwrap();
+        std::fs::write(
+            dir.path().join(".git/refs/heads/main"),
+            "4444444444444444444444444444444444444444\n",
+        )
+        .unwrap();
+        assert_eq!(
+            git_head(dir.path()).as_deref(),
+            Some("4444444444444444444444444444444444444444")
         );
     }
 }
