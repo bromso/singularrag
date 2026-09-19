@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod engine;
 pub mod error;
 pub mod fixture;
 pub mod graph;

@@ -1,0 +1,346 @@
+//! The Engine: what the CLI, the MCP server and the UI call. Owns the store,
+//! the authored config and the session key; every retrieval is recorded.
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use rusqlite::params;
+
+use crate::config::MapConfig;
+use crate::index::{IndexStats, Indexer};
+use crate::map::{self, CUT_RECORDED};
+use crate::rank::{rank_symbols, ScoredSymbol};
+use crate::store::{lock, Store};
+use crate::time::now_ms;
+use crate::Result;
+
+pub const DB_FILE: &str = ".singularrag/index.db";
+pub const REFRESH_BUDGET: Duration = Duration::from_secs(2);
+pub const LOCK_WAIT_MS: u64 = 500;
+
+pub struct Engine {
+    root: PathBuf,
+    store: Store,
+    config: MapConfig,
+    session_key: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MapRequest {
+    pub query: Option<String>,
+    pub focus_files: Vec<String>,
+    pub budget_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MapResponse {
+    pub retrieval_id: i64,
+    pub text: String,
+    pub served: usize,
+    pub total: usize,
+    pub cut_recorded: usize,
+    pub stale_count: usize,
+}
+
+impl Engine {
+    pub fn open(root: &Path, session_key: &str) -> Result<Engine> {
+        let root = root.canonicalize()?;
+        let store = Store::open(&root.join(DB_FILE))?;
+        let config = MapConfig::load(&root)?;
+        Ok(Engine {
+            root,
+            store,
+            config,
+            session_key: session_key.to_string(),
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+    pub fn config(&self) -> &MapConfig {
+        &self.config
+    }
+    pub fn session_key(&self) -> &str {
+        &self.session_key
+    }
+
+    /// Refresh under the advisory lock. If the lock is held by a live process for
+    /// longer than `LOCK_WAIT_MS`, index nothing and report how many files are stale.
+    pub fn refresh(&self, budget: Duration) -> Result<IndexStats> {
+        let pid = std::process::id();
+        let indexer = Indexer::new(&self.store, &self.root, &self.config)?;
+        let wait_until = Instant::now() + Duration::from_millis(LOCK_WAIT_MS);
+        loop {
+            if lock::try_acquire(&self.store, pid, now_ms())? {
+                break;
+            }
+            if Instant::now() >= wait_until {
+                let remaining = indexer.stale_count()?;
+                return Ok(IndexStats {
+                    remaining,
+                    ..IndexStats::default()
+                });
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let result = indexer.refresh(Some(Instant::now() + budget));
+        lock::release(&self.store, pid)?;
+        result
+    }
+
+    fn index_meta(&self) -> Result<(String, Option<String>)> {
+        let version = self
+            .store
+            .get_meta("index_version")?
+            .unwrap_or_else(|| "000000".to_string());
+        let head = self.store.get_meta("git_head")?.filter(|h| !h.is_empty());
+        Ok((version, head))
+    }
+
+    pub fn repo_map(&self, req: &MapRequest) -> Result<MapResponse> {
+        let stats = self.refresh(REFRESH_BUDGET)?;
+        let budget = map::clamp_budget(req.budget_tokens);
+        let ranked = rank_symbols(
+            &self.store,
+            &self.config,
+            req.query.as_deref(),
+            &req.focus_files,
+        )?;
+        let served = map::fit(&ranked, budget);
+        let body = map::render(&ranked, served);
+        let (version, head) = self.index_meta()?;
+
+        let retrieval_id = self.record_retrieval(
+            "repo_map",
+            req.query.as_deref(),
+            &req.focus_files,
+            budget,
+            &version,
+            head.as_deref(),
+            stats.remaining,
+            &ranked,
+            served,
+        )?;
+        let text = format!(
+            "{}\n{}{}\n",
+            map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+            body,
+            map::footer(served, ranked.len())
+        );
+        Ok(MapResponse {
+            retrieval_id,
+            text,
+            served,
+            total: ranked.len(),
+            cut_recorded: (ranked.len() - served).min(CUT_RECORDED),
+            stale_count: stats.remaining,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_retrieval(
+        &self,
+        tool: &str,
+        query: Option<&str>,
+        focus_files: &[String],
+        budget: usize,
+        index_version: &str,
+        git_head: Option<&str>,
+        stale: usize,
+        ranked: &[ScoredSymbol],
+        served: usize,
+    ) -> Result<i64> {
+        let conn = self.store.conn();
+        conn.execute(
+            "INSERT INTO retrievals(session_key, tool, query, focus_files, budget, index_version, git_head, stale_count, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                self.session_key,
+                tool,
+                query,
+                serde_json::to_string(focus_files).unwrap_or_else(|_| "[]".into()),
+                budget as i64,
+                index_version,
+                git_head,
+                stale as i64,
+                now_ms()
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        let mut stmt = conn.prepare(
+            "INSERT INTO retrieval_items(retrieval_id, symbol_id, rank, score, served, reasons_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for (i, s) in ranked.iter().take(served + CUT_RECORDED).enumerate() {
+            stmt.execute(params![
+                id,
+                s.symbol_id,
+                (i + 1) as i64,
+                s.score,
+                i < served,
+                serde_json::to_string(&s.reasons).unwrap_or_else(|_| "{}".into())
+            ])?;
+        }
+        Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::write_ts_mini;
+    use crate::store::lock;
+
+    fn engine() -> (tempfile::TempDir, Engine) {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        let e = Engine::open(dir.path(), "test-session").unwrap();
+        (dir, e)
+    }
+
+    fn count(e: &Engine, sql: &str) -> i64 {
+        e.store().conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn repo_map_indexes_renders_and_records_provenance() {
+        let (_dir, e) = engine();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("session".into()),
+                focus_files: vec![],
+                budget_tokens: 1024,
+            })
+            .unwrap();
+        assert!(
+            resp.text.starts_with("# singularrag · index "),
+            "{}",
+            resp.text
+        );
+        assert!(resp.text.contains("· fresh ·"));
+        assert!(resp.text.contains("src/auth/session.ts:\n"));
+        assert!(resp
+            .text
+            .contains("export function createSession(user: User, ttl: number): Session {"));
+        assert!(resp.text.ends_with(&format!(
+            "{}\n",
+            crate::map::footer(resp.served, resp.total)
+        )));
+        assert_eq!(resp.stale_count, 0);
+        assert!(
+            !resp.text.contains("console.log"),
+            "bodies must never be served"
+        );
+
+        assert_eq!(count(&e, "SELECT COUNT(*) FROM retrievals"), 1);
+        let served = count(&e, "SELECT COUNT(*) FROM retrieval_items WHERE served = 1");
+        let cut = count(&e, "SELECT COUNT(*) FROM retrieval_items WHERE served = 0");
+        assert_eq!(served as usize, resp.served);
+        assert_eq!(cut as usize, resp.cut_recorded);
+        assert!(cut as usize <= crate::map::CUT_RECORDED);
+        let reasons: String = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT reasons_json FROM retrieval_items WHERE rank = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(reasons.contains("\"referenced_by\""));
+        let tool: String = e
+            .store()
+            .conn()
+            .query_row("SELECT tool FROM retrievals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tool, "repo_map");
+    }
+
+    #[test]
+    fn small_budget_cuts_and_records_up_to_25() {
+        let (_dir, e) = engine();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: None,
+                focus_files: vec![],
+                budget_tokens: 64,
+            })
+            .unwrap();
+        assert!(resp.served < resp.total);
+        assert_eq!(
+            resp.cut_recorded,
+            (resp.total - resp.served).min(crate::map::CUT_RECORDED)
+        );
+        assert!(resp.text.contains("more ranked below budget"));
+    }
+
+    #[test]
+    fn excludes_from_map_toml_change_the_next_retrieval() {
+        let (dir, e) = engine();
+        let before = e
+            .repo_map(&MapRequest {
+                query: None,
+                focus_files: vec![],
+                budget_tokens: 4096,
+            })
+            .unwrap();
+        assert!(before.text.contains("src/util/log.ts:"));
+        std::fs::create_dir_all(dir.path().join(".singularrag")).unwrap();
+        std::fs::write(
+            dir.path().join(".singularrag/map.toml"),
+            "[[exclude]]\npath = \"src/util/\"\n",
+        )
+        .unwrap();
+        let e2 = Engine::open(dir.path(), "test-session").unwrap();
+        let after = e2
+            .repo_map(&MapRequest {
+                query: None,
+                focus_files: vec![],
+                budget_tokens: 4096,
+            })
+            .unwrap();
+        assert!(!after.text.contains("src/util/log.ts:"));
+    }
+
+    #[test]
+    fn held_lock_yields_stale_header_without_indexing() {
+        let (_dir, e) = engine();
+        let other_pid = std::process::id() + 1;
+        assert!(lock::try_acquire(e.store(), other_pid, crate::time::now_ms()).unwrap());
+        let started = std::time::Instant::now();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: None,
+                focus_files: vec![],
+                budget_tokens: 1024,
+            })
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(LOCK_WAIT_MS));
+        assert!(resp.stale_count > 0);
+        assert!(resp.text.contains(&format!(
+            "STALE: {} files changed since index",
+            resp.stale_count
+        )));
+        assert_eq!(count(&e, "SELECT COUNT(*) FROM symbols"), 0);
+        // A stale heartbeat is reclaimable.
+        assert!(lock::try_acquire(
+            e.store(),
+            std::process::id(),
+            crate::time::now_ms() + lock::LOCK_STALE_MS + 1
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn lock_release_frees_it() {
+        let (_dir, e) = engine();
+        let now = crate::time::now_ms();
+        assert!(lock::try_acquire(e.store(), 1, now).unwrap());
+        assert!(!lock::try_acquire(e.store(), 2, now).unwrap());
+        lock::release(e.store(), 1).unwrap();
+        assert!(lock::try_acquire(e.store(), 2, now).unwrap());
+    }
+}
