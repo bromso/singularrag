@@ -99,12 +99,63 @@ thread_local! {
     static CONTEXT: RefCell<TagsContext> = RefCell::new(TagsContext::new());
 }
 
-fn signature_for(source: &str, byte_start: usize) -> String {
-    let line_start = source[..byte_start].rfind('\n').map_or(0, |i| i + 1);
+/// Byte offset inside `hay` where the signature stops: the first body opener, comment
+/// opener or string literal that is not nested inside `(...)`/`[...]`. `=>` is kept
+/// (it is part of an arrow signature); `{`, `//`, `/*`, quotes and — for Rust — `;`
+/// and `where` are dropped along with everything after them.
+fn signature_cut(hay: &str, lang: Language) -> Option<usize> {
+    let b = hay.as_bytes();
+    let rust = matches!(lang, Language::Rust);
+    let mut depth: i32 = 0;
+    for i in 0..b.len() {
+        match b[i] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'/' if i + 1 < b.len() && (b[i + 1] == b'/' || b[i + 1] == b'*') => return Some(i),
+            b'\'' | b'"' | b'`' => return Some(i),
+            b'{' if depth <= 0 => return Some(i),
+            b'=' if !rust && depth <= 0 && b.get(i + 1) == Some(&b'>') => return Some(i + 2),
+            b';' if rust && depth <= 0 => return Some(i),
+            b'w' if rust
+                && depth <= 0
+                && hay[i..].starts_with("where")
+                && (i == 0 || !b[i - 1].is_ascii_alphanumeric())
+                && !b.get(i + 5).is_some_and(|c| c.is_ascii_alphanumeric()) =>
+            {
+                return Some(i)
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The definition's line, cut at the body/comment/string so no body, comment or string
+/// literal ever reaches the agent (spec §9). The scan starts at the end of `name`, so an
+/// opener inside or before the name is never mistaken for the body.
+fn signature_for(
+    source: &str,
+    lang: Language,
+    byte_start: usize,
+    name: std::ops::Range<usize>,
+) -> String {
+    let mut line_start = source[..byte_start].rfind('\n').map_or(0, |i| i + 1);
     let line_end = source[byte_start..]
         .find('\n')
         .map_or(source.len(), |i| byte_start + i);
-    let line = source[line_start..line_end].trim();
+    // A nested one-liner (`cache({ cacheName: 'x', keyGenerator: () => …`) can carry a
+    // string or comment *before* the name; there the signature starts at the name.
+    let name_start = name.start.clamp(line_start, line_end);
+    if source[line_start..name_start].contains(['\'', '"', '`'])
+        || source[line_start..name_start].contains("//")
+        || source[line_start..name_start].contains("/*")
+    {
+        line_start = name_start;
+    }
+    let scan_from = name.end.clamp(line_start, line_end);
+    let cut = signature_cut(&source[scan_from..line_end], lang)
+        .map_or(line_end, |i| (scan_from + i).min(line_end));
+    let line = source[line_start..cut].trim();
     if line.chars().count() > SIGNATURE_MAX {
         let mut s: String = line.chars().take(SIGNATURE_MAX - 1).collect();
         s.push('…');
@@ -150,7 +201,7 @@ pub fn extract_tags(lang: Language, source: &str) -> Result<Vec<Tag>> {
                     is_definition: tag.is_definition,
                     line_start: line_of(source, tag.range.start),
                     line_end: line_of(source, tag.range.end.saturating_sub(1).max(tag.range.start)),
-                    signature: signature_for(source, tag.range.start),
+                    signature: signature_for(source, lang, tag.range.start, tag.name_range.clone()),
                 });
             }
             Ok(out)
@@ -220,8 +271,64 @@ export class SessionStore {
         assert_eq!(f.line_end, 5);
         assert_eq!(
             f.signature,
-            "export function createSession(user: User, ttl: number): Session {"
+            "export function createSession(user: User, ttl: number): Session"
         );
+    }
+
+    #[test]
+    fn signature_stops_before_body_comment_or_string() {
+        let src = r#"const onNotFound = (c: Context) => c.text('NotFound', 404)
+export function createSession(user: User, ttl: number): Session { return store.create(user, ttl); }
+const isRawRequest = (request: Request): request is Request => 'headers' in request // 'headers' exists only on Request
+const handler = ({ req, res }: Ctx) => req.json()
+app.use(cache({ cacheName: 'variants', keyGenerator: (c: Context) => c.req.url }))
+"#;
+        let tags = extract_tags(Language::TypeScript, src).unwrap();
+        let sig = |n: &str| {
+            tags.iter()
+                .find(|t| t.name == n && t.is_definition)
+                .unwrap_or_else(|| panic!("no definition {n} in {tags:?}"))
+                .signature
+                .clone()
+        };
+        assert_eq!(sig("onNotFound"), "const onNotFound = (c: Context) =>");
+        assert_eq!(
+            sig("createSession"),
+            "export function createSession(user: User, ttl: number): Session"
+        );
+        assert_eq!(
+            sig("isRawRequest"),
+            "const isRawRequest = (request: Request): request is Request =>"
+        );
+        assert_eq!(sig("handler"), "const handler = ({ req, res }: Ctx) =>");
+        for t in tags.iter().filter(|t| t.is_definition) {
+            assert!(
+                !t.signature.contains("//")
+                    && !t.signature.contains('\'')
+                    && !t.signature.contains('"'),
+                "leaked: {}",
+                t.signature
+            );
+        }
+    }
+
+    #[test]
+    fn rust_signature_stops_before_body_semicolon_or_where() {
+        let src = "pub fn parse(s: &str) -> u32 { helper(s) }\npub fn conv<T>(t: T) -> u32 where T: Into<u32> { t.into() }\n";
+        let tags = extract_tags(Language::Rust, src).unwrap();
+        let sig = |n: &str| {
+            tags.iter()
+                .find(|t| t.name == n && t.is_definition)
+                .unwrap_or_else(|| panic!("no definition {n} in {tags:?}"))
+                .signature
+                .clone()
+        };
+        assert_eq!(sig("parse"), "pub fn parse(s: &str) -> u32");
+        assert_eq!(sig("conv"), "pub fn conv<T>(t: T) -> u32");
+        // A trait method's `;` ends the signature too (the Rust tags query does not
+        // capture bare signatures as definitions, so this rule is checked directly).
+        assert_eq!(signature_cut("(&self) -> usize;", Language::Rust), Some(16));
+        assert_eq!(signature_cut("(a: u32) -> u32", Language::Rust), None);
     }
 
     #[test]

@@ -309,7 +309,7 @@ mod tests {
         assert!(resp.text.contains("src/auth/session.ts:\n"));
         assert!(resp
             .text
-            .contains("export function createSession(user: User, ttl: number): Session {"));
+            .contains("export function createSession(user: User, ttl: number): Session\n"));
         assert!(resp.text.ends_with(&format!(
             "{}\n",
             crate::map::footer(resp.served, resp.total)
@@ -342,6 +342,40 @@ mod tests {
             .query_row("SELECT tool FROM retrievals", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tool, "repo_map");
+    }
+
+    /// Spec §9: rendered rows carry identifiers, signatures and paths only. One-line
+    /// arrow definitions used to arrive with their whole body, quotes and trailing comment.
+    #[test]
+    fn rendered_rows_never_carry_bodies_comments_or_strings() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        std::fs::write(
+            dir.path().join("src/oneline.ts"),
+            "export const onNotFound = (c: Context) => c.text('NotFound', 404)\nexport const isRawRequest = (request: Request): request is Request => 'headers' in request // 'headers' exists only on Request\n",
+        )
+        .unwrap();
+        let e = Engine::open(dir.path(), "test-session").unwrap();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: None,
+                focus_files: vec![],
+                budget_tokens: 4096,
+            })
+            .unwrap();
+        for line in resp.text.lines().filter(|l| l.starts_with(' ')) {
+            assert!(
+                !line.contains("//") && !line.contains('\'') && !line.contains('"'),
+                "leaked: {line}\n{}",
+                resp.text
+            );
+        }
+        assert!(
+            resp.text
+                .contains("export const onNotFound = (c: Context) =>\n"),
+            "{}",
+            resp.text
+        );
     }
 
     #[test]

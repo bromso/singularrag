@@ -203,7 +203,7 @@ mod tests {
         let (_dir, e) = engine();
         let hits = find_symbol(e.store(), &MapConfig::default(), "createSession", None, 1).unwrap();
         let text = render_find(&hits);
-        assert!(text.starts_with("src/auth/session.ts:3  function  export function createSession(user: User, ttl: number): Session {\n   referenced from 2 files: src/http/middleware.ts (2), src/cli/login.ts (1)\n"), "{text}");
+        assert!(text.starts_with("src/auth/session.ts:3  function  export function createSession(user: User, ttl: number): Session\n   referenced from 2 files: src/http/middleware.ts (2), src/cli/login.ts (1)\n"), "{text}");
         assert_eq!(render_find(&[]), "no symbols matched\n");
     }
 
@@ -220,7 +220,7 @@ mod tests {
         assert!(resp.text.starts_with("# singularrag · index "));
         assert!(resp
             .text
-            .contains("src/util/log.ts:1  function  export function log(msg: string): void {"));
+            .contains("src/util/log.ts:1  function  export function log(msg: string): void"));
         let tool: String = e
             .store()
             .conn()
