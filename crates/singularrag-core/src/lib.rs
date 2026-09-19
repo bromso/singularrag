@@ -6,8 +6,10 @@
 pub mod config;
 pub mod error;
 pub mod fixture;
+pub mod graph;
 pub mod index;
 pub mod lang;
+pub mod rank;
 pub mod secrets;
 pub mod store;
 pub mod time;
