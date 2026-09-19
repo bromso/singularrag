@@ -1,7 +1,7 @@
 //! File-level multigraph: one edge per (referencing file, defining file, name),
 //! weight = ref count / number of files defining that name. Aider's construction.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::config::MapConfig;
 use crate::store::Store;
@@ -25,7 +25,12 @@ pub struct Edge {
 pub struct FileGraph {
     pub nodes: Vec<FileNode>,
     pub index_of: HashMap<i64, usize>,
+    /// PageRank input: edges between *different* files.
     pub edges: Vec<Edge>,
+    /// A file referencing a symbol it defines itself. Not a dependency between files,
+    /// so it is kept out of PageRank, but it is a real use of the symbol and so counts
+    /// for score distribution and for `referenced_by`.
+    pub self_edges: Vec<Edge>,
     /// name -> number of distinct (included) files that define it.
     pub definer_count: HashMap<String, usize>,
 }
@@ -33,7 +38,12 @@ pub struct FileGraph {
 /// Identifiers mentioned in the query get their edges weighted ×10 (Aider's rule).
 pub const QUERY_IDENT_MULTIPLIER: f64 = 10.0;
 
-pub fn build_graph(store: &Store, config: &MapConfig, query_terms: &[String]) -> Result<FileGraph> {
+pub fn build_graph(
+    store: &Store,
+    config: &MapConfig,
+    query_terms: &[String],
+    fts_names: &HashSet<String>,
+) -> Result<FileGraph> {
     let conn = store.conn();
     let mut g = FileGraph::default();
 
@@ -84,25 +94,34 @@ pub fn build_graph(store: &Store, config: &MapConfig, query_terms: &[String]) ->
             continue;
         };
         let mut w = count as f64 / dsts.len() as f64;
-        if name_matches_query(&name, query_terms) {
+        if query_ident_match(&name, query_terms, fts_names) {
             w *= QUERY_IDENT_MULTIPLIER;
         }
         for &dst in dsts {
-            // A file referencing a symbol it defines itself is not a dependency between
-            // files and would distort PageRank, so self-edges are dropped. The 1/N weight
-            // above is still computed from the full definer count (including this file).
-            if dst == src {
-                continue;
-            }
-            g.edges.push(Edge {
+            // Self-edges would distort PageRank (a file cannot make itself important),
+            // so they are collected separately. The 1/N weight above is still computed
+            // from the full definer count, including this file.
+            let edge = Edge {
                 src,
                 dst,
                 name: name.clone(),
                 weight: w,
-            });
+            };
+            if dst == src {
+                g.self_edges.push(edge);
+            } else {
+                g.edges.push(edge);
+            }
         }
     }
     Ok(g)
+}
+
+/// A name counts as "named by the query" when the split-token comparison matches it or
+/// when FTS matched it. The FTS arm is what makes stemming symmetric: "composed" reaches
+/// `compose` through the porter tokenizer, and the term comparison alone never would.
+pub fn query_ident_match(name: &str, terms: &[String], fts_names: &HashSet<String>) -> bool {
+    name_matches_query(name, terms) || fts_names.contains(name)
 }
 
 /// A symbol name matches the query when every one of its split parts is a query term,
