@@ -9,6 +9,7 @@ pub mod fixture;
 pub mod graph;
 pub mod index;
 pub mod lang;
+pub mod map;
 pub mod rank;
 pub mod secrets;
 pub mod store;
