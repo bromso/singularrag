@@ -19,6 +19,10 @@ pub struct FindHit {
     pub signature: String,
     pub referenced_from: Vec<RefBy>,
     pub total_ref_files: usize,
+    /// References from the defining file itself. Counted separately because a symbol
+    /// used only inside its own file is used, and the "referenced from N files" line
+    /// would otherwise read as zero.
+    pub in_file_refs: i64,
 }
 
 pub fn find_symbol(
@@ -28,7 +32,7 @@ pub fn find_symbol(
     kind: Option<&str>,
     limit: usize,
 ) -> Result<Vec<FindHit>> {
-    let limit = limit.clamp(1, MAX_LIMIT);
+    let limit = limit.clamp(1, MAX_LIMIT + crate::map::CUT_RECORDED);
     let conn = store.conn();
     let term = name.replace('"', "\"\"");
     let parts = crate::tokens::split_identifier(name);
@@ -65,6 +69,7 @@ pub fn find_symbol(
         "SELECT f.path, COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
          WHERE r.name = ?1 AND r.file_id != ?2 GROUP BY f.path ORDER BY COUNT(*) DESC, f.path",
     )?;
+    let mut own = conn.prepare("SELECT COUNT(*) FROM refs WHERE name = ?1 AND file_id = ?2")?;
 
     let mut hits = Vec::new();
     for row in rows {
@@ -91,6 +96,7 @@ pub fn find_symbol(
         let total_ref_files = all.len();
         let mut referenced_from = all;
         referenced_from.truncate(5);
+        let in_file_refs: i64 = own.query_row(params![sym_name, file_id], |r| r.get(0))?;
         hits.push(FindHit {
             symbol_id,
             path,
@@ -100,6 +106,7 @@ pub fn find_symbol(
             signature,
             referenced_from,
             total_ref_files,
+            in_file_refs,
         });
         if hits.len() >= limit {
             break;
@@ -118,8 +125,13 @@ pub fn render_find(hits: &[FindHit]) -> String {
             "{}:{}  {}  {}\n",
             h.path, h.line, h.kind, h.signature
         ));
+        let in_file = if h.in_file_refs > 0 {
+            format!(", {} in this file", h.in_file_refs)
+        } else {
+            String::new()
+        };
         if h.total_ref_files == 0 {
-            out.push_str("   referenced from 0 files\n");
+            out.push_str(&format!("   referenced from 0 files{in_file}\n"));
         } else {
             let list = h
                 .referenced_from
@@ -133,7 +145,7 @@ pub fn render_find(hits: &[FindHit]) -> String {
                 ""
             };
             out.push_str(&format!(
-                "   referenced from {} files: {list}{more}\n",
+                "   referenced from {} files: {list}{more}{in_file}\n",
                 h.total_ref_files
             ));
         }
@@ -179,6 +191,25 @@ mod tests {
             .referenced_from
             .iter()
             .all(|r| !r.path.starts_with("src/cli/")));
+    }
+
+    /// `r.file_id != ?2` hides references from the defining file, so a symbol used only
+    /// inside its own file used to read "referenced from 0 files" with nothing else said.
+    #[test]
+    fn in_file_references_are_counted_and_rendered() {
+        let (_dir, e) = engine();
+        let hits = find_symbol(e.store(), &MapConfig::default(), "SessionStore", None, 10).unwrap();
+        assert_eq!(hits[0].name, "SessionStore");
+        assert_eq!(hits[0].total_ref_files, 0);
+        assert_eq!(
+            hits[0].in_file_refs, 1,
+            "new SessionStore() in its own file"
+        );
+        assert!(
+            render_find(&hits[..1]).contains("   referenced from 0 files, 1 in this file\n"),
+            "{}",
+            render_find(&hits[..1])
+        );
     }
 
     #[test]
@@ -241,5 +272,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!((budget, limit_n), (None, Some(10)));
+    }
+
+    /// `find` shares `repo_map`'s cut semantics: the candidates below the limit are
+    /// recorded as `served = 0` instead of everything being recorded as served.
+    #[test]
+    fn candidates_below_the_limit_are_recorded_as_cut() {
+        let (_dir, e) = engine();
+        let resp = e
+            .find_symbol(&FindRequest {
+                name: "session".into(),
+                kind: None,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(resp.hits, 1);
+        assert_eq!(resp.text.matches("   referenced from").count(), 1);
+        let counts = |served: i64| -> i64 {
+            e.store()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM retrieval_items WHERE retrieval_id = ?1 AND served = ?2",
+                    rusqlite::params![resp.retrieval_id, served],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(counts(1), 1);
+        assert!(counts(0) > 0, "cut candidates must be recorded");
+        assert!(counts(0) <= crate::map::CUT_RECORDED as i64);
     }
 }

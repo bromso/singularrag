@@ -168,16 +168,23 @@ impl Engine {
 
     pub fn find_symbol(&self, req: &FindRequest) -> Result<FindResponse> {
         let stats = self.refresh(REFRESH_BUDGET)?;
-        let hits = crate::find::find_symbol(
+        // `find` shares `repo_map`'s cut semantics: look up the served hits plus the
+        // candidates just below the limit, serve the first `limit` and record the rest
+        // as `served = 0` so the provenance rows of the two tools are comparable.
+        let limit = req.limit.clamp(1, crate::find::MAX_LIMIT);
+        let candidates = crate::find::find_symbol(
             &self.store,
             &self.config,
             &req.name,
             req.kind.as_deref(),
-            req.limit,
+            limit + CUT_RECORDED,
         )?;
+        let served = candidates.len().min(limit);
+        let hits = &candidates[..served];
         let (version, head) = self.index_meta()?;
-        // Record hits as served items with minimal reasons (exact/prefix match).
-        let ranked: Vec<ScoredSymbol> = hits
+        // The score is the FTS rank order (1, 1/2, 1/3 …): `find` does not run PageRank,
+        // and the reasons say so (`fts_hit`, `find:<name>` seed).
+        let ranked: Vec<ScoredSymbol> = candidates
             .iter()
             .enumerate()
             .map(|(i, h)| ScoredSymbol {
@@ -204,22 +211,22 @@ impl Engine {
             Some(&req.name),
             &[],
             None,
-            Some(req.limit),
+            Some(limit),
             &version,
             head.as_deref(),
             stats.remaining,
             &ranked,
-            ranked.len(),
+            served,
         )?;
         let text = format!(
             "{}\n{}",
             map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
-            crate::find::render_find(&hits)
+            crate::find::render_find(hits)
         );
         Ok(FindResponse {
             retrieval_id,
             text,
-            hits: hits.len(),
+            hits: served,
             stale_count: stats.remaining,
         })
     }
