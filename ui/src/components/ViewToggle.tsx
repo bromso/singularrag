@@ -20,7 +20,7 @@ export function ViewToggle({ value, onChange }: { value: View; onChange: (v: Vie
     <div role="radiogroup" aria-label="View" className="inline-flex rounded border">
       {OPTIONS.map((o, i) => (
         <button key={o.value} ref={(el) => { refs.current[i] = el; }} type="button" role="radio" aria-checked={value === o.value} tabIndex={value === o.value ? 0 : -1}
-          className="px-2 py-1 text-sm aria-checked:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+          className="px-2 py-1 text-sm aria-checked:bg-foreground aria-checked:text-background focus-visible:outline-2 focus-visible:outline-ring"
           onClick={() => onChange(o.value)}
           onKeyDown={(e) => {
             if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); move(i, 1); }

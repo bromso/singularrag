@@ -35,11 +35,11 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLo
       setText(saved);
     }
   }, [row?.path, symbol, saved]);
-  if (!row) return <section id="detail-panel" aria-label="Details" className="border-l p-3 text-sm text-muted-foreground">Select a file or symbol.</section>;
+  if (!row) return <section id="detail-panel" aria-label="Details" className="min-h-0 overflow-auto border-l p-3 text-sm text-muted-foreground">Select a file or symbol.</section>;
   const item = row.kind === "symbol" ? row.symbol.item : null;
   const blastShown = row.kind === "symbol" && !!blast && blast.root.path === row.path && blast.root.symbol === row.symbol.symbol.name;
   return (
-    <section id="detail-panel" aria-label="Details" className="flex flex-col gap-3 border-l p-3">
+    <section id="detail-panel" aria-label="Details" className="flex min-h-0 flex-col gap-3 overflow-auto border-l p-3">
       {/* The row action buttons are `aria-controls="detail-panel"` and move focus here,
           so a screen-reader user lands on what they just opened (I10). */}
       <h2 id="detail-heading" tabIndex={-1} className="font-mono text-sm font-semibold">{symbol ? `${row.path} :: ${symbol}` : row.path}</h2>
@@ -56,7 +56,7 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLo
           {isExcluded(map, row.path) ? "Include file" : "Exclude file"}
         </Button>
       </div>
-      <div className="flex flex-wrap items-center gap-2 text-sm">
+      <div role="group" aria-labelledby="boundaries-label" className="flex flex-wrap items-center gap-2 text-sm">
         <span id="boundaries-label">Boundaries</span>
         {boundariesOf(map, row.path).map((name) => (
           <span key={name} className="inline-flex items-center gap-1 rounded border px-2 py-0.5">
@@ -64,7 +64,13 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLo
             <Button type="button" variant="ghost" size="sm" aria-label={`Remove from ${name}`} onClick={() => onRemoveBoundary(name, row.path)}>×</Button>
           </span>
         ))}
-        <form className="inline-flex items-center gap-1" onSubmit={(e) => { e.preventDefault(); onAddBoundary(newBoundary, row.path); setNewBoundary(""); }}>
+        <form className="inline-flex items-center gap-1" onSubmit={(e) => {
+          e.preventDefault();
+          const n = newBoundary.trim();
+          setNewBoundary("");
+          if (!n || boundariesOf(map, row.path).includes(n)) return;
+          onAddBoundary(newBoundary, row.path);
+        }}>
           <label className="sr-only" htmlFor="boundary-input">Add to boundary</label>
           <input id="boundary-input" list="boundary-names" value={newBoundary} onChange={(e) => setNewBoundary(e.target.value)} className="w-32 rounded border bg-background px-2 py-1" placeholder="boundary name" />
           <datalist id="boundary-names">{boundaryNames(map).map((n) => <option key={n} value={n} />)}</datalist>
@@ -77,7 +83,7 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLo
         </Button>
       )}
       {row.kind === "symbol" && (
-        <Button type="button" variant="outline" aria-pressed={blastShown} onClick={() => onToggleBlast(row.path, row.symbol.symbol.name)} disabled={blastLoading}>
+        <Button type="button" variant="outline" aria-pressed={blastShown} onClick={() => onToggleBlast(row.path, row.symbol.symbol.name)} aria-busy={blastLoading}>
           {blastShown ? "Hide blast radius" : "Show blast radius"}
         </Button>
       )}

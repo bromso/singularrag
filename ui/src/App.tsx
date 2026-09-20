@@ -4,7 +4,7 @@ import { ApiError, api, setToken, tokenFromFragment } from "@/api/client";
 import { subscribe } from "@/api/events";
 import type { BlastResult, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
 import { joinRetrieval } from "@/lib/join";
-import { addToBoundary, noteFor, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
+import { addToBoundary, boundariesOf, noteFor, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
 import { fileStatusOf } from "@/lib/mapStyle";
 import { summaryLabel } from "@/lib/mapSummary";
 import { DetailPanel } from "@/components/DetailPanel";
@@ -164,19 +164,34 @@ export function App() {
     setTimeout(() => (document.querySelector('[role="treegrid"]') as HTMLElement | null)?.focus(), 0);
   };
 
+  // Counted over the graph's own file set, not every tree row: an excluded file is a
+  // row (the tree still lists it) but not a graph node, and must not be counted.
+  const graphPaths = useMemo(() => new Set((graph?.nodes ?? []).map((n) => n.path)), [graph]);
   const fileCounts = useMemo(() => ({
-    served: rows.filter((r) => fileStatusOf(r, true) === "served").length,
-    cut: rows.filter((r) => fileStatusOf(r, true) === "cut").length,
-  }), [rows]);
+    served: rows.filter((r) => graphPaths.has(r.path) && fileStatusOf(r, true) === "served").length,
+    cut: rows.filter((r) => graphPaths.has(r.path) && fileStatusOf(r, true) === "cut").length,
+  }), [rows, graphPaths]);
   const mapLabel = summaryLabel(graph?.nodes.length ?? 0, detail ? { id: detail.id, ...fileCounts } : null, map.boundary.length);
+
+  // Sorted-path JSON, so add-then-remove-in-a-different-order still reads as unchanged.
+  const excludeKey = (exclude: MapConfig["exclude"]) => JSON.stringify(exclude.map((t) => t.path).slice().sort());
 
   // `edit` is applied when the save's turn comes, to the config as it is then — not at
   // click time — so the second of two rapid clicks does not discard the first.
   const save = (edit: (cfg: MapConfig) => MapConfig) => {
     saveQueue.current = saveQueue.current.then(async () => {
+      const prevExcludeKey = excludeKey(mapRef.current.exclude);
       try {
-        applyMapDoc(await api.saveMap(edit(mapRef.current), versionRef.current));
+        const doc = await api.saveMap(edit(mapRef.current), versionRef.current);
+        applyMapDoc(doc);
         toast.success("Saved. Applies to the next retrieval.");
+        // The map (nodes/edges) is a separate document from map.toml; a changed exclude
+        // set can add or remove files from it, so the map must be refetched to match.
+        if (excludeKey(doc.exclude) !== prevExcludeKey) {
+          const g = await api.graph();
+          graphRef.current = g.index_version;
+          setGraph(g);
+        }
       } catch (e: unknown) {
         if (e instanceof ApiError && e.status === 409 && e.current) {
           applyMapDoc(e.current as MapDoc);
@@ -202,7 +217,7 @@ export function App() {
       </header>
       <RetrievalsRail retrievals={retrievals} selected={selected} onSelect={setSelected}
         onMore={() => api.retrievals(retrievals[retrievals.length - 1]?.id).then((more) => setRetrievals((rs) => [...rs, ...more]))} />
-      <main className={view === "tree" ? "overflow-auto" : "relative overflow-hidden"}>
+      <main className={view === "tree" ? "min-h-0 overflow-auto" : "relative min-h-0 overflow-hidden"}>
         {view === "tree" ? (
           <RepoTree rows={rows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
         ) : (
@@ -221,7 +236,7 @@ export function App() {
         blast={blast} blastLoading={blastLoading} onToggleBlast={toggleBlast}
         expandedPath={expandedPath} onToggleExpand={toggleExpand}
         onAddBoundary={(n, p) => save((c) => addToBoundary(c, n, p))}
-        onRemoveBoundary={(n, p) => save((c) => removeFromBoundary(c, n, p))} />
+        onRemoveBoundary={(n, p) => { if (boundariesOf(map, p).includes(n)) save((c) => removeFromBoundary(c, n, p)); }} />
       <LiveRegion messages={messages} />
       <Toaster />
     </div>

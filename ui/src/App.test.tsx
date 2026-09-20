@@ -27,6 +27,12 @@ let blastGate: Promise<void> | null = null;
 // live SSE "change" event (another agent's retrieval) without a real
 // EventSource, by invoking the captured listener directly.
 let changeHandler: ((e: { data: string }) => void) | null = null;
+// When set, `/api/graph` answers with these nodes instead of mirroring `tree` — lets a
+// test simulate a file excluded from the map (present in the tree/retrieval, absent
+// from the graph) without a second permanent fixture file.
+let graphNodesOverride: { path: string; symbols: number; lang: string | null }[] | null = null;
+// Extra `items` appended to the `/api/retrievals/7` response.
+let extraRetrievalItems: unknown[] = [];
 
 beforeEach(() => {
   // The Tree/Map choice persists in localStorage (Task 6); clear it so one test's
@@ -40,6 +46,8 @@ beforeEach(() => {
   blastGate = null;
   retrievalList = [retrieval];
   changeHandler = null;
+  graphNodesOverride = null;
+  extraRetrievalItems = [];
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
@@ -56,9 +64,9 @@ beforeEach(() => {
       if (blastGate) await blastGate;
       return json({ root: { path: "src/auth/session.ts", symbol: "createSession" }, files: [{ path: "src/http/middleware.ts", depth: 1, via: "createSession" }], truncated: null });
     }
-    if (url.endsWith("/api/graph")) return json({ index_version: "abc123", nodes: tree.map((f) => ({ path: f.path, symbols: f.symbols.length, lang: f.lang })), edges: [] });
+    if (url.endsWith("/api/graph")) return json({ index_version: "abc123", nodes: graphNodesOverride ?? tree.map((f) => ({ path: f.path, symbols: f.symbols.length, lang: f.lang })), edges: [] });
     if (url.includes("/api/retrievals?")) return json(retrievalList);
-    if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }] });
+    if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }, ...extraRetrievalItems] });
     if (url.endsWith("/api/tree")) return json(tree);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
     // GET /api/map returns a fresh object (new identity) each call, reflecting
@@ -249,6 +257,28 @@ describe("App", () => {
       }
     }
   });
+  test("the boundaries line is a labelled group", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await user.click(screen.getAllByRole("button", { name: /Actions for src\/auth\/session.ts/ })[0]);
+    const panel = screen.getByRole("region", { name: "Details" });
+    expect(within(panel).getByRole("group", { name: "Boundaries" })).toBeTruthy();
+  });
+
+  test("submitting an empty boundary name is a no-op, not a save", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await user.click(screen.getAllByRole("button", { name: /Actions for src\/auth\/session.ts/ })[0]);
+    const input = await screen.findByLabelText("Add to boundary") as HTMLInputElement;
+    expect(input.value).toBe("");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    const putCalls = () => (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).endsWith("/api/map") && c[1]?.method === "PUT").length;
+    expect(putCalls()).toBe(0);
+    expect(saved).toBeNull();
+  });
+
   test("a file can be added to a new boundary and removed again", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -260,6 +290,21 @@ describe("App", () => {
     await waitFor(() => expect(saved?.boundary).toEqual([{ name: "auth", paths: ["src/auth/session.ts"] }]));
     await user.click(await screen.findByRole("button", { name: "Remove from auth" }));
     await waitFor(() => expect(saved?.boundary).toEqual([]));
+  });
+
+  test("excluding a file refetches the graph so the map reflects it", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await user.click(within(grid).getByText("src/auth/session.ts"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    const graphCallsBefore = (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).endsWith("/api/graph")).length;
+    await user.click(within(panel).getByRole("button", { name: "Exclude file" }));
+    await waitFor(() => expect(saved).not.toBeNull());
+    await waitFor(() => {
+      const graphCallsAfter = (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).endsWith("/api/graph")).length;
+      expect(graphCallsAfter).toBeGreaterThan(graphCallsBefore);
+    });
   });
 
   test("a symbol row can show its blast radius in the panel", async () => {
@@ -309,10 +354,16 @@ describe("App", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /repo_map/ }));
     await user.click(await screen.findByRole("button", { name: "Actions for createSession" }));
-    await user.click(await screen.findByRole("button", { name: "Show blast radius" }));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Show blast radius" }) as HTMLButtonElement).disabled).toBe(true));
+    const button = await screen.findByRole("button", { name: "Show blast radius" });
+    await user.click(button);
+    await waitFor(() => expect(button.getAttribute("aria-busy")).toBe("true"));
     const blastCalls = () => (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).includes("/api/blast?")).length;
     expect(blastCalls()).toBe(1);
+    // The in-flight guard in App.toggleBlast, not `disabled`, prevents a second fetch —
+    // the button stays focusable and keeps keyboard focus across the click (I9).
+    await user.click(button);
+    expect(blastCalls()).toBe(1);
+    expect(document.activeElement).toBe(button);
     release();
     const list = await screen.findByRole("list", { name: "Blast radius" });
     expect(list).toBeTruthy();
@@ -323,7 +374,7 @@ describe("App", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /repo_map/ }));
     await user.click(screen.getByRole("radio", { name: "Map" }));
-    const img = await screen.findByRole("img", { name: /Map of 1 files\. Retrieval 7: 1 served, 0 cut, 0 untouched\. 0 boundaries\./ });
+    const img = await screen.findByRole("img", { name: /Map of 1 file\. Retrieval 7: 1 served, 0 cut, 0 untouched\. 0 boundaries\./ });
     expect(img).toBeTruthy();
     expect(localStorage.getItem("singularrag.view")).toBe("map");
     await waitFor(() => expect(screen.getByRole("log", { name: "Announcements" }).textContent).toContain("Map layout ready"));
@@ -332,6 +383,25 @@ describe("App", () => {
     const ae = document.activeElement;
     expect(ae?.getAttribute("role") === "treegrid" || (ae?.getAttribute("role") === "row" && ae.closest('[role="treegrid"]') !== null)).toBe(true);
     expect(localStorage.getItem("singularrag.view")).toBe("tree");
+  });
+
+  test("the summary counts only files present in the graph, not every row", async () => {
+    const secondFile = { path: "src/util/log.ts", lang: "typescript", skipped_reason: null, symbols: [{ id: 2, name: "log", kind: "function", line_start: 1, line_end: 2, signature: "export function log(msg: string): void" }] };
+    tree.push(secondFile);
+    // log.ts is served in the retrieval but excluded from the graph; the summary must
+    // not count it (I13: counted over the graph's node paths, not every tree row).
+    graphNodesOverride = [{ path: "src/auth/session.ts", symbols: 1, lang: "typescript" }];
+    extraRetrievalItems = [{ rank: 2, symbol_id: 2, path: "src/util/log.ts", name: "log", line_start: 1, score: 0.05, served: true, reasons: r }];
+    try {
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+      await user.click(screen.getByRole("radio", { name: "Map" }));
+      const img = await screen.findByRole("img", { name: /Map of 1 file\. Retrieval 7: 1 served, 0 cut, 0 untouched\. 0 boundaries\./ });
+      expect(img).toBeTruthy();
+    } finally {
+      tree.pop();
+    }
   });
 
   test("selecting a node on the map focuses the same row in the panel", async () => {
@@ -343,6 +413,13 @@ describe("App", () => {
     const s = (globalThis as any).__sigma.instances.at(-1);
     await act(async () => { s.emit("clickNode", { node: "src/auth/session.ts" }); });
     expect(screen.getByRole("heading", { name: "src/auth/session.ts" })).toBeTruthy();
+  });
+
+  test("the details panel scrolls its own overflow instead of the page", async () => {
+    render(<App />);
+    const panel = await screen.findByRole("region", { name: "Details" });
+    expect(panel.className).toContain("overflow-auto");
+    expect(panel.className).toContain("min-h-0");
   });
 
   test("the map view is axe clean", async () => {

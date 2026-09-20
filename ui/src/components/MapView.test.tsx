@@ -113,6 +113,128 @@ describe("MapView", () => {
     expect(calls).toContain("fillText");
   });
 
+  test("a prefers-color-scheme change re-reads the palette and updates sigma in place", async () => {
+    const listeners: Record<string, (e: unknown) => void> = {};
+    const mql = {
+      matches: false,
+      addEventListener: (name: string, cb: (e: unknown) => void) => { listeners[name] = cb; },
+      removeEventListener: (name: string, cb: (e: unknown) => void) => { if (listeners[name] === cb) delete listeners[name]; },
+    };
+    const originalMatchMedia = window.matchMedia;
+    (window as any).matchMedia = () => mql;
+    try {
+      const p = props();
+      render(<MapView {...p} />);
+      await act(async () => {});
+      const s = Fake.instances[0];
+      const setSettingSpy = mock(s.setSetting.bind(s));
+      s.setSetting = setSettingSpy;
+      const refreshesBefore = s.refreshes;
+      expect(listeners.change).toBeDefined();
+      act(() => listeners.change?.({ matches: true }));
+      expect(setSettingSpy.mock.calls.some((c) => c[0] === "labelColor")).toBe(true);
+      expect(setSettingSpy.mock.calls.some((c) => c[0] === "defaultDrawNodeHover")).toBe(true);
+      expect(s.refreshes).toBeGreaterThan(refreshesBefore);
+      expect(Fake.instances).toHaveLength(1);
+    } finally {
+      (window as any).matchMedia = originalMatchMedia;
+    }
+  });
+
+  test("the hover drawer fills a box with the palette background then draws the label in the label colour", async () => {
+    const p = props();
+    render(<MapView {...p} />);
+    await act(async () => {});
+    const s = Fake.instances[0];
+    const drawer = s.settings.defaultDrawNodeHover as (ctx: unknown, data: Record<string, unknown>, settings: Record<string, unknown>) => void;
+    expect(typeof drawer).toBe("function");
+    const order: string[] = [];
+    const target: Record<string, unknown> = {};
+    const ctx = new Proxy(target, {
+      get: (t, k) => {
+        if (k === "fillStyle") return t.fillStyle;
+        if (k === "measureText") return () => ({ width: 40 });
+        return (..._a: unknown[]) => { order.push(String(k)); return undefined; };
+      },
+      set: (t, k, v) => { t[k as string] = v; if (k === "fillStyle") order.push(`fillStyle:${v}`); return true; },
+    });
+    drawer(ctx, { x: 10, y: 10, size: 4, label: "src/a.ts" }, { labelSize: 12, labelFont: "system-ui", labelWeight: "normal" });
+    expect(order.some((e) => e === "fillRect" || e === "fill")).toBe(true);
+    expect(order).toContain("fillText");
+    const bgIdx = order.indexOf("fillStyle:#ffffff");
+    const labelIdx = order.indexOf("fillStyle:#111827");
+    const textIdx = order.indexOf("fillText");
+    expect(bgIdx).toBeGreaterThanOrEqual(0);
+    expect(labelIdx).toBeGreaterThan(bgIdx);
+    expect(textIdx).toBeGreaterThan(labelIdx);
+  });
+
+  test("camera state survives a payload remount (index version change)", async () => {
+    const p = props();
+    const { rerender } = render(<MapView {...p} />);
+    await act(async () => {});
+    const s1 = Fake.instances[0];
+    s1.camera.setState({ x: 0.3, y: 0.7, ratio: 2 });
+    const v2 = { ...payload, index_version: "v10" };
+    rerender(<MapView {...p} payload={v2} />);
+    await act(async () => {});
+    expect(Fake.instances).toHaveLength(2);
+    const s2 = Fake.instances[1];
+    expect(s2.camera.state).toMatchObject({ x: 0.3, y: 0.7, ratio: 2 });
+  });
+
+  test("the hull canvas is sized for devicePixelRatio and scaled back down with a transform", async () => {
+    const originalDpr = window.devicePixelRatio;
+    (window as any).devicePixelRatio = 2;
+    try {
+      const p = props();
+      render(<MapView {...p} />);
+      await act(async () => {});
+      const s = Fake.instances[0];
+      const canvas = screen.getByTestId("hull-layer") as HTMLCanvasElement;
+      const setTransformCalls: unknown[][] = [];
+      (canvas as any).getContext = () => new Proxy({}, { get: (_t, k) => (k === "canvas" ? canvas : (...a: unknown[]) => { if (k === "setTransform") setTransformCalls.push(a); return undefined; }) });
+      act(() => s.emit("afterRender", {}));
+      expect(canvas.width).toBe(800);
+      expect(canvas.height).toBe(600);
+      expect(setTransformCalls.length).toBeGreaterThan(0);
+      expect(setTransformCalls[0][0]).toBe(2);
+    } finally {
+      (window as any).devicePixelRatio = originalDpr;
+    }
+  });
+
+  test("expanding a file whose symbols share a name and start line does not throw (merged, not duplicated)", async () => {
+    const p = props();
+    const clash1 = sym("dup", 1, "served");
+    const clash2 = { ...sym("dup", 1, "cut"), key: "k1b" };
+    const clashRows: FileRow[] = [
+      { path: "src/a.ts", lang: "typescript", served: 1, cut: 0, expandedByDefault: true, symbols: [clash1, clash2] },
+      { path: "src/b.ts", lang: null, served: 0, cut: 1, expandedByDefault: true, symbols: [] },
+      { path: "src/c.ts", lang: null, served: 0, cut: 0, expandedByDefault: false, symbols: [] },
+    ];
+    render(<MapView {...p} rows={clashRows} expandedPath="src/a.ts" />);
+    await act(async () => {});
+    const s = Fake.instances[0];
+    expect(s.graph.hasNode("sym:src/a.ts::dup::1")).toBe(true);
+  });
+
+  test("a layout cache covering only some nodes is filled in and rewritten to cover all", async () => {
+    localStorage.setItem("singularrag.layout.v9", JSON.stringify({ "src/a.ts": { x: 10, y: 20 }, "src/b.ts": { x: 30, y: 40 } }));
+    const p = props();
+    render(<MapView {...p} />);
+    await act(async () => {});
+    expect(p.onLayoutReady).toHaveBeenCalledWith("v9");
+    const s = Fake.instances[0];
+    for (const n of ["src/a.ts", "src/b.ts", "src/c.ts"]) {
+      const { x, y } = s.graph.getNodeAttributes(n);
+      expect(Number.isFinite(x)).toBe(true);
+      expect(Number.isFinite(y)).toBe(true);
+    }
+    const cached = JSON.parse(localStorage.getItem("singularrag.layout.v9")!);
+    expect(Object.keys(cached).sort()).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+  });
+
   test("unmount kills sigma; no payload renders an empty state", async () => {
     const p = props();
     const { unmount } = render(<MapView {...p} />);

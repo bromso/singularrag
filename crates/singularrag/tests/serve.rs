@@ -169,6 +169,9 @@ async fn shell_and_assets_are_served_without_a_token() {
         .to_str()
         .unwrap()
         .starts_with("text/html"));
+    // The shell embeds hashed asset URLs, so it must never be cached: a stale shell would
+    // reference assets from a stale build after an upgrade.
+    assert_eq!(r.headers().get("cache-control").unwrap(), "no-cache");
     let r_text = r.text().await.unwrap();
     assert!(r_text.contains("singularrag"));
     // Verify the HTML references a hashed asset under /assets/

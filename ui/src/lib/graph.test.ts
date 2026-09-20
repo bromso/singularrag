@@ -16,7 +16,9 @@ describe("buildGraph", () => {
     expect(g.getNodeAttribute("c.ts", "symbols")).toBe(9);
     expect(g.getNodeAttribute("b.ts", "lang")).toBeNull();
     expect(g.getEdgeAttribute(g.edge("a.ts", "b.ts")!, "weight")).toBeCloseTo(1.5);
-    expect(g.getEdgeAttribute(g.edge("a.ts", "b.ts")!, "names")).toBe(2);
+    // Sum, not max: a name referenced both ways (once from each direction) is counted
+    // in each direction's `names`, so the merged undirected edge's total is 1 + 2 = 3.
+    expect(g.getEdgeAttribute(g.edge("a.ts", "b.ts")!, "names")).toBe(3);
   });
 });
 
@@ -74,6 +76,32 @@ describe("layout cache", () => {
     expect(loadLayout("v2")).toBeNull();
     localStorage.setItem(layoutCacheKey("v3"), "{not json");
     expect(loadLayout("v3")).toBeNull();
+  });
+
+  test("saving evicts every other cached layout so only the newest survives", () => {
+    saveLayout("v1", { "a.ts": { x: 1, y: 2 } });
+    saveLayout("v2", { "b.ts": { x: 3, y: 4 } });
+    expect(loadLayout("v1")).toBeNull();
+    expect(loadLayout("v2")).toEqual({ "b.ts": { x: 3, y: 4 } });
+    // Only the layout cache is evicted, not unrelated keys.
+    localStorage.setItem("singularrag.view", "map");
+    saveLayout("v3", { "c.ts": { x: 5, y: 6 } });
+    expect(localStorage.getItem("singularrag.view")).toBe("map");
+    expect(loadLayout("v2")).toBeNull();
+    expect(loadLayout("v3")).toEqual({ "c.ts": { x: 5, y: 6 } });
+  });
+
+  test("loadLayout rejects valid JSON that is the wrong shape", () => {
+    localStorage.setItem(layoutCacheKey("v4"), JSON.stringify({ "a.ts": { x: 1 } }));
+    expect(loadLayout("v4")).toBeNull();
+    localStorage.setItem(layoutCacheKey("v5"), JSON.stringify({ "a.ts": { x: "1", y: 2 } }));
+    expect(loadLayout("v5")).toBeNull();
+    localStorage.setItem(layoutCacheKey("v6"), JSON.stringify({ "a.ts": { x: NaN, y: 2 } }));
+    expect(loadLayout("v6")).toBeNull();
+    localStorage.setItem(layoutCacheKey("v7"), JSON.stringify(["not", "an", "object"]));
+    expect(loadLayout("v7")).toBeNull();
+    localStorage.setItem(layoutCacheKey("v8"), JSON.stringify({ "a.ts": { x: 1, y: 2 } }));
+    expect(loadLayout("v8")).toEqual({ "a.ts": { x: 1, y: 2 } });
   });
 });
 

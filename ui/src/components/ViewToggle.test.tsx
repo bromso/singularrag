@@ -16,6 +16,12 @@ describe("ViewToggle", () => {
     expect(radios[1].getAttribute("tabindex")).toBe("-1");
     expect(group).toBeTruthy();
   });
+  test("the checked option has a contrasting fill, not just an accent tint", () => {
+    render(<ViewToggle value="tree" onChange={mock()} />);
+    const [checked] = screen.getAllByRole("radio");
+    expect(checked.className).toContain("aria-checked:bg-foreground");
+    expect(checked.className).toContain("aria-checked:text-background");
+  });
   test("arrow keys move selection and click selects", async () => {
     const onChange = mock();
     const user = userEvent.setup();

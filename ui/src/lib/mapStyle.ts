@@ -53,6 +53,6 @@ export function readPalette(el: HTMLElement): Palette {
   return {
     served: v("--map-served", DEFAULTS.served), cut: v("--map-cut", DEFAULTS.cut), untouched: v("--map-untouched", DEFAULTS.untouched),
     focus: v("--map-focus", DEFAULTS.focus), edge: v("--map-edge", DEFAULTS.edge), edgeDim: v("--map-edge-dim", DEFAULTS.edgeDim),
-    label: v("--foreground", DEFAULTS.label), background: v("--background", DEFAULTS.background),
+    label: v("--map-label", DEFAULTS.label), background: v("--map-bg", DEFAULTS.background),
   };
 }

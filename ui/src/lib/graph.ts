@@ -15,7 +15,9 @@ export function buildGraph(payload: GraphPayload): Graph {
     const existing = g.edge(a, b);
     if (existing) {
       g.updateEdgeAttribute(existing, "weight", (w) => (w as number) + e.weight);
-      g.updateEdgeAttribute(existing, "names", (n) => Math.max(n as number, e.names));
+      // Summed, not deduped: a name referenced both ways (a->b and b->a) is counted once
+      // per direction, so it is counted twice in the merged undirected edge's total.
+      g.updateEdgeAttribute(existing, "names", (n) => (n as number) + e.names);
     } else {
       g.addEdge(a, b, { weight: e.weight, names: e.names });
     }
@@ -90,17 +92,36 @@ export function applyPositions(graph: Graph, positions: Positions): void {
   });
 }
 
-export const layoutCacheKey = (indexVersion: string) => `singularrag.layout.${indexVersion}`;
+const LAYOUT_CACHE_PREFIX = "singularrag.layout.";
+export const layoutCacheKey = (indexVersion: string) => `${LAYOUT_CACHE_PREFIX}${indexVersion}`;
+
+function isValidPositions(v: unknown): v is Positions {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  return Object.values(v as Record<string, unknown>).every(
+    (p) => p !== null && typeof p === "object" && !Array.isArray(p)
+      && Number.isFinite((p as { x: unknown }).x) && Number.isFinite((p as { y: unknown }).y),
+  );
+}
 
 export function loadLayout(indexVersion: string): Positions | null {
   try {
     const raw = localStorage.getItem(layoutCacheKey(indexVersion));
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? (parsed as Positions) : null;
+    const parsed: unknown = JSON.parse(raw);
+    return isValidPositions(parsed) ? parsed : null;
   } catch { return null; }
 }
 
+/** Only the newest layout is ever needed (the cache is keyed by index version, and a new
+ *  version invalidates the old one), so every other `singularrag.layout.*` key is evicted
+ *  before writing — otherwise this grows without bound across re-indexes. */
 export function saveLayout(indexVersion: string, positions: Positions): void {
-  try { localStorage.setItem(layoutCacheKey(indexVersion), JSON.stringify(positions)); } catch {}
+  try {
+    const key = layoutCacheKey(indexVersion);
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(LAYOUT_CACHE_PREFIX) && k !== key) localStorage.removeItem(k);
+    }
+    localStorage.setItem(key, JSON.stringify(positions));
+  } catch {}
 }

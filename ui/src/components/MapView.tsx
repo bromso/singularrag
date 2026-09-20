@@ -23,13 +23,42 @@ const hue = (name: string) => { let h = 0; for (const ch of name) h = (h * 31 + 
 /** Latest props in a ref so the reducers (installed once) read current state. */
 function useLatest<T>(v: T) { const r = useRef(v); r.current = v; return r; }
 
+/** Sigma's `drawDiscNodeHover` default fills the label box with a hardcoded white, which is
+ *  wrong in dark mode. Mirror its geometry (a box behind the label sized off `measureText`
+ *  and the label size) but fill it from the theme palette. Reads `palRef.current` so a
+ *  `prefers-color-scheme` change updates it without reinstalling the setting. */
+function hoverDrawer(palRef: { current: Palette | null }) {
+  return (context: CanvasRenderingContext2D, data: { x: number; y: number; size: number; label?: string | null }, settings: { labelSize: number; labelFont: string; labelWeight: string }) => {
+    const pal = palRef.current;
+    if (!pal || typeof data.label !== "string") return;
+    const size = settings.labelSize, font = settings.labelFont, weight = settings.labelWeight;
+    context.font = `${weight} ${size}px ${font}`;
+    const PADDING = 3;
+    const textWidth = context.measureText(data.label).width;
+    const x = data.x + data.size + 3 - PADDING;
+    const boxWidth = Math.round(textWidth + PADDING * 2);
+    const boxHeight = Math.round(size + PADDING * 2);
+    const y = data.y - boxHeight / 2;
+    context.fillStyle = pal.background;
+    const rc = context as CanvasRenderingContext2D & { roundRect?: (x: number, y: number, w: number, h: number, r: number) => void };
+    if (typeof rc.roundRect === "function") {
+      context.beginPath();
+      rc.roundRect(x, y, boxWidth, boxHeight, 3);
+      context.fill();
+    } else {
+      context.fillRect(x, y, boxWidth, boxHeight);
+    }
+    context.fillStyle = pal.label;
+    context.fillText(data.label, data.x + data.size + 3, data.y + size / 3);
+  };
+}
+
 export function MapView(props: MapViewProps) {
   const { payload, expandedPath, focusedPath, onLayoutReady, onSelectNode, onToggleExpand, onSwitchToTable, ariaLabel } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const hullRef = useRef<HTMLCanvasElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const graphRef = useRef<Graph | null>(null);
-  const lastPositions = useRef<Positions | null>(null);
   const hovered = useRef<string | null>(null);
   // The real Sigma constructor renders synchronously — it calls `nodeReducer`/`edgeReducer`
   // for every item in the graph before `new Sigma(...)` returns — so a reducer must never
@@ -38,6 +67,12 @@ export function MapView(props: MapViewProps) {
   // reducers read off `sigma` itself, so it is mirrored into this ref instead: seeded right
   // after construction, then kept current from the camera's own "updated" event.
   const ratioRef = useRef(1);
+  // Reducers (and the hover drawer) read this, not a `pal` closed over at construction
+  // time, so a `prefers-color-scheme` change can repaint without remounting Sigma.
+  const palRef = useRef<Palette | null>(null);
+  // Camera state survives a remount (a new payload / index version): captured just
+  // before `sigma.kill()`, restored onto the freshly constructed instance.
+  const savedCamera = useRef<Record<string, number> | null>(null);
   const [palette, setPalette] = useState<Palette | null>(null);
   const latest = useLatest(props);
 
@@ -56,18 +91,23 @@ export function MapView(props: MapViewProps) {
     if (!payload || !el) return;
     const graph = buildGraph(payload);
     const cached = loadLayout(payload.index_version);
-    const positions = cached ?? layoutGraph(graph, lastPositions.current ?? undefined);
-    if (!cached) saveLayout(payload.index_version, positions);
-    lastPositions.current = positions;
+    // A cache that predates a file being added/removed no longer covers every node; a
+    // partial cache is still a useful seed (existing files keep their position), but the
+    // result must be saved back so the cache covers the full graph going forward.
+    const coversAll = !!cached && graph.nodes().every((n) => Object.prototype.hasOwnProperty.call(cached, n));
+    const positions = coversAll ? (cached as Positions) : layoutGraph(graph, cached ?? undefined);
+    if (!coversAll) saveLayout(payload.index_version, positions);
     applyPositions(graph, positions);
     graphRef.current = graph;
     const pal = readPalette(el);
+    palRef.current = pal;
     setPalette(pal);
     const sigma = new Sigma(graph, el, {
       allowInvalidContainer: true,
       renderLabels: true,
       labelRenderedSizeThreshold: 0,
       labelColor: { color: pal.label },
+      defaultDrawNodeHover: hoverDrawer(palRef),
       defaultNodeType: "circle",
       zIndex: true,
       nodeProgramClasses: {
@@ -77,6 +117,7 @@ export function MapView(props: MapViewProps) {
         const p = latest.current;
         const d = latestDerived.current;
         const ratio = ratioRef.current;
+        const pal = palRef.current!;
         const sat = data.symbolOf as string | undefined;
         if (sat) {
           const s = nodeStyle(data.symbolName as string, { status: (data.symbolStatus as never) ?? null, focused: p.focusedPath === sat && p.focusedSymbol === data.symbolName, blastDepth: null, blastActive: false, symbols: 0, hovered: false, zoomRatio: ratio }, pal);
@@ -96,6 +137,7 @@ export function MapView(props: MapViewProps) {
       edgeReducer: (edge, data) => {
         const p = latest.current;
         const d = latestDerived.current;
+        const pal = palRef.current!;
         const [a, b] = graph.extremities(edge);
         const touchesFocused = p.focusedPath === a || p.focusedPath === b;
         const touchesBlast = !!d.blastDepth && d.blastDepth.has(a) && d.blastDepth.has(b);
@@ -103,6 +145,7 @@ export function MapView(props: MapViewProps) {
         return { ...data, color: s.color, size: data.satellite ? 0.5 : s.size, hidden: s.hidden && !data.satellite };
       },
     });
+    if (savedCamera.current) sigma.getCamera().setState(savedCamera.current);
     // Now that construction has finished (`sigma` is out of its temporal dead zone), seed
     // the ratio ref from the real camera and keep it current. A refresh is only scheduled
     // when the ratio crosses the 0.5 labelling threshold used by `nodeStyle`, not on every
@@ -123,12 +166,38 @@ export function MapView(props: MapViewProps) {
     sigma.on("doubleClickNode", ({ node }) => { if (!graph.getNodeAttribute(node, "symbolOf")) latest.current.onToggleExpand(node); });
     sigma.on("enterNode", ({ node }) => { hovered.current = node; sigma.refresh(); });
     sigma.on("leaveNode", () => { hovered.current = null; sigma.refresh(); });
-    sigma.on("afterRender", () => drawHulls(sigma, graph, hullRef.current, latest.current.boundaries, pal));
+    sigma.on("afterRender", () => drawHulls(sigma, graph, hullRef.current, latest.current.boundaries, palRef.current!));
     sigmaRef.current = sigma;
     onLayoutReady(payload.index_version);
-    return () => { sigma.kill(); sigmaRef.current = null; graphRef.current = null; };
+    return () => {
+      savedCamera.current = sigma.getCamera().getState() as unknown as Record<string, number>;
+      sigma.kill();
+      sigmaRef.current = null;
+      graphRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload]);
+
+  // A theme switch (system dark/light change) does not remount Sigma: re-read the
+  // palette into the ref the reducers/hover-drawer read, push the label colour and
+  // hover drawer settings, update the container background, and repaint.
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => {
+      const el = containerRef.current;
+      const sigma = sigmaRef.current;
+      if (!el || !sigma) return;
+      const pal = readPalette(el);
+      palRef.current = pal;
+      setPalette(pal);
+      sigma.setSetting("labelColor", { color: pal.label });
+      sigma.setSetting("defaultDrawNodeHover", hoverDrawer(palRef));
+      sigma.refresh();
+    };
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
 
   // Repaint when the inputs the reducers read change.
   useEffect(() => { sigmaRef.current?.refresh(); }, [statusByPath, blastDepth, props.focusedPath, props.focusedSymbol, props.boundaries]);
@@ -152,9 +221,11 @@ export function MapView(props: MapViewProps) {
       const n = row.symbols.length, radius = n > 8 ? 9 : 6;
       row.symbols.forEach((s, i) => {
         const t = (i / Math.max(1, n)) * Math.PI * 2;
+        // Two symbols can share a name and start line (e.g. overloads); `mergeNode`/
+        // `mergeEdge` tolerate the resulting key collision instead of throwing.
         const key = satelliteKey(row.path, s.symbol.name, s.symbol.line_start);
-        graph.addNode(key, { x: x + Math.cos(t) * radius, y: y + Math.sin(t) * radius, size: 3, symbolOf: row.path, symbolName: s.symbol.name, symbolStatus: props.hasRetrieval ? s.status : null });
-        graph.addEdge(row.path, key, { weight: 0, names: 0, satellite: true });
+        graph.mergeNode(key, { x: x + Math.cos(t) * radius, y: y + Math.sin(t) * radius, size: 3, symbolOf: row.path, symbolName: s.symbol.name, symbolStatus: props.hasRetrieval ? s.status : null });
+        graph.mergeEdge(row.path, key, { weight: 0, names: 0, satellite: true });
       });
     }
     sigmaRef.current?.refresh();
@@ -173,9 +244,14 @@ export function MapView(props: MapViewProps) {
 function drawHulls(sigma: Sigma, graph: Graph, canvas: HTMLCanvasElement | null, boundaries: Boundary[], pal: Palette) {
   if (!canvas) return;
   const { width, height } = sigma.getDimensions();
-  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+  const dpr = window.devicePixelRatio || 1;
+  const pxWidth = Math.round(width * dpr), pxHeight = Math.round(height * dpr);
+  if (canvas.width !== pxWidth || canvas.height !== pxHeight) { canvas.width = pxWidth; canvas.height = pxHeight; }
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
   for (const b of boundaries) {
     const pts = b.paths.filter((p) => graph.hasNode(p)).map((p) => { const a = graph.getNodeAttributes(p); return sigma.graphToViewport({ x: a.x, y: a.y }); });

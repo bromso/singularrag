@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { edgeStyle, nodeSize, nodeStyle, readPalette, type NodeCtx, type Palette } from "./mapStyle";
+import { edgeStyle, nodeSize, nodeStyle, readPalette, type EdgeCtx, type NodeCtx, type Palette } from "./mapStyle";
+
+const SIGMA_COLOR = /^#[0-9a-fA-F]{6}$|^rgba?\(/;
 
 const pal: Palette = { served: "#0a0", cut: "#a60", untouched: "#888", focus: "#00f", edge: "#666", edgeDim: "#ddd", label: "#000", background: "#fff" };
 const base: NodeCtx = { status: null, focused: false, blastDepth: null, blastActive: false, symbols: 4, hovered: false, zoomRatio: 1 };
@@ -63,7 +65,35 @@ describe("readPalette", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const p = readPalette(el);
-    expect(p.served).toMatch(/^#|^oklch|^rgb/);
-    expect(p.background).toBeTruthy();
+    for (const v of Object.values(p)) expect(v).toMatch(SIGMA_COLOR);
+  });
+});
+
+describe("sigma-parsable colours", () => {
+  test("every colour the reducers emit is sigma-parsable", () => {
+    const pal6: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff" };
+    const statuses: (NodeCtx["status"])[] = [null, "served", "cut", "untouched"];
+    const bools = [false, true];
+    const collected: string[] = [];
+    for (const status of statuses) {
+      for (const focused of bools) {
+        for (const blastActive of bools) {
+          for (const blastDepth of [null, 0, 2]) {
+            const s = nodeStyle("src/a.ts", { status, focused, blastDepth, blastActive, symbols: 4, hovered: false, zoomRatio: 1 }, pal6);
+            collected.push(s.color);
+            if (s.borderColor) collected.push(s.borderColor);
+          }
+        }
+      }
+    }
+    const edgeCtxs: EdgeCtx[] = [
+      { touchesFocused: true, blastActive: false, touchesBlast: false },
+      { touchesFocused: false, blastActive: false, touchesBlast: false },
+      { touchesFocused: false, blastActive: true, touchesBlast: false },
+      { touchesFocused: false, blastActive: true, touchesBlast: true },
+    ];
+    for (const ctx of edgeCtxs) collected.push(edgeStyle(ctx, pal6).color);
+    expect(collected.length).toBeGreaterThan(0);
+    for (const c of collected) expect(c).toMatch(SIGMA_COLOR);
   });
 });

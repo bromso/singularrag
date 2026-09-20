@@ -523,8 +523,8 @@ mod tests {
             .find(|e| e.src == middleware && e.dst == session)
             .expect("middleware -> session edge");
         assert!(e.weight > 0.0);
-        assert!(
-            e.names >= 1,
+        assert_eq!(
+            e.names, 2,
             "createSession and Session are distinct names behind one edge"
         );
         assert!(g.edges.iter().all(|e| e.src != e.dst), "self-edges dropped");
