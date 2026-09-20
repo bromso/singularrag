@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { applyPositions, buildGraph, layoutCacheKey, layoutGraph, loadLayout, saveLayout } from "./graph";
+import { applyPositions, buildGraph, layoutCacheKey, layoutGraph, loadLayout, saveLayout, separateCoincident } from "./graph";
 import type { GraphPayload } from "@/api/types";
 
 const payload: GraphPayload = {
@@ -36,6 +36,32 @@ describe("layoutGraph", () => {
     // Seeded nodes stay in the same neighbourhood; the unseeded node is placed too.
     expect(Math.abs(p["a.ts"].x - 100)).toBeLessThan(60);
     expect(p["c.ts"]).toBeDefined();
+  });
+
+  test("seeded_survivors_keep_their_exact_positions", () => {
+    const seed = { "a.ts": { x: 100, y: 100 }, "b.ts": { x: 110, y: 100 } };
+    const p = layoutGraph(buildGraph(payload), seed);
+    expect(p["a.ts"]).toEqual(seed["a.ts"]);
+    expect(p["b.ts"]).toEqual(seed["b.ts"]);
+    expect(Number.isFinite(p["c.ts"].x)).toBe(true);
+    expect(Number.isFinite(p["c.ts"].y)).toBe(true);
+  });
+});
+
+describe("separateCoincident", () => {
+  test("coincident_nodes_are_separated_deterministically", () => {
+    const g1 = buildGraph(payload);
+    applyPositions(g1, { "a.ts": { x: 5, y: 5 }, "b.ts": { x: 5, y: 5 }, "c.ts": { x: 9, y: 9 } });
+    separateCoincident(g1);
+    const a1 = g1.getNodeAttributes("a.ts"), b1 = g1.getNodeAttributes("b.ts");
+    expect(a1.x === b1.x && a1.y === b1.y).toBe(false);
+
+    const g2 = buildGraph(payload);
+    applyPositions(g2, { "a.ts": { x: 5, y: 5 }, "b.ts": { x: 5, y: 5 }, "c.ts": { x: 9, y: 9 } });
+    separateCoincident(g2);
+    const a2 = g2.getNodeAttributes("a.ts"), b2 = g2.getNodeAttributes("b.ts");
+    expect({ x: a1.x, y: a1.y }).toEqual({ x: a2.x, y: a2.y });
+    expect({ x: b1.x, y: b1.y }).toEqual({ x: b2.x, y: b2.y });
   });
 });
 

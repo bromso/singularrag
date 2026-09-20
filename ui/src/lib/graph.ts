@@ -25,6 +25,25 @@ export function buildGraph(payload: GraphPayload): Graph {
 
 const ITERATIONS = 300;
 
+/** `graphology-layout-noverlap` has no notion of a pinned/`fixed` node, so running it after a
+ *  seeded ForceAtlas2 pass could nudge survivors off their cached position. It also jitters
+ *  exactly-coincident nodes with `Math.random()`, which breaks determinism. So: separate any
+ *  coincident coordinates ourselves (deterministically) before it runs, and skip it entirely
+ *  when a seed is present — survivors must keep their cached positions exactly, and newcomers
+ *  were already placed at neighbour centroids, so there is nothing left for noverlap to fix. */
+export function separateCoincident(graph: Graph): void {
+  const seen = new Map<string, number>();
+  graph.forEachNode((node, attrs) => {
+    const key = `${Math.round(attrs.x * 1e6)}:${Math.round(attrs.y * 1e6)}`;
+    const countBefore = seen.get(key) ?? 0;
+    seen.set(key, countBefore + 1);
+    if (countBefore > 0) {
+      const k = countBefore + 1; // 1-based index within the coincident group, in insertion order
+      graph.mergeNodeAttributes(node, { x: attrs.x + k * 0.01, y: attrs.y + k * 0.01 });
+    }
+  });
+}
+
 /** Circular seed (or the previous positions for files that still exist), ForceAtlas2, then
  *  a no-overlap pass. Deterministic: no randomness anywhere. */
 export function layoutGraph(graph: Graph, seed?: Positions): Positions {
@@ -50,7 +69,13 @@ export function layoutGraph(graph: Graph, seed?: Positions): Positions {
     // Seeded nodes are pinned (`fixed`) during ForceAtlas2 so existing files keep their
     // on-screen position across a refresh; only new/unseeded nodes get pulled into place.
     forceAtlas2.assign(g, { iterations: ITERATIONS, settings: { ...forceAtlas2.inferSettings(g), gravity: 1, scalingRatio: 10 } });
-    noverlap.assign(g, { maxIterations: 50, settings: { margin: 4 } });
+    if (seed) {
+      // Skip no-overlap entirely: survivors must keep their exact cached positions, and
+      // noverlap doesn't know how to leave pinned nodes alone.
+    } else {
+      separateCoincident(g);
+      noverlap.assign(g, { maxIterations: 50, settings: { margin: 4 } });
+    }
   }
   if (seed) g.forEachNode((node) => { if (seed[node]) g.setNodeAttribute(node, "fixed", false); });
   const out: Positions = {};
