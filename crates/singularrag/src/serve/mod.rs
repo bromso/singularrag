@@ -1,6 +1,7 @@
 //! `singularrag serve`: the loop UI. Own actor + watcher for writes, a read-only store for
 //! reads, SSE for liveness, an embedded React app for the page.
 
+pub mod assets;
 pub mod auth;
 pub mod events;
 pub mod queries;
@@ -46,7 +47,11 @@ pub fn router(state: AppState) -> Router {
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ));
-    Router::new().nest("/api", api).with_state(state)
+    Router::new()
+        .route("/", get(assets::index))
+        .route("/assets/{*path}", get(assets::asset))
+        .nest("/api", api)
+        .with_state(state)
 }
 
 /// Bind, spawn the actor and run its startup refresh (creating the index if this is a

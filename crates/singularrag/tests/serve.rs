@@ -1,0 +1,276 @@
+//! Drives the real binary: spawn `serve --no-open --port 0`, parse the URL line, hit the API.
+
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use futures_util::StreamExt;
+use singularrag_core::fixture::write_ts_mini;
+
+struct Server {
+    child: Child,
+    url: String,
+    token: String,
+    port: u16,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn(repo: &std::path::Path) -> Server {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_singularrag"))
+        .args([
+            "serve",
+            "--no-open",
+            "--port",
+            "0",
+            "--repo",
+            repo.to_str().unwrap(),
+        ])
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let line = line.trim().to_string();
+    let (base, token) = line.split_once("/#token=").expect("url line");
+    let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+    Server {
+        child,
+        url: base.to_string(),
+        token: token.to_string(),
+        port,
+    }
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
+}
+
+async fn get(s: &Server, path: &str) -> reqwest::Response {
+    client()
+        .get(format!("{}/api{path}", s.url))
+        .bearer_auth(&s.token)
+        .send()
+        .await
+        .unwrap()
+}
+
+fn cli_query(repo: &std::path::Path, q: &str) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_singularrag"))
+        .args([
+            "query",
+            q,
+            "--budget",
+            "4096",
+            "--repo",
+            repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn auth_and_host_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let r = client()
+        .get(format!("{}/api/status", s.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let r = client()
+        .get(format!("http://localhost:{}/api/status", s.port))
+        .bearer_auth(&s.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "localhost:<port> is an allowed host");
+    let r = client()
+        .get(format!("{}/api/status", s.url))
+        .header("Host", "evil.example")
+        .bearer_auth(&s.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert!(r.headers().get("access-control-allow-origin").is_none());
+    let r = get(&s, "/status").await;
+    assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
+}
+
+#[tokio::test]
+async fn shell_and_assets_are_served_without_a_token() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let r = client().get(format!("{}/", s.url)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    assert!(r.text().await.unwrap().contains("singularrag"));
+    let r = client()
+        .get(format!("{}/assets/nope.js", s.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}
+
+#[tokio::test]
+async fn routes_have_the_documented_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    cli_query(dir.path(), "session");
+    let s = spawn(dir.path());
+    let status: serde_json::Value = get(&s, "/status").await.json().await.unwrap();
+    for k in [
+        "index_version",
+        "git_head",
+        "indexed_at_ms",
+        "stale_count",
+        "lock_timeout",
+        "foreign_indexing",
+        "files",
+        "drain",
+    ] {
+        assert!(status.get(k).is_some(), "status missing {k}: {status}");
+    }
+    let rs: serde_json::Value = get(&s, "/retrievals?limit=10").await.json().await.unwrap();
+    let first = &rs.as_array().unwrap()[0];
+    assert_eq!(first["session_label"], "CLI");
+    assert_eq!(first["tool"], "repo_map");
+    let id = first["id"].as_i64().unwrap();
+    let d: serde_json::Value = get(&s, &format!("/retrievals/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(d["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["served"] == true));
+    assert!(d["items"][0]["reasons"]["referenced_by"].is_array());
+    let tree: serde_json::Value = get(&s, "/tree").await.json().await.unwrap();
+    assert!(tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["path"] == "src/auth/session.ts"));
+    let sk: serde_json::Value = get(&s, "/skipped").await.json().await.unwrap();
+    assert!(sk.as_array().unwrap().iter().any(|f| f["path"] == ".env"));
+    let map: serde_json::Value = get(&s, "/map").await.json().await.unwrap();
+    assert!(map["pin"].is_array());
+    assert_eq!(get(&s, "/retrievals/999999").await.status(), 404);
+}
+
+#[tokio::test]
+async fn a_cli_query_produces_a_change_event() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let resp = client()
+        .get(format!("{}/api/events?token={}", s.url, s.token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let mut stream = resp.bytes_stream();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let repo = dir.path().to_path_buf();
+    std::thread::spawn(move || cli_query(&repo, "session"));
+    let mut buf = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("change event within 5 s")
+            .unwrap()
+            .unwrap();
+        buf.push_str(std::str::from_utf8(&chunk).unwrap());
+        if buf.contains("event: change") && buf.contains("max_retrieval_id") {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn exclude_via_put_map_changes_the_next_retrieval() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let before = cli_query(dir.path(), "");
+    assert!(before.contains("src/util/log.ts:"), "{before}");
+    let s = spawn(dir.path());
+    let body = serde_json::json!({ "pin": [], "exclude": [{ "path": "src/util/" }], "note": [], "boundary": [], "deny": { "extra_patterns": [] } });
+    let r = client()
+        .put(format!("{}/api/map", s.url))
+        .bearer_auth(&s.token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let written = std::fs::read_to_string(dir.path().join(".singularrag/map.toml")).unwrap();
+    assert!(written.starts_with("# Managed by singularrag serve"));
+    let after = cli_query(dir.path(), "");
+    assert!(!after.contains("src/util/log.ts:"), "{after}");
+    let bad = serde_json::json!({ "pin": [{ "path": "../x" }], "exclude": [], "note": [], "boundary": [], "deny": { "extra_patterns": [] } });
+    let r = client()
+        .put(format!("{}/api/map", s.url))
+        .bearer_auth(&s.token)
+        .json(&bad)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 422);
+    let e: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(e["field"], "pin[0].path");
+}
+
+#[tokio::test]
+async fn touching_a_file_changes_freshness_within_two_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before: serde_json::Value = get(&s, "/status").await.json().await.unwrap();
+    std::fs::write(
+        dir.path().join("src/util/log.ts"),
+        "export function logAgain(): void {}\n",
+    )
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let now: serde_json::Value = get(&s, "/status").await.json().await.unwrap();
+        if now["indexed_at_ms"] != before["indexed_at_ms"] {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "freshness did not change"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let tree: serde_json::Value = get(&s, "/tree").await.json().await.unwrap();
+    assert!(tree.to_string().contains("logAgain"));
+}
