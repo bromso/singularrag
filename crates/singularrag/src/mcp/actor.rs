@@ -150,11 +150,14 @@ impl Actor {
         }
     }
 
-    fn note(&mut self, stale_count: usize) {
-        // drain_pending is derived from stale_count only; a foreign lock is detected one
-        // chunk later by drain_chunk (refresh reports lock_timeout and indexes nothing).
-        self.drain_pending = stale_count > 0;
-        self.drain_remaining = stale_count;
+    fn note(&mut self, stale_count: usize, lock_timeout: bool) {
+        // The plan's Global Constraints: arm the drain only after a response with
+        // stale_count > 0 whose refresh did not hit lock_timeout. A response that lost
+        // the lock says another process is already indexing this repo, and its backlog
+        // is not ours to chase: each doomed chunk would spend LOCK_WAIT_MS discovering
+        // the holder again. The next response re-arms us once the lock is free.
+        self.drain_pending = stale_count > 0 && !lock_timeout;
+        self.drain_remaining = if self.drain_pending { stale_count } else { 0 };
     }
 
     fn handle(&mut self, job: Job) -> bool {
@@ -164,7 +167,7 @@ impl Actor {
                     .engine()
                     .and_then(|e| e.repo_map(&req).map_err(|e| e.to_string()));
                 if let Ok(r) = &out {
-                    self.note(r.stale_count);
+                    self.note(r.stale_count, r.lock_timeout);
                 }
                 let _ = reply.send(out);
             }
@@ -173,7 +176,7 @@ impl Actor {
                     .engine()
                     .and_then(|e| e.find_symbol(&req).map_err(|e| e.to_string()));
                 if let Ok(r) = &out {
-                    self.note(r.stale_count);
+                    self.note(r.stale_count, r.lock_timeout);
                 }
                 let _ = reply.send(out);
             }
@@ -452,8 +455,8 @@ mod tests {
         );
         let stats = handle.stats().await.unwrap();
         assert_eq!(
-            stats.chunks, 1,
-            "exactly one drain chunk should have run and hit lock_timeout: {stats:?}"
+            stats.chunks, 0,
+            "a response whose refresh lost the lock must not arm the drain at all: {stats:?}"
         );
         lock::release(&store, foreign_pid).unwrap();
     }

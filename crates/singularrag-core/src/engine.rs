@@ -66,6 +66,12 @@ pub struct MapResponse {
     pub total: usize,
     pub cut_recorded: usize,
     pub stale_count: usize,
+    /// True when this response's refresh gave up waiting for the advisory lock, so
+    /// `stale_count` is another process's backlog rather than ours. Callers that finish
+    /// interrupted refreshes in the background (the MCP actor) must not start on it:
+    /// the holder is already indexing, and every attempt would spend `LOCK_WAIT_MS`
+    /// to learn that again.
+    pub lock_timeout: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +87,8 @@ pub struct FindResponse {
     pub text: String,
     pub hits: usize,
     pub stale_count: usize,
+    /// See `MapResponse::lock_timeout`.
+    pub lock_timeout: bool,
 }
 
 impl Engine {
@@ -240,6 +248,7 @@ impl Engine {
             total: ranked.len(),
             cut_recorded,
             stale_count: stats.remaining,
+            lock_timeout: stats.lock_timeout,
         })
     }
 
@@ -305,6 +314,7 @@ impl Engine {
             text,
             hits: served,
             stale_count: stats.remaining,
+            lock_timeout: stats.lock_timeout,
         })
     }
 
@@ -412,6 +422,7 @@ mod tests {
             resp.text
         );
         assert!(resp.text.contains("· fresh ·"));
+        assert!(!resp.lock_timeout);
         assert!(resp.text.contains("src/auth/session.ts:\n"));
         assert!(resp
             .text
@@ -622,6 +633,17 @@ mod tests {
             .unwrap();
         assert!(started.elapsed() >= Duration::from_millis(LOCK_WAIT_MS));
         assert!(resp.stale_count > 0);
+        // The caller has to be able to tell "stale because I ran out of budget" from
+        // "stale because someone else holds the lock": only the first is worth draining.
+        assert!(resp.lock_timeout, "{resp:?}");
+        let found = e
+            .find_symbol(&FindRequest {
+                name: "createSession".into(),
+                kind: None,
+                limit: 10,
+            })
+            .unwrap();
+        assert!(found.lock_timeout, "{found:?}");
         let stats = e.refresh(REFRESH_BUDGET).unwrap();
         assert!(stats.lock_timeout, "{stats:?}");
         assert_eq!(stats.indexed, 0);
