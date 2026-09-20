@@ -15,7 +15,7 @@ One invocation of `singularrag-bench run` is one run. In order:
 
 1. Resolve the run config (§3). Verify: the checkout exists, `git rev-parse HEAD` equals the pinned commit, the tree is clean ignoring `.singularrag/` and `.serena/`, `claude` is on `PATH`, every condition's MCP config file exists, exactly one condition is the baseline. Any failure is a hard error before a run directory is created.
 2. Create `eval/runs/<UTC timestamp>-<label>/` and write `run.toml` (§6).
-3. If any selected condition's MCP config runs the `singularrag` command, run `singularrag index --repo <checkout>` once, so that condition starts fresh rather than paying the first index inside a timed session.
+3. For each selected condition that declares a `warmup` command (§3), run it once before that condition's loop, so a condition starts warm rather than paying its first index inside a timed session. Every MCP condition gets the same treatment: the committed config warms singularrag with `singularrag index` and Serena with `serena project index`. A condition that declares `reset` paths has them deleted before every session, so sessions do not feed each other (Serena's memories). *Amended 2026-09-20 after the final review: the first draft warmed only singularrag, which biased the comparison against Serena.*
 4. Loop conditions, then questions, then repeats, one session at a time (§4). Each session's record is written as soon as it ends, so an interrupted run keeps every finished session; `--resume <run-dir>` skips sessions whose record exists.
 5. Write `summary.md` (§7) and print it.
 
@@ -42,13 +42,16 @@ baseline = true
 [[condition]]
 name = "singularrag"
 mcp_config = "conditions/singularrag.json"
+warmup = ["singularrag", "index", "--repo", "<checkout>"]
 
 [[condition]]
 name = "serena"
 mcp_config = "conditions/serena.json"
+warmup = ["uvx", "--from", "git+https://github.com/oraios/serena", "serena", "project", "index", "<checkout>"]
+reset = [".serena/memories"]
 ```
 
-`mcp_config` paths are relative to the config file. The MCP config files are ordinary Claude Code `mcpServers` JSON, committed under `eval/conditions/`:
+`mcp_config` paths are relative to the config file. `warmup` is an argv run once before the condition's loop with `<checkout>` substituted; a non-zero exit is a hard error for the run. `reset` lists checkout-relative paths deleted before every session of that condition; they must sit under a dirty-check-ignored prefix (`.singularrag/`, `.serena/`), and the config loader rejects any other path. Both default to none. The Serena warm-up command is unverified until the first Serena run; a wrong command fails loudly at warm-up, before any session is spent. The MCP config files are ordinary Claude Code `mcpServers` JSON, committed under `eval/conditions/`:
 
 - `singularrag.json`: `{ "mcpServers": { "singularrag": { "command": "singularrag", "args": ["mcp", "--repo", "<checkout>"] } } }`. The harness substitutes `<checkout>` with the resolved absolute path when writing the temporary config it actually passes, so the committed file stays machine-independent. `singularrag` must be on `PATH` (`cargo install --path crates/singularrag`); the harness records `singularrag --version` in `run.toml`.
 - `serena.json`: `{ "mcpServers": { "serena": { "command": "uvx", "args": ["--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server", "--context", "claude-code", "--project", "<checkout>"] } } }`, with the same substitution.
@@ -137,7 +140,8 @@ The same text prints to stdout. `singularrag-bench score <run-dir>` rewrites `su
 - Before any session (§2 step 1): hard error, no run directory.
 - Per condition: if a session's init message reports any MCP server whose status is not `connected`, or its result reports any permission denial, the condition is aborted after that session; its record is kept, the abort and the reason go in the summary, and the run continues with the remaining conditions.
 - Per session: non-zero exit, an unparseable stream, or no `result` line is a failed session with the reason; the run continues.
-- A run whose baseline condition was aborted prints the tables but no verdict.
+- An aborted condition gets no verdict line, only its abort notice; a run whose baseline condition was aborted prints the tables and one line saying no verdict, and a condition with zero records is skipped in the verdict block.
+- Resume (`--resume <run-dir>`) refuses to continue if the config's `commit`, `answer_max`, `tools`, `max_turns` or `max_budget_usd` differ from the values recorded in `run.toml`, and after the loop it unions the run's conditions and questions into `run.toml` so the summary describes what is on disk.
 
 ## 9. CLI
 

@@ -65,6 +65,7 @@ query = "where are middleware chains composed"
 gold = ["src/compose.ts::compose"]
 "#).unwrap();
     std::fs::write(ev.join("conditions/singularrag.json"), r#"{ "mcpServers": { "singularrag": { "command": "singularrag", "args": ["mcp", "--repo", "<checkout>"] } } }"#).unwrap();
+    let fake_singularrag = fixtures().join("fake-singularrag.sh");
     std::fs::write(
         ev.join("tier2.toml"),
         format!(
@@ -80,7 +81,9 @@ baseline = true
 [[condition]]
 name = "singularrag"
 mcp_config = "conditions/singularrag.json"
-"#
+warmup = ["{fake_singularrag}", "index", "--repo", "<checkout>"]
+"#,
+            fake_singularrag = fake_singularrag.display()
         ),
     )
     .unwrap();
@@ -404,6 +407,117 @@ fn resume_skips_sessions_that_have_records() {
         "the new session ran with the failing fake"
     );
     assert_eq!(run_dirs(&ws).len(), 1, "resume creates no second directory");
+    let toml_after = std::fs::read_to_string(run.join("run.toml")).unwrap();
+    assert!(
+        toml_after.contains("questions = [\"L1\", \"L2\"]"),
+        "{toml_after}"
+    );
+    assert!(toml_after.contains("repeats = 2"), "{toml_after}");
+}
+
+#[test]
+fn resume_refuses_a_changed_config() {
+    let ws = workspace();
+    bench(&ws)
+        .args([
+            "run",
+            "--config",
+            "eval/tier2.toml",
+            "--conditions",
+            "alone",
+            "--questions",
+            "L1",
+            "--repeats",
+            "1",
+        ])
+        .assert()
+        .success();
+    let run = run_dirs(&ws).remove(0);
+    let cfg = ws.root.join("eval/tier2.toml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, text.replace("max_turns = 5", "max_turns = 6")).unwrap();
+    bench(&ws)
+        .args([
+            "run",
+            "--config",
+            "eval/tier2.toml",
+            "--conditions",
+            "alone",
+            "--resume",
+            run.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("resume: max_turns changed"));
+}
+
+fn replace_line(text: &str, prefix: &str, new_line: &str) -> String {
+    text.lines()
+        .map(|l| {
+            if l.trim_start().starts_with(prefix) {
+                new_line.to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn reset_paths_are_deleted_before_each_session() {
+    let ws = workspace();
+    let cfg = ws.root.join("eval/tier2.toml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    let text = text.replace(
+        "mcp_config = \"conditions/singularrag.json\"",
+        "mcp_config = \"conditions/singularrag.json\"\nreset = [\".singularrag/memories\"]",
+    );
+    std::fs::write(&cfg, text).unwrap();
+    let old = ws.root.join("hono/.singularrag/memories/old.md");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, "x").unwrap();
+    bench(&ws)
+        .args([
+            "run",
+            "--config",
+            "eval/tier2.toml",
+            "--conditions",
+            "singularrag",
+            "--questions",
+            "L1",
+            "--repeats",
+            "1",
+        ])
+        .assert()
+        .success();
+    assert!(!old.exists());
+}
+
+#[test]
+fn a_failing_warmup_is_a_hard_error() {
+    let ws = workspace();
+    let cfg = ws.root.join("eval/tier2.toml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    let text = replace_line(&text, "warmup = ", "warmup = [\"sh\", \"-c\", \"exit 3\"]");
+    std::fs::write(&cfg, text).unwrap();
+    bench(&ws)
+        .args([
+            "run",
+            "--config",
+            "eval/tier2.toml",
+            "--conditions",
+            "singularrag",
+            "--questions",
+            "L1",
+            "--repeats",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("warmup for singularrag failed"));
+    let run = &run_dirs(&ws)[0];
+    assert!(!run.join("singularrag/L1-1.json").exists());
 }
 
 #[test]

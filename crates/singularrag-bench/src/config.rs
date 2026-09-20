@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::repo;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Condition {
     pub name: String,
@@ -13,6 +15,12 @@ pub struct Condition {
     /// Claude Code `mcpServers` JSON; absolute after `load`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_config: Option<PathBuf>,
+    /// Argv run once before this condition's loop, `<checkout>` substituted (spec §3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warmup: Vec<String>,
+    /// Checkout-relative paths deleted before every session of this condition (spec §3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reset: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +118,17 @@ pub fn load(path: &Path) -> Result<RunConfig> {
                 );
             }
             c.mcp_config = Some(abs);
+        }
+        for entry in &c.reset {
+            let under_ignored = repo::IGNORED_PREFIXES
+                .iter()
+                .any(|pre| entry.starts_with(pre) || format!("{entry}/").starts_with(pre));
+            if !under_ignored {
+                bail!(
+                    "condition {}: reset path {entry} is not under an ignored prefix",
+                    c.name
+                );
+            }
         }
     }
     if cfg.repeats == 0 {
@@ -222,6 +241,27 @@ mcp_config = "conditions/singularrag.json"
         assert!(e.contains("duplicate condition name alone"), "{e}");
         let e = load(&write(dir.path(), GOOD)).unwrap_err().to_string();
         assert!(e.contains("mcp_config not found"), "{e}");
+    }
+
+    #[test]
+    fn reset_paths_must_be_under_an_ignored_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("conditions")).unwrap();
+        std::fs::write(dir.path().join("conditions/singularrag.json"), "{}").unwrap();
+        let bad = GOOD.replace(
+            "mcp_config = \"conditions/singularrag.json\"",
+            "mcp_config = \"conditions/singularrag.json\"\nreset = [\"src/other\"]",
+        );
+        let e = load(&write(dir.path(), &bad)).unwrap_err().to_string();
+        assert!(
+            e.contains("reset path src/other is not under an ignored prefix"),
+            "{e}"
+        );
+        let good = GOOD.replace(
+            "mcp_config = \"conditions/singularrag.json\"",
+            "mcp_config = \"conditions/singularrag.json\"\nreset = [\".singularrag/memories\"]",
+        );
+        assert!(load(&write(dir.path(), &good)).is_ok());
     }
 
     #[test]

@@ -16,7 +16,10 @@ baseline = true
 [[condition]]
 name = "singularrag"
 mcp_config = "conditions/singularrag.json"
+warmup = ["singularrag", "index", "--repo", "<checkout>"]
 
 [[condition]]
 name = "serena"
 mcp_config = "conditions/serena.json"
+warmup = ["uvx", "--from", "git+https://github.com/oraios/serena", "serena", "project", "index", "<checkout>"]
+reset = [".serena/memories"]

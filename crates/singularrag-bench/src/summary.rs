@@ -155,12 +155,17 @@ pub fn render(
     models.sort();
     models.dedup();
     let _ = writeln!(out, "# Tier-two run {}\n", meta.run_dir);
+    let singularrag_field = meta
+        .singularrag_version
+        .as_deref()
+        .map(|v| v.strip_prefix("singularrag ").unwrap_or(v))
+        .unwrap_or("n/a");
     let _ = writeln!(
         out,
         "commit {} · claude {} · singularrag {} · models: {}",
         meta.commit,
         meta.claude_version,
-        meta.singularrag_version.as_deref().unwrap_or("n/a"),
+        singularrag_field,
         if models.is_empty() {
             "none".to_string()
         } else {
@@ -224,32 +229,49 @@ pub fn render(
     }
     out.push('\n');
 
-    match all.iter().find(|s| s.name == baseline) {
-        None => {
-            let _ = writeln!(
-                out,
-                "No verdict: baseline condition {baseline} has no records."
-            );
-        }
-        Some(base) => {
-            for s in all.iter().filter(|s| s.name != baseline) {
-                let v = verdict(base, s);
-                if v.earns() {
-                    let _ = writeln!(out, "**{} earns its place** against {}.", s.name, baseline);
-                } else {
-                    let mut parts = Vec::new();
-                    if let Err(e) = &v.correctness {
-                        parts.push(format!("correctness: {e}"));
+    if let Some(reason) = meta.aborted.get(baseline) {
+        let _ = writeln!(
+            out,
+            "No verdict: baseline condition {baseline} was aborted ({reason})."
+        );
+    } else {
+        match all.iter().find(|s| s.name == baseline) {
+            None => {
+                let _ = writeln!(
+                    out,
+                    "No verdict: baseline condition {baseline} has no records."
+                );
+            }
+            Some(base) => {
+                for s in all.iter().filter(|s| s.name != baseline) {
+                    if let Some(reason) = meta.aborted.get(&s.name) {
+                        let _ = writeln!(out, "{}: no verdict (aborted: {reason})", s.name);
+                    } else if s.sessions == 0 {
+                        let _ = writeln!(out, "{}: no verdict (no records)", s.name);
+                    } else {
+                        let v = verdict(base, s);
+                        if v.earns() {
+                            let _ = writeln!(
+                                out,
+                                "**{} earns its place** against {}.",
+                                s.name, baseline
+                            );
+                        } else {
+                            let mut parts = Vec::new();
+                            if let Err(e) = &v.correctness {
+                                parts.push(format!("correctness: {e}"));
+                            }
+                            if let Err(e) = &v.efficiency {
+                                parts.push(format!("efficiency: {e}"));
+                            }
+                            let _ = writeln!(
+                                out,
+                                "{} does not earn its place: {}",
+                                s.name,
+                                parts.join("; ")
+                            );
+                        }
                     }
-                    if let Err(e) = &v.efficiency {
-                        parts.push(format!("efficiency: {e}"));
-                    }
-                    let _ = writeln!(
-                        out,
-                        "{} does not earn its place: {}",
-                        s.name,
-                        parts.join("; ")
-                    );
                 }
             }
         }
@@ -423,7 +445,7 @@ mod tests {
             run_dir: "eval/runs/20260920T000000Z-run".into(),
             commit: "098e119".into(),
             claude_version: "2.1.261".into(),
-            singularrag_version: Some("0.1.0".into()),
+            singularrag_version: Some("singularrag 0.1.0".into()),
             aborted: BTreeMap::new(),
         };
         let conds = vec![
@@ -449,6 +471,8 @@ mod tests {
         assert!(md.contains("| L1 | 0.50 | 1.00 |"), "{md}");
         assert!(md.contains("**singularrag earns its place**"), "{md}");
         assert!(md.contains("models: m"), "{md}");
+        assert!(md.contains("· singularrag 0.1.0 ·"), "{md}");
+        assert!(!md.contains("singularrag singularrag"), "{md}");
     }
 
     #[test]
@@ -476,10 +500,66 @@ mod tests {
             ),
         ];
         let md = render(&meta, "alone", &conds, &["L1".into()]);
-        assert!(md.contains("serena does not earn its place: correctness: recall 0.20 vs 0.50 (need >= 0.48); efficiency: tokens 900 vs 1000 (-10.0%), tool calls 9.0 vs 10.0 (-10.0%); need -25% on either"), "{md}");
+        assert!(
+            md.contains("serena: no verdict (aborted: mcp server serena status failed)"),
+            "{md}"
+        );
+        assert!(!md.contains("serena does not earn"), "{md}");
         assert!(
             md.contains("aborted: serena (mcp server serena status failed)"),
             "{md}"
         );
+    }
+
+    #[test]
+    fn aborted_baseline_yields_no_verdict_at_all() {
+        let mut aborted = BTreeMap::new();
+        aborted.insert("alone".to_string(), "checkout dirty".to_string());
+        let meta = RunMeta {
+            run_dir: "r".into(),
+            commit: "c".into(),
+            claude_version: "v".into(),
+            singularrag_version: None,
+            aborted,
+        };
+        let conds = vec![
+            (
+                "alone".to_string(),
+                vec![rec("L1", "alone", 0.5, 1000, 10, false)],
+            ),
+            (
+                "singularrag".to_string(),
+                vec![rec("L1", "singularrag", 1.0, 500, 4, false)],
+            ),
+        ];
+        let md = render(&meta, "alone", &conds, &["L1".into()]);
+        assert!(
+            md.contains("No verdict: baseline condition alone was aborted (checkout dirty)."),
+            "{md}"
+        );
+        assert!(!md.contains("earns its place"), "{md}");
+        assert!(!md.contains("does not earn"), "{md}");
+    }
+
+    #[test]
+    fn a_condition_with_no_records_is_skipped_in_the_verdict() {
+        let meta = RunMeta {
+            run_dir: "r".into(),
+            commit: "c".into(),
+            claude_version: "v".into(),
+            singularrag_version: None,
+            aborted: BTreeMap::new(),
+        };
+        let conds = vec![
+            (
+                "alone".to_string(),
+                vec![rec("L1", "alone", 0.5, 1000, 10, false)],
+            ),
+            ("singularrag".to_string(), vec![]),
+        ];
+        let md = render(&meta, "alone", &conds, &["L1".into()]);
+        assert!(md.contains("singularrag: no verdict (no records)"), "{md}");
+        assert!(!md.contains("singularrag earns"), "{md}");
+        assert!(!md.contains("singularrag does not earn"), "{md}");
     }
 }

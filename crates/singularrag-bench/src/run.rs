@@ -1,5 +1,6 @@
-//! One run (spec §2): preflight, run directory, optional index, the session loop with resume,
-//! the dirty check after every session, condition abort on a disconnected MCP server, summary.
+//! One run (spec §2): preflight, run directory, per-condition warmup and per-session reset, the
+//! session loop with resume, the dirty check after every session, condition abort on a
+//! disconnected MCP server, the resume config guard, the run.toml union, summary.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,22 +36,14 @@ fn singularrag_bin() -> String {
         .unwrap_or_else(|| "singularrag".to_string())
 }
 
-/// Does this condition's MCP config launch the `singularrag` command?
-fn uses_singularrag(c: &Condition) -> Result<bool> {
-    let Some(path) = &c.mcp_config else {
-        return Ok(false);
-    };
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    let servers = v.get("mcpServers").and_then(|s| s.as_object());
-    Ok(servers.into_iter().flatten().any(|(_, s)| {
-        s.get("command")
-            .and_then(|c| c.as_str())
-            .map(|c| Path::new(c).file_name().is_some_and(|f| f == "singularrag"))
-            .unwrap_or(false)
-    }))
+/// Does this condition's warmup invoke the same `singularrag` binary as `singularrag_bin()`?
+/// A condition starts warm rather than paying its first index inside a timed session (spec §2
+/// step 3); `run.toml` records the version only when a selected condition actually warms it up.
+fn warms_up_singularrag_bin(c: &Condition) -> bool {
+    c.warmup
+        .first()
+        .and_then(|w| Path::new(w).file_name())
+        .is_some_and(|f| Path::new(&singularrag_bin()).file_name() == Some(f))
 }
 
 fn select_questions(all: Vec<Question>, ids: Option<&[String]>) -> Result<Vec<Question>> {
@@ -207,13 +200,8 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
     }
 
     let claude_version = preflight(&cfg)?;
-    let needs_index = conditions
-        .iter()
-        .map(uses_singularrag)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .any(|b| b);
-    let singularrag_version = if needs_index {
+    let needs_version = conditions.iter().any(warms_up_singularrag_bin);
+    let singularrag_version = if needs_version {
         Some(version_of_singularrag()?)
     } else {
         None
@@ -224,6 +212,29 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
             let text = std::fs::read_to_string(dir.join("run.toml"))
                 .with_context(|| format!("resume: reading {}", dir.join("run.toml").display()))?;
             let rf: RunFile = toml::from_str(&text).context("resume: parsing run.toml")?;
+            macro_rules! guard {
+                ($field:ident, $label:literal) => {
+                    if rf.config.$field != cfg.$field {
+                        bail!(
+                            "resume: {} changed since the run was created ({:?} -> {:?})",
+                            $label,
+                            rf.config.$field,
+                            cfg.$field
+                        );
+                    }
+                };
+            }
+            guard!(commit, "commit");
+            guard!(answer_max, "answer_max");
+            guard!(tools, "tools");
+            guard!(max_turns, "max_turns");
+            if (rf.config.max_budget_usd - cfg.max_budget_usd).abs() > f64::EPSILON {
+                bail!(
+                    "resume: max_budget_usd changed since the run was created ({:?} -> {:?})",
+                    rf.config.max_budget_usd,
+                    cfg.max_budget_usd
+                );
+            }
             (dir.clone(), rf)
         }
         None => {
@@ -256,18 +267,6 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
         }
     };
 
-    if needs_index {
-        let st = Command::new(singularrag_bin())
-            .args(["index", "--repo"])
-            .arg(&cfg.repo)
-            .status()
-            .with_context(|| format!("running {} index", singularrag_bin()))?;
-        if !st.success() {
-            bail!("{} index failed with {st}", singularrag_bin());
-        }
-        dirty_after(&cfg, "singularrag index")?;
-    }
-
     let checkout = cfg.repo.display().to_string();
     for c in &conditions {
         if rf.run.aborted.contains_key(&c.name) {
@@ -291,12 +290,39 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
             }
             None => None,
         };
+        if !c.warmup.is_empty() {
+            let argv: Vec<String> = c
+                .warmup
+                .iter()
+                .map(|a| a.replace("<checkout>", &checkout))
+                .collect();
+            eprintln!("[{}] warmup: {}", c.name, argv.join(" "));
+            let status = Command::new(&argv[0])
+                .args(&argv[1..])
+                .current_dir(&cfg.repo)
+                .status()
+                .with_context(|| format!("running warmup for {}: {}", c.name, argv.join(" ")))?;
+            if !status.success() {
+                bail!("warmup for {} failed with {status}", c.name);
+            }
+            dirty_after(&cfg, &format!("warmup for {}", c.name))?;
+        }
         'condition: for q in &questions {
             for repeat in 1..=cfg.repeats {
                 let base = cdir.join(format!("{}-{repeat}", q.id));
                 let record_path = base.with_extension("json");
                 if record_path.exists() {
                     continue;
+                }
+                for entry in &c.reset {
+                    let p = cfg.repo.join(entry);
+                    if p.is_dir() {
+                        std::fs::remove_dir_all(&p)
+                            .with_context(|| format!("removing {}", p.display()))?;
+                    } else if p.exists() {
+                        std::fs::remove_file(&p)
+                            .with_context(|| format!("removing {}", p.display()))?;
+                    }
                 }
                 let stream_path = cdir.join(format!("{}-{repeat}.stream.jsonl", q.id));
                 let stderr_path = cdir.join(format!("{}-{repeat}.stderr", q.id));
@@ -346,6 +372,19 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
             }
         }
     }
+
+    for c in &conditions {
+        if !rf.run.conditions.contains(&c.name) {
+            rf.run.conditions.push(c.name.clone());
+        }
+    }
+    for q in &questions {
+        if !rf.run.questions.contains(&q.id) {
+            rf.run.questions.push(q.id.clone());
+        }
+    }
+    rf.config.repeats = cfg.repeats;
+    write_run_file(&run_dir, &rf)?;
 
     let (meta, baseline, conds, qids) = summary::load_run(&run_dir)?;
     let md = summary::render(&meta, &baseline, &conds, &qids);

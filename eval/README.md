@@ -65,7 +65,7 @@ Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams w
 
 Smoke run 2026-09-20 (one question, one repeat, two conditions; the run directory was outside the repo):
 
-# Tier-two run smoke
+#### Tier-two run smoke
 
 commit 098e11912ab244c5c33931de007f04dc8e3c2929 · claude 2.1.261 (Claude Code) · singularrag singularrag 0.1.0 · models: claude-opus-5[1m]
 tokens = input + output + cache creation + cache read

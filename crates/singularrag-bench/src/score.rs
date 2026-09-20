@@ -71,10 +71,14 @@ pub fn score(
     let reason: Option<String> = if let Some(e) = spawn_error {
         Some(e.to_string())
     } else if let Some(r) = result {
-        if r.is_error || r.subtype != "success" {
+        if r.is_error {
+            Some("result reported an error".to_string())
+        } else if r.subtype != "success" {
             Some(format!("result subtype {}", r.subtype))
         } else if r.structured_output.is_none() {
             Some("no structured output".to_string())
+        } else if answer_of(parsed, answer_max).is_none() {
+            Some("malformed structured output".to_string())
         } else {
             None
         }
@@ -206,11 +210,32 @@ mod tests {
         let p = parse_stream(&fixture("max_turns.jsonl"));
         let r = score(&q(&["src/router.ts::Router"]), "alone", 1, &p, 15, None);
         assert!(r.failed);
-        assert_eq!(r.reason.as_deref(), Some("result subtype error_max_turns"));
+        assert_eq!(r.reason.as_deref(), Some("result reported an error"));
         assert_eq!(r.recall, 0.0);
         assert_eq!(r.miss, s(&["src/router.ts::Router"]));
         assert!((r.cost_usd - 0.31).abs() < 1e-9);
         assert_eq!(r.tool_call_total(), 2);
+    }
+
+    #[test]
+    fn subtype_only_failure_without_is_error_keeps_the_subtype_reason() {
+        let stream = r#"{"type":"result","subtype":"error_during_execution","is_error":false,"duration_ms":1,"num_turns":1,"total_cost_usd":0.0,"usage":{},"structured_output":null}"#;
+        let p = parse_stream(stream);
+        let r = score(&q(&["src/router.ts::Router"]), "alone", 1, &p, 15, None);
+        assert!(r.failed);
+        assert_eq!(
+            r.reason.as_deref(),
+            Some("result subtype error_during_execution")
+        );
+    }
+
+    #[test]
+    fn malformed_structured_output_is_failed() {
+        let stream = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"num_turns":1,"total_cost_usd":0.0,"usage":{},"structured_output":{"symbols":"x"}}"#;
+        let p = parse_stream(stream);
+        let r = score(&q(&["src/router.ts::Router"]), "alone", 1, &p, 15, None);
+        assert!(r.failed);
+        assert_eq!(r.reason.as_deref(), Some("malformed structured output"));
     }
 
     #[test]
