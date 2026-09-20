@@ -428,7 +428,7 @@ extra_patterns = ["*.snap"]
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(MAP_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "# mine, at the top\npin = []\n\n# between sections\n[[exclude]]\npath = \"src/legacy/\"\n\ncustom = \"keep me\"\n\n[deny]\nextra_patterns = []\n# at the end\n").unwrap();
+        std::fs::write(&path, "# mine, at the top\ncustom = \"keep me\"\npin = []\n\n# between sections\n[[exclude]]\npath = \"src/legacy/\"\n\n[deny]\nextra_patterns = []\n# at the end\n").unwrap();
         let c = cfg("[[pin]]\npath = \"src/a.ts\"\n[[exclude]]\npath = \"src/legacy/\"\n");
         c.save_atomic(dir.path()).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
@@ -441,6 +441,13 @@ extra_patterns = ["*.snap"]
         assert!(written.contains("custom = \"keep me\""), "{written}");
         assert!(written.contains("# at the end"), "{written}");
         assert!(written.contains("[[pin]]"), "{written}");
+        // Verify that the unknown top-level key stays before the owned sections
+        let custom_pos = written.find("custom = \"keep me\"").expect("custom key");
+        let pin_pos = written.find("[[pin]]").expect("pin section");
+        assert!(
+            custom_pos < pin_pos,
+            "custom key should appear before [[pin]]"
+        );
         assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
         assert!(!dir.path().join(".singularrag/map.toml.tmp").exists());
     }
