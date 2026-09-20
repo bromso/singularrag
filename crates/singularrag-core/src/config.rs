@@ -104,6 +104,31 @@ impl Deny {
     }
 }
 
+/// Extract the leading decorator (prefix) from a toml_edit::Item, which holds comments that
+/// precede the item.
+fn leading_prefix(item: &toml_edit::Item) -> Option<toml_edit::RawString> {
+    match item {
+        toml_edit::Item::ArrayOfTables(a) => a.get(0).and_then(|t| t.decor().prefix().cloned()),
+        toml_edit::Item::Table(t) => t.decor().prefix().cloned(),
+        toml_edit::Item::Value(v) => v.decor().prefix().cloned(),
+        _ => None,
+    }
+}
+
+/// Set the leading decorator (prefix) on a toml_edit::Item.
+fn set_leading_prefix(item: &mut toml_edit::Item, prefix: toml_edit::RawString) {
+    match item {
+        toml_edit::Item::ArrayOfTables(a) => {
+            if let Some(t) = a.get_mut(0) {
+                t.decor_mut().set_prefix(prefix);
+            }
+        }
+        toml_edit::Item::Table(t) => t.decor_mut().set_prefix(prefix),
+        toml_edit::Item::Value(v) => v.decor_mut().set_prefix(prefix),
+        _ => {}
+    }
+}
+
 impl MapConfig {
     pub fn load(root: &Path) -> Result<MapConfig> {
         let path = root.join(MAP_FILE);
@@ -225,33 +250,46 @@ impl MapConfig {
             toml_edit::DocumentMut::new()
         };
 
-        // Preserve unknown keys (non-owned keys from the original document)
-        let unknown_keys: Vec<(String, toml_edit::Item)> = doc
-            .iter()
-            .filter(|(k, _)| !OWNED_KEYS.iter().any(|owned| owned == k))
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
+        // Determine the first owned key in the document to avoid removing its prefix
+        let first_owned_key = OWNED_KEYS.iter().find(|k| doc.get(k).is_some()).copied();
 
         let fresh = toml_edit::ser::to_string_pretty(self)
             .map_err(|e| Error::Config(e.to_string()))?
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e: toml_edit::TomlError| Error::Config(e.to_string()))?;
+
         for key in OWNED_KEYS {
             match fresh.get(key) {
                 Some(item) => {
-                    doc.remove(key);
+                    // Only remove if there's a type conflict (e.g., inline array vs array-of-tables)
+                    let needs_remove = if let Some(existing) = doc.get(key) {
+                        (existing.is_array() && item.is_array_of_tables())
+                            || (existing.is_array_of_tables() && !item.is_array_of_tables())
+                    } else {
+                        false
+                    };
+
+                    // Preserve the leading decorator (comments before the section),
+                    // but only for keys after the first owned key (leading_content handles the first key)
+                    let old_prefix = if Some(key) != first_owned_key {
+                        doc.get(key).and_then(leading_prefix)
+                    } else {
+                        None
+                    };
+
+                    if needs_remove {
+                        doc.remove(key);
+                    }
                     doc[key] = item.clone();
+
+                    // Apply the old prefix to the new item
+                    if let (Some(p), Some(new_item)) = (old_prefix, doc.get_mut(key)) {
+                        set_leading_prefix(new_item, p);
+                    }
                 }
                 None => {
                     doc.remove(key);
                 }
-            }
-        }
-
-        // Restore unknown keys
-        for (key, value) in unknown_keys {
-            if doc.get(&key).is_none() {
-                doc[&key] = value;
             }
         }
 
