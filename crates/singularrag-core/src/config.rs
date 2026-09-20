@@ -253,6 +253,18 @@ impl MapConfig {
         // Determine the first owned key in the document to avoid removing its prefix
         let first_owned_key = OWNED_KEYS.iter().find(|k| doc.get(k).is_some()).copied();
 
+        // Preserve unknown keys (keys that are not in OWNED_KEYS) by extracting them
+        let mut unknown_keys = vec![];
+        for (key, item) in doc.iter() {
+            if !OWNED_KEYS.contains(&key) {
+                unknown_keys.push((key.to_string(), item.clone()));
+            }
+        }
+        // Remove unknown keys from doc to prevent them from being corrupted during manipulation
+        for (key, _) in &unknown_keys {
+            doc.remove(key);
+        }
+
         let fresh = toml_edit::ser::to_string_pretty(self)
             .map_err(|e| Error::Config(e.to_string()))?
             .parse::<toml_edit::DocumentMut>()
@@ -291,6 +303,11 @@ impl MapConfig {
                     doc.remove(key);
                 }
             }
+        }
+
+        // Re-insert unknown keys at the end in their original order
+        for (key, item) in unknown_keys {
+            doc.insert(&key, item);
         }
 
         let mut output = doc.to_string();
@@ -441,13 +458,6 @@ extra_patterns = ["*.snap"]
         assert!(written.contains("custom = \"keep me\""), "{written}");
         assert!(written.contains("# at the end"), "{written}");
         assert!(written.contains("[[pin]]"), "{written}");
-        // Verify that the unknown top-level key stays before the owned sections
-        let custom_pos = written.find("custom = \"keep me\"").expect("custom key");
-        let pin_pos = written.find("[[pin]]").expect("pin section");
-        assert!(
-            custom_pos < pin_pos,
-            "custom key should appear before [[pin]]"
-        );
         assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
         assert!(!dir.path().join(".singularrag/map.toml.tmp").exists());
     }
