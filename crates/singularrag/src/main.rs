@@ -7,6 +7,9 @@ use clap::{Parser, Subcommand};
 use singularrag_core::engine::{Engine, FindRequest, MapRequest};
 use singularrag_core::map::DEFAULT_BUDGET;
 
+#[allow(dead_code)]
+mod mcp;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "singularrag",
