@@ -20,8 +20,10 @@ pub type Reply<T> = Result<T, String>;
 /// exists so callers (and tests) can tell "no drain has happened yet" apart from "the
 /// drain finished with nothing remaining" — both look like `remaining == 0` otherwise.
 ///
-/// Used by `serve::state::AppState`'s `Freshness.drain` (mirrored as `DrainStatsJson`
-/// since this type isn't `Serialize`).
+/// Not on the serve API (spec §5, Task 4): the watcher is the only freshness writer
+/// there. `Job::Stats`/`DrainStats` stay for the MCP drain loop, which is not wired up
+/// yet — hence `#[allow(dead_code)]`, matching the note on `Job::Stats` below.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct DrainStats {
     pub last: IndexStats,

@@ -50,6 +50,9 @@ export function App() {
   // when they *started*, not when they resolve — the same pattern `toggleBlast`
   // uses with `blastReq` — so a superseded load applies nothing at all.
   const loadGen = useRef(0);
+  // De-dupes freshness announcements: the watcher broadcasts a full status on every SSE
+  // event, so an unchanged text (e.g. two "indexing" events in a row) must not repeat.
+  const lastFreshnessRef = useRef<string | null>(null);
   const announcedLayouts = useRef(new Set<string>());
   const onLayoutReady = useCallback((v: string) => {
     if (!announcedLayouts.current.has(v)) { announcedLayouts.current.add(v); announce("Map layout ready"); }
@@ -99,7 +102,11 @@ export function App() {
     load().catch((e: unknown) => toastError(e));
     return subscribe(
       () => { load().catch(() => {}); },
-      (s) => { setStatus(s); announce(`Index ${freshnessText(s)}`); },
+      (s) => {
+        setStatus(s);
+        const text = `Index ${freshnessText(s)}`;
+        if (text !== lastFreshnessRef.current) { lastFreshnessRef.current = text; announce(text); }
+      },
     );
   }, [announce, applyMapDoc]);
 

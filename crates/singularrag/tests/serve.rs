@@ -292,7 +292,6 @@ async fn routes_have_the_documented_shapes() {
         "foreign_indexing",
         "indexing",
         "files",
-        "drain",
     ] {
         assert!(status.get(k).is_some(), "status missing {k}: {status}");
     }

@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { App } from "./App";
 
-const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false, files: { indexed: 4, skipped: 1 }, drain: { chunks: 0, last: { scanned: 5, indexed: 4, unchanged: 0, skipped: 1, removed: 0, remaining: 0, lock_timeout: false } } };
+const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false, files: { indexed: 4, skipped: 1 } };
 const r = { score: 0.1, file_rank: 0.1, seeds: ["query:session"], referenced_by: [{ path: "src/http/middleware.ts", count: 2 }], pinned: false, fts_hit: true, query_ident_match: true };
 const retrieval = { id: 7, session_key: "mcp:claude-code:1:2", session_label: "Claude Code", tool: "repo_map", query: "session", focus_files: [], budget: 1024, limit_n: null, index_version: "abc123", git_head: "9b1e0d4f", stale_count: 0, created_at_ms: Date.now(), served: 1, cut: 0 };
 const tree = [{ path: "src/auth/session.ts", lang: "typescript", skipped_reason: null, symbols: [{ id: 1, name: "createSession", kind: "function", line_start: 3, line_end: 6, signature: "export function createSession(user: User, ttl: number): Session" }] }];
@@ -27,6 +27,9 @@ let blastGate: Promise<void> | null = null;
 // live SSE "change" event (another agent's retrieval) without a real
 // EventSource, by invoking the captured listener directly.
 let changeHandler: ((e: { data: string }) => void) | null = null;
+// Same idea, for the `subscribe()` module's "freshness" listener — lets a test
+// simulate a live SSE "freshness" event without a real EventSource.
+let freshnessHandler: ((e: { data: string }) => void) | null = null;
 // When set, `/api/graph` answers with these nodes instead of mirroring `tree` — lets a
 // test simulate a file excluded from the map (present in the tree/retrieval, absent
 // from the graph) without a second permanent fixture file.
@@ -61,6 +64,7 @@ beforeEach(() => {
   blastGate = null;
   retrievalList = [retrieval];
   changeHandler = null;
+  freshnessHandler = null;
   graphNodesOverride = null;
   extraRetrievalItems = [];
   detailItems = [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }];
@@ -69,6 +73,7 @@ beforeEach(() => {
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
+      if (type === "freshness") freshnessHandler = cb;
     }
     close() {}
   };
@@ -161,6 +166,18 @@ describe("App", () => {
     expect(changeHandler).not.toBeNull();
     changeHandler?.({ data: JSON.stringify({ max_retrieval_id: 8 }) });
     await waitFor(() => expect(live.textContent).toContain("New retrieval from Codex: find_symbol, 2 served, 1 cut, fresh"));
+  });
+  test("identical freshness payloads announce once; a change announces again", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const log = () => screen.getByRole("log", { name: "Announcements" }).textContent ?? "";
+    const payload = { ...status, indexing: true };
+    await act(async () => { freshnessHandler!({ data: JSON.stringify(payload) }); });
+    await act(async () => { freshnessHandler!({ data: JSON.stringify(payload) }); });
+    expect(log().split("Index indexing").length - 1).toBe(1);
+    await act(async () => { freshnessHandler!({ data: JSON.stringify({ ...status, indexing: false }) }); });
+    expect(log()).toContain("Index fresh");
+    expect(screen.getByLabelText("Index freshness").textContent).toContain("9b1e0d4");
   });
   test("a_row_action_button_moves_focus_to_the_detail_panel", async () => {
     const user = userEvent.setup();

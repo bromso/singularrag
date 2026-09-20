@@ -22,7 +22,6 @@ export type MapDoc = MapConfig & { version: number };
 export type Status = {
   index_version: string; git_head: string | null; indexed_at_ms: number | null; stale_count: number;
   lock_timeout: boolean; foreign_indexing: boolean; indexing: boolean; files: { indexed: number; skipped: number };
-  drain: { chunks: number; last: { scanned: number; indexed: number; unchanged: number; skipped: number; removed: number; remaining: number; lock_timeout: boolean } };
 };
 export type GraphNode = { path: string; symbols: number; lang: string | null };
 export type GraphEdge = { src: number; dst: number; weight: number; names: number };
