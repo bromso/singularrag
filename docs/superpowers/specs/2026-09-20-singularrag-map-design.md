@@ -36,7 +36,8 @@ Calls core `graph::build_graph(store, &config, &[], &HashSet::new())`: no query 
 A breadth-first walk over `refs`, `symbols` and `files` in a new core module (`blast::blast_radius(store, config, path, symbol, max_depth, max_files)`), depth cap 3, file cap 200. *(Amended at plan time from "one recursive CTE": a walk with two prepared statements per level gives the same result and is testable level by level.)*
 
 - Depth 0: the file `path`, which must define `symbol` (else 404 `{ "error": "symbol not found" }`).
-- Depth n+1: every non-excluded, non-skipped file with a `refs` row whose `name` equals any symbol defined in a depth-n file, and that has not been reached at a shallower depth. A file is reported once at its minimum depth, with `via` the name that reached it first (lowest depth, then alphabetical).
+- Depth 1: every non-excluded, non-skipped file with a `refs` row whose `name` equals the selected symbol's name (the walk is scoped to that symbol, not to everything its file defines).
+- Depth n+1 (n ≥ 1): every non-excluded, non-skipped file with a `refs` row whose `name` equals any symbol defined in a depth-n file, and that has not been reached at a shallower depth. A file is reported once at its minimum depth, with `via` the name that reached it first (lowest depth, then alphabetical).
 - Stops at depth 3 or when 200 files are reached; `truncated` says which cap hit, if any.
 
 Response: `{ "root": { "path", "symbol" }, "files": [ { "path", "depth", "via" } ], "truncated": null }`, files ordered by depth then path; `truncated` is `null`, `"depth"` or `"files"`. Missing `path` or `symbol` is 400 `{ "error": "path and symbol are required" }`. Depth 1 answers "what references this symbol"; deeper levels are what the parent spec calls blast radius.

@@ -88,6 +88,28 @@ pub struct SkippedFile {
     pub reason: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GraphNode {
+    pub path: String,
+    pub symbols: usize,
+    pub lang: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphEdge {
+    pub src: usize,
+    pub dst: usize,
+    pub weight: f64,
+    pub names: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphDto {
+    pub index_version: String,
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
 /// Spec §3: `mcp:<slug>:…` → title-cased slug; `cli-<pid>` → CLI; `serve` → UI; else raw.
 pub fn session_label(key: &str) -> String {
     if let Some(rest) = key.strip_prefix("mcp:") {
@@ -282,6 +304,70 @@ pub fn skipped(store: &Store) -> Result<Vec<SkippedFile>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// The ranking's file graph, projected for drawing: excluded files absent, self-edges
+/// dropped, one edge per ordered pair (spec §3).
+pub fn graph(store: &Store, config: &singularrag_core::config::MapConfig) -> Result<GraphDto> {
+    let g = singularrag_core::graph::build_graph(
+        store,
+        config,
+        &[],
+        &std::collections::HashSet::new(),
+    )?;
+    let conn = store.conn();
+    let mut counts = std::collections::HashMap::<i64, usize>::new();
+    let mut stmt = conn.prepare("SELECT file_id, COUNT(*) FROM symbols GROUP BY file_id")?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+        let (fid, n) = row?;
+        counts.insert(fid, n as usize);
+    }
+    let mut langs = std::collections::HashMap::<i64, Option<String>>::new();
+    let mut stmt = conn.prepare("SELECT id, lang FROM files")?;
+    for row in stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+    })? {
+        let (fid, l) = row?;
+        langs.insert(fid, l);
+    }
+    let nodes = g
+        .nodes
+        .iter()
+        .map(|n| GraphNode {
+            path: n.path.clone(),
+            symbols: counts.get(&n.id).copied().unwrap_or(0),
+            lang: langs.get(&n.id).cloned().flatten(),
+        })
+        .collect();
+    // (src, dst) -> (weight sum, distinct names)
+    let mut agg = std::collections::BTreeMap::<
+        (usize, usize),
+        (f64, std::collections::BTreeSet<String>),
+    >::new();
+    for e in &g.edges {
+        if e.src == e.dst {
+            continue;
+        }
+        let entry = agg
+            .entry((e.src, e.dst))
+            .or_insert((0.0, Default::default()));
+        entry.0 += e.weight;
+        entry.1.insert(e.name.clone());
+    }
+    let edges = agg
+        .into_iter()
+        .map(|((src, dst), (weight, names))| GraphEdge {
+            src,
+            dst,
+            weight,
+            names: names.len(),
+        })
+        .collect();
+    Ok(GraphDto {
+        index_version: store.get_meta("index_version")?.unwrap_or_default(),
+        nodes,
+        edges,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +485,65 @@ mod tests {
         assert!(s.foreign_indexing);
         assert!(s.files.indexed >= 4);
         assert!(s.files.skipped >= 2);
+    }
+
+    #[test]
+    fn graph_projects_files_and_aggregated_edges() {
+        let (_d, store) = seeded();
+        let g = graph(&store, &singularrag_core::config::MapConfig::default()).unwrap();
+        assert!(!g.index_version.is_empty());
+        let paths: Vec<&str> = g.nodes.iter().map(|n| n.path.as_str()).collect();
+        // Same files as the tree (non-skipped; `src/config.ts` is skipped by the secret scan), in path order.
+        assert_eq!(g.nodes.len(), tree(&store).unwrap().len());
+        assert!(
+            paths.windows(2).all(|w| w[0] < w[1]),
+            "path order: {paths:?}"
+        );
+        for p in [
+            "src/auth/session.ts",
+            "src/cli/login.ts",
+            "src/http/middleware.ts",
+            "src/util/log.ts",
+        ] {
+            assert!(paths.contains(&p), "{p} missing from {paths:?}");
+        }
+        let session = paths
+            .iter()
+            .position(|p| *p == "src/auth/session.ts")
+            .unwrap();
+        let middleware = paths
+            .iter()
+            .position(|p| *p == "src/http/middleware.ts")
+            .unwrap();
+        assert!(g.nodes[session].symbols >= 4);
+        assert_eq!(g.nodes[session].lang.as_deref(), Some("typescript"));
+        let e = g
+            .edges
+            .iter()
+            .find(|e| e.src == middleware && e.dst == session)
+            .expect("middleware -> session edge");
+        assert!(e.weight > 0.0);
+        assert!(
+            e.names >= 1,
+            "createSession and Session are distinct names behind one edge"
+        );
+        assert!(g.edges.iter().all(|e| e.src != e.dst), "self-edges dropped");
+        assert_eq!(
+            g.edges
+                .iter()
+                .filter(|e| e.src == middleware && e.dst == session)
+                .count(),
+            1,
+            "one edge per pair"
+        );
+    }
+
+    #[test]
+    fn graph_omits_excluded_files() {
+        let (_d, store) = seeded();
+        let cfg = singularrag_core::config::MapConfig::parse("[[exclude]]\npath = \"src/cli/\"\n")
+            .unwrap();
+        let g = graph(&store, &cfg).unwrap();
+        assert!(g.nodes.iter().all(|n| !n.path.starts_with("src/cli/")));
     }
 }

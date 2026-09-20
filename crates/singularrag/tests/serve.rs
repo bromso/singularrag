@@ -473,3 +473,54 @@ async fn touching_a_file_changes_freshness_within_two_seconds() {
     let tree: serde_json::Value = get(&s, "/tree").await.json().await.unwrap();
     assert!(tree.to_string().contains("logAgain"));
 }
+
+#[tokio::test]
+async fn graph_and_blast_are_served_behind_the_token() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let r = client()
+        .get(format!("{}/api/graph", s.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let g: serde_json::Value = get(&s, "/graph").await.json().await.unwrap();
+    let tree: serde_json::Value = get(&s, "/tree").await.json().await.unwrap();
+    assert_eq!(
+        g["nodes"].as_array().unwrap().len(),
+        tree.as_array().unwrap().len()
+    );
+    assert!(g["edges"].as_array().unwrap().len() >= 2);
+    let b: serde_json::Value = get(&s, "/blast?path=src/auth/session.ts&symbol=createSession")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(b["root"]["symbol"], "createSession");
+    assert_eq!(b["files"][0]["depth"], 1);
+    assert!(b["truncated"].is_null());
+    let r = get(&s, "/blast?path=src/auth/session.ts&symbol=nope").await;
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
+    let r = get(&s, "/blast?path=src/auth/session.ts").await;
+    assert_eq!(r.status(), 400);
+}
+
+#[tokio::test]
+async fn put_map_rejects_duplicate_boundary_names() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let body = serde_json::json!({ "pin": [], "exclude": [], "note": [], "boundary": [ { "name": "x", "paths": ["src/a.ts"] }, { "name": "x", "paths": ["src/b.ts"] } ], "deny": { "extra_patterns": [] } });
+    let r = client()
+        .put(format!("{}/api/map", s.url))
+        .bearer_auth(&s.token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 422);
+    let e: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(e["field"], "boundary[1].name");
+}
