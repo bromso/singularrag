@@ -6,6 +6,7 @@ pub mod events;
 pub mod queries;
 pub mod routes;
 pub mod state;
+pub mod watcher;
 
 use std::path::PathBuf;
 
@@ -48,15 +49,42 @@ pub fn router(state: AppState) -> Router {
     Router::new().nest("/api", api).with_state(state)
 }
 
-/// Bind, print the one stdout line, open the browser, serve until Ctrl-C.
+/// Bind, spawn the actor and run its startup refresh (creating the index if this is a
+/// fresh repo), open the read-only store, print the one stdout line, open the browser,
+/// serve until Ctrl-C or the actor dies.
+///
+/// The actor is spawned and its startup refresh run *before* `AppState::new`, not after:
+/// `AppState::new` opens `.singularrag/index.db` read-only and fails if it does not exist
+/// yet, so on a fresh repo the index must be created first. `watcher::refresh_once` takes
+/// `&AppState` (it updates `freshness` and broadcasts), which does not exist yet at that
+/// point, so the startup refresh calls `handle.refresh()` directly and `watcher::apply`s
+/// the resulting stats once `AppState` exists.
 pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(async move {
+
+    // Spawned (and joined below) outside `block_on`, as `mcp::run` does: `actor::spawn`
+    // is synchronous (an OS thread, not a task), and joining it is a blocking call that
+    // has no business running on a tokio worker thread.
+    let (handle, join, mut died) = crate::actor::spawn(crate::actor::EngineConfig {
+        root: root.clone(),
+        session_key: crate::actor::SessionKey::Fixed("serve".into()),
+        refresh_budget: singularrag_core::engine::REFRESH_BUDGET,
+    });
+
+    let result = rt.block_on(async {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         let port = listener.local_addr()?.port();
+
+        let startup_stats = handle
+            .refresh()
+            .await
+            .map_err(|e| anyhow::anyhow!("startup refresh failed: {e}"))?;
+
         let state = AppState::new(root, port)?;
+        watcher::apply(&state, startup_stats);
+
         let url = format!("http://127.0.0.1:{port}/#token={}", state.token);
         println!("{url}");
         if open_browser {
@@ -65,7 +93,25 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
             }
         }
         let _poller = events::spawn_poller(state.clone());
-        axum::serve(listener, router(state)).await?;
+        let _debouncer = watcher::start(state.clone(), handle.clone())?;
+
+        // Spec §2: the one fatal path is the actor thread dying (mirrors `mcp::run`).
+        tokio::select! {
+            served = axum::serve(listener, router(state)) => {
+                served?;
+            }
+            _ = &mut died => {
+                tracing::error!("engine thread exited unexpectedly");
+                std::process::exit(2);
+            }
+        }
         Ok::<(), anyhow::Error>(())
-    })
+    });
+
+    handle.shutdown();
+    if join.join().is_err() {
+        tracing::error!("engine thread panicked");
+        std::process::exit(2);
+    }
+    result
 }

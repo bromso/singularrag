@@ -32,10 +32,8 @@ pub enum Job {
     Map(MapRequest, oneshot::Sender<Reply<MapResponse>>),
     Find(FindRequest, oneshot::Sender<Reply<FindResponse>>),
     /// One budgeted refresh with no retrieval recorded and no drain armed: the file
-    /// watcher's job, not a tool response. Not yet constructed by any production caller
-    /// (the watcher is a later task in this plan); the actor's unit tests exercise it
-    /// directly through `EngineHandle::refresh`.
-    #[allow(dead_code)]
+    /// watcher's job, not a tool response. Constructed by `serve::watcher` through
+    /// `EngineHandle::refresh`, and exercised directly by the actor's unit tests.
     Refresh(oneshot::Sender<Reply<IndexStats>>),
     // Constructed only by `EngineHandle::set_refresh_budget`/`stats`, which are currently
     // test-only (see the `#[allow(dead_code)]` note on `DrainStats`).
@@ -50,9 +48,8 @@ pub enum Job {
 #[derive(Clone)]
 pub enum SessionKey {
     /// A process that knows its own name (`serve`, tests): the key is used verbatim.
-    /// Not yet built by any production caller (`serve` is a later task in this plan);
-    /// exercised directly by the actor's unit tests.
-    #[allow(dead_code)]
+    /// Built by `serve::run` (`SessionKey::Fixed("serve".into())`); also exercised
+    /// directly by the actor's unit tests.
     Fixed(String),
     /// The MCP server: filled from `clientInfo.name` during initialize, read at first job.
     FromHandshake(Arc<Mutex<Option<String>>>),
@@ -87,9 +84,8 @@ impl EngineHandle {
         self.ask(|tx| Job::Find(req, tx)).await
     }
 
-    // One budgeted refresh with no retrieval recorded. The watcher's job. Test-only for
-    // now; see the `#[allow(dead_code)]` note on `Job::Refresh`.
-    #[allow(dead_code)]
+    // One budgeted refresh with no retrieval recorded. The watcher's job; see the
+    // doc comment on `Job::Refresh`.
     pub async fn refresh(&self) -> Reply<IndexStats> {
         self.ask(Job::Refresh).await
     }
