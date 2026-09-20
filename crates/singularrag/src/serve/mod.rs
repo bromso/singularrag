@@ -14,15 +14,15 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use state::AppState;
 
 pub fn router(state: AppState) -> Router {
+    // axum nests layers outward (the last `.layer` added is outermost), so this list reads
+    // innermost-first: `require_token` wraps the handler, `check_host` wraps that (so the
+    // host check runs before the token check on the way in), and the cache-control layer
+    // wraps everything (so it stamps the header on 401/403 rejections too, not just 200s).
     let api = Router::new()
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({ "ok": true })) }),
         )
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store"),
-        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -30,6 +30,10 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::check_host,
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
         ));
     Router::new().nest("/api", api).with_state(state)
 }

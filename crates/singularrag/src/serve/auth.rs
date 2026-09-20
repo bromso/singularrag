@@ -111,6 +111,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(r.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
         let r = app
             .clone()
             .oneshot(req(
@@ -166,7 +167,19 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(r.status(), StatusCode::FORBIDDEN, "{host}");
+            assert_eq!(
+                r.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-store",
+                "{host}"
+            );
         }
+        // No Authorization header at all: if this came back 401 instead of 403, check_host
+        // would not be running before require_token.
+        let r = app
+            .oneshot(req("GET", "/api/health", "evil.example:4173", None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
