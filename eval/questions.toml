@@ -1,0 +1,77 @@
+# Fixed on first run. Never edit an existing question; add new ids instead.
+# Authored against honojs/hono at commit 098e11912ab244c5c33931de007f04dc8e3c2929.
+# Every gold entry is `path::name` where `name` is printed by `singularrag find <name>`
+# for a definition under src/. Test-file doppelgangers (e.g. the `class Context` in
+# src/middleware/cache/index.test.ts) are never gold.
+
+[[question]]
+id = "L1"
+category = "locate"
+query = "where is request routing decided"
+gold = ["src/router.ts::Router", "src/router.ts::match", "src/router/reg-exp-router/router.ts::RegExpRouter", "src/hono-base.ts::Hono"]
+
+[[question]]
+id = "L2"
+category = "locate"
+query = "where are middleware chains composed"
+gold = ["src/compose.ts::compose", "src/compose.ts::dispatch", "src/hono-base.ts::use"]
+
+[[question]]
+id = "L3"
+category = "locate"
+query = "where does context c.json() get its response type"
+gold = ["src/context.ts::Context", "src/context.ts::JSONRespond", "src/context.ts::NewResponse", "src/context.ts::createResponseInstance"]
+
+[[question]]
+id = "T1"
+category = "trace"
+query = "path from middleware registration to handler dispatch"
+gold = ["src/hono-base.ts::use", "src/router.ts::add", "src/compose.ts::compose", "src/compose.ts::dispatch"]
+
+[[question]]
+id = "T2"
+category = "trace"
+query = "from incoming request to matched route params"
+gold = ["src/hono-base.ts::Hono", "src/router.ts::match", "src/request.ts::HonoRequest", "src/request.ts::param"]
+
+[[question]]
+id = "T3"
+category = "trace"
+query = "from an error thrown in a handler to the response"
+gold = ["src/compose.ts::dispatch", "src/hono-base.ts::errorHandler", "src/http-exception.ts::HTTPException", "src/http-exception.ts::getResponse"]
+
+[[question]]
+id = "B1"
+category = "blast"
+query = "what breaks if the router match signature changes"
+gold = ["src/router.ts::match", "src/router/trie-router/router.ts::match", "src/router/linear-router/router.ts::match", "src/router/pattern-router/router.ts::match", "src/router/smart-router/router.ts::match", "src/hono-base.ts::Hono"]
+
+[[question]]
+id = "B2"
+category = "blast"
+query = "what breaks if the Context class is renamed"
+gold = ["src/context.ts::Context", "src/hono-base.ts::Hono", "src/compose.ts::compose", "src/compose.ts::dispatch", "src/request.ts::HonoRequest"]
+
+[[question]]
+id = "B3"
+category = "blast"
+query = "what breaks if the middleware next contract changes"
+gold = ["src/compose.ts::dispatch", "src/hono-base.ts::use", "src/middleware/logger/index.ts::logger", "src/middleware/cors/index.ts::cors", "src/middleware/jwt/jwt.ts::jwt"]
+
+[[question]]
+id = "P1"
+category = "placement"
+query = "where would you add a new built-in middleware"
+gold = ["src/hono-base.ts::use", "src/middleware/powered-by/index.ts::poweredBy", "src/middleware/logger/index.ts::logger", "src/middleware/etag/index.ts::etag"]
+
+[[question]]
+id = "P2"
+category = "placement"
+query = "where would you add a new router implementation"
+gold = ["src/router.ts::Router", "src/router/trie-router/router.ts::TrieRouter", "src/router/pattern-router/router.ts::PatternRouter", "src/router/linear-router/router.ts::LinearRouter"]
+
+[[question]]
+id = "P3"
+category = "placement"
+query = "where would you add a response helper on context"
+gold = ["src/context.ts::Context", "src/context.ts::NewResponse", "src/context.ts::createResponseInstance", "src/context.ts::JSONRespond"]
