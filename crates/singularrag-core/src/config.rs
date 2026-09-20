@@ -8,6 +8,15 @@ use crate::{Error, Result};
 
 pub const MAP_FILE: &str = ".singularrag/map.toml";
 
+pub const MAP_HEADER: &str =
+    "# Managed by singularrag serve. Hand edits are kept; comments are not.\n";
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MapConfigError {
+    pub field: String,
+    pub message: String,
+}
+
 /// Never shrinkable. `map.toml` may only add patterns.
 pub const BUILTIN_DENY: &[&str] = &[
     ".env*",
@@ -22,6 +31,26 @@ pub const BUILTIN_DENY: &[&str] = &[
     "secrets/",
     "credentials*",
 ];
+
+fn check_path(field: &str, p: &str) -> std::result::Result<(), MapConfigError> {
+    let bad = |message: &str| MapConfigError {
+        field: field.to_string(),
+        message: message.to_string(),
+    };
+    if p.is_empty() {
+        return Err(bad("path is empty"));
+    }
+    if p.starts_with('/') || p.contains('\\') || p.chars().nth(1) == Some(':') {
+        return Err(bad("path must be repo-relative with forward slashes"));
+    }
+    if p.starts_with("./") {
+        return Err(bad("path must not start with ./"));
+    }
+    if p.split('/').any(|seg| seg == "..") {
+        return Err(bad("path must not contain .."));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MapConfig {
@@ -101,6 +130,47 @@ impl MapConfig {
             .chain(self.deny.extra_patterns.iter().cloned())
             .collect()
     }
+
+    /// Spec §3: every path repo-relative; `deny.extra_patterns` may only grow.
+    pub fn validate(&self, current_extras: &[String]) -> std::result::Result<(), MapConfigError> {
+        for (i, t) in self.pin.iter().enumerate() {
+            check_path(&format!("pin[{i}].path"), &t.path)?;
+        }
+        for (i, t) in self.exclude.iter().enumerate() {
+            check_path(&format!("exclude[{i}].path"), &t.path)?;
+        }
+        for (i, n) in self.note.iter().enumerate() {
+            check_path(&format!("note[{i}].path"), &n.path)?;
+        }
+        for (i, b) in self.boundary.iter().enumerate() {
+            for (j, p) in b.paths.iter().enumerate() {
+                check_path(&format!("boundary[{i}].paths[{j}]"), p)?;
+            }
+        }
+        if let Some(missing) = current_extras
+            .iter()
+            .find(|p| !self.deny.extra_patterns.contains(p))
+        {
+            return Err(MapConfigError {
+                field: "deny.extra_patterns".into(),
+                message: format!("deny patterns may only be added; {missing} was removed"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Write `map.toml` via a temp file and rename so a reader never sees a torn file.
+    pub fn save_atomic(&self, root: &Path) -> Result<()> {
+        let path = root.join(MAP_FILE);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = toml::to_string_pretty(self).map_err(|e| Error::Config(e.to_string()))?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, format!("{MAP_HEADER}{body}"))?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -171,5 +241,64 @@ extra_patterns = ["*.snap"]
     fn invalid_toml_is_config_error() {
         let err = MapConfig::parse("[[pin]\npath = 1").unwrap_err();
         assert!(matches!(err, crate::Error::Config(_)));
+    }
+
+    fn cfg(toml_src: &str) -> MapConfig {
+        MapConfig::parse(toml_src).unwrap()
+    }
+
+    #[test]
+    fn validate_accepts_repo_relative_paths() {
+        let c = cfg("[[pin]]\npath = \"src/a.ts\"\n[[exclude]]\npath = \"src/legacy/\"\n[[note]]\npath = \"src/a.ts\"\nsymbol = \"f\"\ntext = \"x\"\n[[boundary]]\nname = \"auth\"\npaths = [\"src/auth/\"]\n");
+        assert!(c.validate(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_absolute_dotdot_and_dot_slash() {
+        for (bad, field) in [
+            ("[[pin]]\npath = \"/etc/passwd\"\n", "pin[0].path"),
+            ("[[exclude]]\npath = \"../x\"\n", "exclude[0].path"),
+            (
+                "[[note]]\npath = \"src/../../x\"\ntext = \"t\"\n",
+                "note[0].path",
+            ),
+            ("[[pin]]\npath = \"./src/a.ts\"\n", "pin[0].path"),
+            (
+                "[[boundary]]\nname = \"b\"\npaths = [\"src/ok\", \"C:\\\\x\"]\n",
+                "boundary[0].paths[1]",
+            ),
+            ("[[pin]]\npath = \"src\\\\a.ts\"\n", "pin[0].path"),
+        ] {
+            let err = cfg(bad).validate(&[]).unwrap_err();
+            assert_eq!(err.field, field, "{bad}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_shrunk_deny_list() {
+        let c = cfg("[deny]\nextra_patterns = [\"*.snap\"]\n");
+        assert!(c.validate(&["*.snap".to_string()]).is_ok());
+        assert!(c.validate(&[]).is_ok(), "growing is fine");
+        let err = c
+            .validate(&["*.snap".to_string(), "*.lock".to_string()])
+            .unwrap_err();
+        assert_eq!(err.field, "deny.extra_patterns");
+        assert!(err.message.contains("*.lock"));
+    }
+
+    #[test]
+    fn save_atomic_round_trips_with_header_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let c =
+            cfg("[[pin]]\npath = \"src/a.ts\"\n[[note]]\npath = \"src/a.ts\"\ntext = \"hello\"\n");
+        c.save_atomic(dir.path()).unwrap();
+        let written = std::fs::read_to_string(dir.path().join(MAP_FILE)).unwrap();
+        assert!(written.starts_with(MAP_HEADER), "{written}");
+        assert!(!dir.path().join(".singularrag/map.toml.tmp").exists());
+        assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
+        // Overwrite works too.
+        let c2 = cfg("[[exclude]]\npath = \"src/legacy/\"\n");
+        c2.save_atomic(dir.path()).unwrap();
+        assert_eq!(MapConfig::load(dir.path()).unwrap(), c2);
     }
 }
