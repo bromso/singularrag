@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { ApiError, api, getToken, setToken, tokenFromFragment } from "./client";
+import { ApiError, api, getToken, resetTokenMemo, setToken, tokenFromFragment } from "./client";
 import { subscribe } from "./events";
 import type { MapConfig, Status } from "./types";
 
@@ -16,8 +16,20 @@ const mockStatus: Status = {
 };
 
 describe("tokenFromFragment", () => {
+  beforeEach(() => {
+    resetTokenMemo();
+  });
   afterEach(() => {
     window.location.hash = "";
+  });
+
+  test("is idempotent: a second call after the fragment was cleared returns the same token", () => {
+    // React StrictMode runs the mount effect twice. The first call strips the token
+    // from the address bar, so the second call must not read an empty hash and wipe it.
+    window.location.hash = "#token=abc123";
+    expect(tokenFromFragment()).toBe("abc123");
+    expect(window.location.hash).toBe("");
+    expect(tokenFromFragment()).toBe("abc123");
   });
 
   test("extracts token from hash only", () => {
