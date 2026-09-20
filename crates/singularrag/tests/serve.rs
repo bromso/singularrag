@@ -320,7 +320,11 @@ async fn routes_have_the_documented_shapes() {
     let sk: serde_json::Value = get(&s, "/skipped").await.json().await.unwrap();
     assert!(sk.as_array().unwrap().iter().any(|f| f["path"] == ".env"));
     let map: serde_json::Value = get(&s, "/map").await.json().await.unwrap();
+    for k in ["pin", "exclude", "note", "boundary", "deny", "version"] {
+        assert!(map.get(k).is_some(), "map missing {k}: {map}");
+    }
     assert!(map["pin"].is_array());
+    assert!(map["deny"]["extra_patterns"].is_array());
     assert_eq!(get(&s, "/retrievals/999999").await.status(), 404);
 }
 

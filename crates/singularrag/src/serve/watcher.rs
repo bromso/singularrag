@@ -8,7 +8,6 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
 use singularrag_core::index::IndexStats;
-use singularrag_core::time::now_ms;
 use tokio::sync::mpsc;
 
 use super::state::{AppState, ServerEvent};
@@ -51,9 +50,6 @@ pub fn apply(state: &AppState, stats: IndexStats) {
         f.lock_timeout = stats.lock_timeout;
         f.foreign_indexing = stats.lock_timeout;
         f.indexing = false;
-        if !stats.lock_timeout {
-            f.indexed_at_ms = Some(now_ms());
-        }
     }
     broadcast_status(state);
 }
@@ -177,7 +173,6 @@ mod tests {
         assert_eq!(f.stale_count, 0);
         assert!(!f.foreign_indexing);
         assert!(!f.indexing);
-        assert!(f.indexed_at_ms.is_some());
         let mut seen = Vec::new();
         while let Ok(crate::serve::state::ServerEvent::Freshness(s)) = rx.try_recv() {
             seen.push(s);
@@ -190,6 +185,7 @@ mod tests {
             "the payload is a full status"
         );
         assert_eq!(seen[1].files.indexed, 4);
+        assert!(seen[1].indexed_at_ms.is_some());
     }
 
     #[tokio::test]

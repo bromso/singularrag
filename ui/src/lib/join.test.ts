@@ -74,6 +74,18 @@ describe("join tiers", () => {
     expect(far.status).toBe("untouched");
   });
 
+  test("tier 3 tie keeps the earlier symbol: array order is file order", () => {
+    const twoF: TreeFile[] = [{ path: "src/a.ts", lang: null, skipped_reason: null, symbols: [
+      { id: 20, name: "f", kind: "function", line_start: 5, line_end: 6, signature: "f" },
+      { id: 21, name: "f", kind: "function", line_start: 15, line_end: 16, signature: "f" },
+    ] }];
+    const rows = joinRetrieval(twoF, [item({ symbol_id: 777, name: "f", line_start: 10 })]);
+    const [early, late] = rows[0].symbols;
+    expect(early.status).toBe("served");
+    expect(early.moved).toBe(true);
+    expect(late.status).toBe("untouched");
+  });
+
   test("a name that no longer exists in the file stays unjoined", () => {
     const rows = joinRetrieval(files, [item({ symbol_id: 777, name: "gone", line_start: 1 })]);
     expect(rows[0].symbols.every((s) => s.status === "untouched")).toBe(true);

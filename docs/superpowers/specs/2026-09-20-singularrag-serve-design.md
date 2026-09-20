@@ -27,7 +27,7 @@ All under `/api`, JSON, token-guarded (§5). Timestamps are Unix milliseconds.
 | `GET /api/status` | `{ index_version, git_head, indexed_at_ms, stale_count, lock_timeout, foreign_indexing: bool, indexing: bool, files: { indexed, skipped } }` |
 | `GET /api/retrievals?limit=50&before=<id>` | newest first: `[{ id, session_key, session_label, tool, query, focus_files: [..], budget, limit_n, index_version, git_head, stale_count, created_at_ms, served, cut }]` |
 | `GET /api/retrievals/{id}` | the retrieval plus `items: [{ rank, symbol_id, path, name, line_start, score, served: bool, reasons: Reasons }]` with `reasons_json` parsed |
-| `GET /api/tree` | `[{ path, lang, skipped_reason, symbols: [{ id, name, kind, line_start, line_end, signature }] }]`, sorted by path; the client joins a selected retrieval's items onto symbol rows by `(path, name, line_start)` |
+| `GET /api/tree` | `[{ path, lang, skipped_reason, symbols: [{ id, name, kind, line_start, line_end, signature }] }]`, sorted by path; the client joins items to symbols by `symbol_id` (guarded by path and name), then `(path, name, line_start)`, then `(path, name)` at the nearest line, which marks the symbol moved |
 | `GET /api/skipped` | `[{ path, reason }]` |
 | `GET /api/map` | the `MapConfig` as JSON, plus `version` |
 | `PUT /api/map` | body: `MapConfig` JSON, optionally with `expected_version`; validates and writes `.singularrag/map.toml` atomically; returns the saved config with its new `version` |

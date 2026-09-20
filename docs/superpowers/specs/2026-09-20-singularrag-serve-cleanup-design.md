@@ -39,7 +39,7 @@ Tests (`App.test.tsx`): a change event with an unchanged `index_version` does no
 
 ## 5. One freshness writer
 
-- `Freshness` (serve `state.rs`) keeps `stale_count`, `lock_timeout`, `foreign_indexing`, `indexing`, `indexed_at_ms`. The `drain` field and `DrainStatsJson` are removed from `Freshness`, `StatusDto`, the UI `Status` type and the badge. The actor's `Job::Stats` stays for the MCP drain loop; nothing on the serve side reads it.
+- `Freshness` (serve `state.rs`) keeps `stale_count`, `lock_timeout`, `foreign_indexing`, `indexing`. The `drain` field and `DrainStatsJson` are removed from `Freshness`, `StatusDto`, the UI `Status` type and the badge. The actor's `Job::Stats` stays for the MCP drain loop; nothing on the serve side reads it. `indexed_at_ms` comes from the store's meta, written by every successful refresh.
 - The SSE `freshness` event carries a full `StatusDto`, built by `queries::status(store, &freshness)` under the read lock at send time, so it always has `git_head`, `index_version` and file counts. The App assigns it to `status` as is.
 - Exactly two events per refresh: `apply_started` sets `indexing = true` and broadcasts; `apply(stats)` sets the result with `indexing = false` and broadcasts. `set_indexing(false)` no longer exists as a broadcaster. The lock-retry path may add one more pair.
 - The live region announces `Index <freshness text>` only when the text differs from the last freshness text it announced (the badge itself shows every payload).

@@ -177,6 +177,34 @@ fn table_positions(item: &toml_edit::Item) -> Vec<isize> {
     }
 }
 
+/// A removed owned section's leading comment (`prefix`) must not vanish with it. Prepend it
+/// to the leading prefix of the next owned key (in `OWNED_KEYS` order) that still exists in
+/// `doc`, so the comment now precedes whatever section follows on disk; if none of the later
+/// owned keys survived, the comment has nothing left to precede, so it is appended to the
+/// document's trailing content instead, which always renders last.
+fn carry_removed_comment(doc: &mut toml_edit::DocumentMut, removed: &str, prefix: &str) {
+    let start = OWNED_KEYS
+        .iter()
+        .position(|k| *k == removed)
+        .map(|i| i + 1)
+        .unwrap_or(OWNED_KEYS.len());
+    let next_key = OWNED_KEYS[start..].iter().find(|k| doc.contains_key(k));
+    match next_key {
+        Some(key) => {
+            if let Some(item) = doc.get_mut(key) {
+                let existing = leading_prefix(item)
+                    .and_then(|p| p.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                set_leading_prefix(item, format!("{prefix}{existing}").into());
+            }
+        }
+        None => {
+            let existing = doc.trailing().as_str().unwrap_or("").to_string();
+            doc.set_trailing(format!("{existing}{prefix}"));
+        }
+    }
+}
+
 impl MapConfig {
     pub fn load(root: &Path) -> Result<MapConfig> {
         let path = root.join(MAP_FILE);
@@ -317,6 +345,11 @@ impl MapConfig {
                 }
                 None => {
                     doc.remove(key);
+                    if let Some(prefix) = old_prefix.and_then(|p| p.as_str().map(str::to_string)) {
+                        if !prefix.trim().is_empty() {
+                            carry_removed_comment(&mut doc, key, &prefix);
+                        }
+                    }
                 }
             }
         }
@@ -580,6 +613,22 @@ extra_patterns = ["*.snap"]
         let i_pin = written.find("[[pin]]").expect("pin table");
         assert!(i_deny < i_pin, "{written}");
         assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
+    }
+
+    #[test]
+    fn save_atomic_keeps_the_leading_comment_of_a_removed_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MAP_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "# keep me\n[[pin]]\npath = \"src/a.ts\"\n\n[deny]\nextra_patterns = []\n",
+        )
+        .unwrap();
+        MapConfig::default().save_atomic(dir.path()).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# keep me"), "{written}");
+        assert_eq!(MapConfig::load(dir.path()).unwrap(), MapConfig::default());
     }
 
     #[test]

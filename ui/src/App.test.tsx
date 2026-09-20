@@ -179,6 +179,15 @@ describe("App", () => {
     expect(log()).toContain("Index fresh");
     expect(screen.getByLabelText("Index freshness").textContent).toContain("9b1e0d4");
   });
+  test("the first freshness event does not re-announce what the initial load already showed", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const log = () => screen.getByRole("log", { name: "Announcements" }).textContent ?? "";
+    await act(async () => { freshnessHandler!({ data: JSON.stringify(status) }); });
+    expect(log()).not.toContain("Index fresh");
+    await act(async () => { freshnessHandler!({ data: JSON.stringify({ ...status, indexing: true }) }); });
+    expect(log()).toContain("Index indexing");
+  });
   test("a_row_action_button_moves_focus_to_the_detail_panel", async () => {
     const user = userEvent.setup();
     render(<App />);

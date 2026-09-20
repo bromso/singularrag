@@ -30,7 +30,7 @@ function assign(files: TreeFile[], items: Item[]): Map<number, Hit> {
     const candidates = (byPathName.get(`${it.path}::${it.name}`) ?? []).filter((s) => !taken.has(s.id));
     if (candidates.length === 0) continue;
     const exact = candidates.find((s) => s.line_start === it.line_start);
-    const chosen = exact ?? candidates.reduce((best, s) => (Math.abs(s.line_start - it.line_start) < Math.abs(best.line_start - it.line_start) ? s : best));
+    const chosen = exact ?? candidates.reduce((best, s) => (Math.abs(s.line_start - it.line_start) < Math.abs(best.line_start - it.line_start) ? s : best)); // ties keep the earlier symbol: array order is file order
     hits.set(chosen.id, { item: it, moved: !exact });
     taken.add(chosen.id);
   }

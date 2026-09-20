@@ -16,7 +16,6 @@ pub struct Freshness {
     /// True while this process is inside a refresh. `foreign_indexing` is the same
     /// condition for *another* process holding the lock (I8).
     pub indexing: bool,
-    pub indexed_at_ms: Option<i64>,
 }
 
 /// Events broadcast to SSE clients for live updates.

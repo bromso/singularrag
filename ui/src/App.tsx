@@ -82,6 +82,9 @@ export function App() {
       const [s, rs, sk, m] = await Promise.all([api.status(), api.retrievals(), api.skipped(), api.map()]);
       if (gen !== loadGen.current) return;
       setStatus(s); setRetrievals(rs); setSkipped(sk); applyMapDoc(m);
+      // Seed the de-dup ref with what the badge already shows, so the first live SSE
+      // freshness event that repeats it does not announce the same text twice.
+      lastFreshnessRef.current = `Index ${freshnessText(s)}`;
       // The tree and the graph are functions of the index: refetch them only when it changed.
       if (indexRef.current !== s.index_version) {
         const [t, g] = await Promise.all([api.tree(), api.graph()]);
