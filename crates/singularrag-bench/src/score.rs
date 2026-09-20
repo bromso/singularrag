@@ -9,7 +9,6 @@ use crate::stream::{Parsed, Tokens};
 
 /// One session's record: what `<qid>-<repeat>.json` holds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct Record {
     pub question: String,
     pub condition: String,
@@ -36,7 +35,6 @@ impl Record {
 }
 
 /// Trim, strip a leading `./`, drop entries without `::`, keep the first `answer_max`.
-#[allow(dead_code)]
 pub fn normalise(symbols: &[String], answer_max: usize) -> Vec<String> {
     symbols
         .iter()
@@ -48,7 +46,6 @@ pub fn normalise(symbols: &[String], answer_max: usize) -> Vec<String> {
         .collect()
 }
 
-#[allow(dead_code)]
 fn answer_of(parsed: &Parsed, answer_max: usize) -> Option<Vec<String>> {
     let so = parsed.result.as_ref()?.structured_output.as_ref()?;
     let raw: Vec<String> = so
@@ -60,7 +57,6 @@ fn answer_of(parsed: &Parsed, answer_max: usize) -> Option<Vec<String>> {
     Some(normalise(&raw, answer_max))
 }
 
-#[allow(dead_code)]
 pub fn score(
     q: &Question,
     condition: &str,

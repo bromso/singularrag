@@ -270,10 +270,18 @@ pub fn load_run(
         let dir = run_dir.join(name);
         let mut records = Vec::new();
         if dir.is_dir() {
+            // Record files are named `<qid>-<repeat>.json`; a condition directory can also hold
+            // `mcp.json` (the materialised MCP config), which is not a record.
             let mut entries: Vec<_> = std::fs::read_dir(&dir)?
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x == "json")
+                        && p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .and_then(|s| s.rsplit_once('-'))
+                            .is_some_and(|(_, n)| n.parse::<u32>().is_ok())
+                })
                 .collect();
             entries.sort();
             for p in entries {

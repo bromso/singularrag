@@ -6,7 +6,6 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 /// Paths under these never count as dirt: singularrag and Serena keep their caches in the checkout.
-#[allow(dead_code)]
 pub const IGNORED_PREFIXES: &[&str] = &[".singularrag/", ".serena/"];
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -39,12 +38,10 @@ fn split_status_line(line: &str) -> Vec<String> {
     }
 }
 
-#[allow(dead_code)]
 pub fn head_commit(repo: &Path) -> Result<String> {
     Ok(git(repo, &["rev-parse", "HEAD"])?.trim().to_string())
 }
 
-#[allow(dead_code)]
 pub fn dirty_paths(repo: &Path, ignore_prefixes: &[&str]) -> Result<Vec<String>> {
     let out = git(repo, &["status", "--porcelain", "--untracked-files=all"])?;
     Ok(out

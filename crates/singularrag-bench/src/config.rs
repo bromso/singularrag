@@ -6,7 +6,6 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct Condition {
     pub name: String,
     #[serde(default)]
@@ -17,7 +16,6 @@ pub struct Condition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct RunConfig {
     pub repo: PathBuf,
     pub commit: String,
@@ -37,32 +35,25 @@ pub struct RunConfig {
     pub conditions: Vec<Condition>,
 }
 
-#[allow(dead_code)]
 fn default_questions() -> PathBuf {
     PathBuf::from("questions.toml")
 }
-#[allow(dead_code)]
 fn default_repeats() -> u32 {
     3
 }
-#[allow(dead_code)]
 fn default_max_turns() -> u32 {
     25
 }
-#[allow(dead_code)]
 fn default_max_budget() -> f64 {
     0.5
 }
-#[allow(dead_code)]
 fn default_tools() -> Vec<String> {
     ["Read", "Grep", "Glob"].map(String::from).to_vec()
 }
-#[allow(dead_code)]
 fn default_answer_max() -> usize {
     15
 }
 
-#[allow(dead_code)]
 fn absolutise(base: &Path, p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
@@ -72,7 +63,6 @@ fn absolutise(base: &Path, p: &Path) -> PathBuf {
 }
 
 /// Collapse `.` and `..` components without touching the filesystem (the checkout may not exist yet).
-#[allow(dead_code)]
 fn normalise_dots(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {
@@ -87,7 +77,6 @@ fn normalise_dots(p: &Path) -> PathBuf {
     out
 }
 
-#[allow(dead_code)]
 pub fn load(path: &Path) -> Result<RunConfig> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -133,7 +122,6 @@ pub fn load(path: &Path) -> Result<RunConfig> {
 }
 
 impl RunConfig {
-    #[allow(dead_code)]
     pub fn baseline(&self) -> &Condition {
         self.conditions
             .iter()
@@ -142,7 +130,6 @@ impl RunConfig {
     }
 
     /// The conditions to run, in config order; `names` narrows and must all exist.
-    #[allow(dead_code)]
     pub fn select(&self, names: Option<&[String]>) -> Result<Vec<Condition>> {
         match names {
             None => Ok(self.conditions.clone()),

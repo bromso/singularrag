@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 
 pub const CLAUDE_ENV: &str = "SINGULARRAG_BENCH_CLAUDE";
 
-#[allow(dead_code)]
 pub fn claude_bin() -> String {
     std::env::var(CLAUDE_ENV)
         .ok()
@@ -17,7 +16,6 @@ pub fn claude_bin() -> String {
         .unwrap_or_else(|| "claude".to_string())
 }
 
-#[allow(dead_code)]
 pub fn claude_version() -> Result<String> {
     let out = Command::new(claude_bin())
         .arg("--version")
@@ -28,14 +26,12 @@ pub fn claude_version() -> Result<String> {
 }
 
 /// Identical across conditions (spec §4).
-#[allow(dead_code)]
 pub fn prompt_for(query: &str, answer_max: usize) -> String {
     format!(
         "{query}\n\nAnswer by listing the symbols that answer the question, as `path::name`, where `path` is relative to the repository root and `name` is the symbol's declared name. List at most {answer_max}, most important first. Use the tools available to you as you see fit."
     )
 }
 
-#[allow(dead_code)]
 pub fn schema_for(answer_max: usize) -> String {
     serde_json::json!({
         "type": "object",
@@ -45,7 +41,6 @@ pub fn schema_for(answer_max: usize) -> String {
     .to_string()
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SessionSpec {
     pub prompt: String,
@@ -57,7 +52,6 @@ pub struct SessionSpec {
 }
 
 /// Everything after the program name, in the spec's order.
-#[allow(dead_code)]
 pub fn command_args(spec: &SessionSpec) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "-p".into(),
@@ -92,14 +86,13 @@ pub fn command_args(spec: &SessionSpec) -> Vec<String> {
     a
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct SessionOutcome {
     pub exit_code: Option<i32>,
+    #[allow(dead_code)]
     pub stderr_written: bool,
 }
 
-#[allow(dead_code)]
 pub fn run_session(
     cwd: &Path,
     spec: &SessionSpec,
