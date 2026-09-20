@@ -58,3 +58,7 @@ Remaining weakness: the question set's hardest misses are all one symbol —
 rather than receiving them, so PageRank never lifts it. P1 ("where should a new
 middleware go") is still 0.00: the middleware packages it asks for are leaves that
 nothing in `src/` references.
+
+## Tier two
+
+Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.

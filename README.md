@@ -74,6 +74,19 @@ The server binds to localhost only and requires the per-run token in the URL. `-
 
 Building from source needs Bun for the UI: `cd ui && bun install && bun run build`, then `cargo build --release`.
 
+## Does it earn its place? (tier-two eval)
+
+`singularrag-bench` runs headless Claude Code over the tier-one questions under named conditions and prints the verdict from the design spec: correctness not worse than Claude Code alone, and tokens or tool calls down by at least 25%.
+
+```sh
+cargo install --path crates/singularrag            # `singularrag` must be on PATH
+git clone https://github.com/honojs/hono ../hono && git -C ../hono checkout 098e11912ab244c5c33931de007f04dc8e3c2929
+cargo run -p singularrag-bench -- run --questions L1 --repeats 1 --conditions alone,singularrag   # smoke, a few dollars
+cargo run -p singularrag-bench -- run                                                            # full: 12 × 3 × 3 = 108 sessions
+```
+
+Results land in `eval/runs/<timestamp>-<label>/` with one record and raw stream per session and a `summary.md` (the only file committed). `--dry-run` prints the commands, `--resume <dir>` continues an interrupted run, `score <dir>` rewrites the summary. The Serena condition needs `uvx`; a condition whose MCP server does not connect is aborted and reported, not run degraded. Sessions use `--setting-sources ""` and `--strict-mcp-config`, so your own hooks, plugins and MCP servers stay out of every condition.
+
 ## What the agent sees
 
 Two tools. `repo_map` returns something like:
