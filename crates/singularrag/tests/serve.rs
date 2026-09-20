@@ -113,6 +113,48 @@ async fn auth_and_host_controls() {
     assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
 }
 
+/// I6: an unknown `/api` path must be answered inside the api router's layers, not fall
+/// out to the outer router's asset fallback (which has no token check and no no-store).
+#[tokio::test]
+async fn an_unknown_api_path_is_guarded_and_not_cached() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let r = client()
+        .get(format!("{}/api/nope", s.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
+    let r = get(&s, "/nope").await;
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["error"], "not found");
+}
+
+/// The query-string token exists for `EventSource`, which cannot send headers; every
+/// other route takes the bearer header only.
+#[tokio::test]
+async fn a_query_token_works_only_on_events() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let r = client()
+        .get(format!("{}/api/status?token={}", s.url, s.token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let r = client()
+        .get(format!("{}/api/events?token={}", s.url, s.token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
 #[tokio::test]
 async fn shell_and_assets_are_served_without_a_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -180,6 +222,7 @@ async fn routes_have_the_documented_shapes() {
         "stale_count",
         "lock_timeout",
         "foreign_indexing",
+        "indexing",
         "files",
         "drain",
     ] {

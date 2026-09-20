@@ -35,6 +35,15 @@ pub fn router(state: AppState) -> Router {
         .route("/skipped", get(routes::skipped))
         .route("/map", get(routes::get_map).put(routes::put_map))
         .route("/events", get(events::sse))
+        // Before the layers, so an unknown /api path is answered *inside* them: it gets
+        // the host and token checks and the no-store header, instead of falling out to
+        // the outer router's asset fallback (I6).
+        .fallback(|| async {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "not found" })),
+            )
+        })
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

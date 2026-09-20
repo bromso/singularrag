@@ -35,9 +35,28 @@ pub fn apply(state: &AppState, stats: IndexStats) {
     let _ = state.events.send(ServerEvent::Freshness(snapshot));
 }
 
+/// Flip the "this process is indexing" flag and broadcast it, so the badge can say
+/// "indexing" for the seconds a refresh takes (I8).
+fn set_indexing(state: &AppState, on: bool) {
+    let snapshot = {
+        let Ok(mut f) = state.freshness.write() else {
+            return;
+        };
+        if f.indexing == on {
+            return;
+        }
+        f.indexing = on;
+        f.clone()
+    };
+    let _ = state.events.send(ServerEvent::Freshness(snapshot));
+}
+
 pub async fn refresh_once(state: &AppState, handle: &EngineHandle) {
     for attempt in 0..2 {
-        match handle.refresh().await {
+        set_indexing(state, true);
+        let result = handle.refresh().await;
+        set_indexing(state, false);
+        match result {
             Ok(stats) => {
                 let retry = stats.lock_timeout && attempt == 0;
                 apply(state, stats);
@@ -144,11 +163,18 @@ mod tests {
         let f = state.freshness.read().unwrap().clone();
         assert_eq!(f.stale_count, 0);
         assert!(!f.foreign_indexing);
+        assert!(!f.indexing, "the flag is cleared when the refresh returns");
         assert!(f.indexed_at_ms.is_some());
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            crate::serve::state::ServerEvent::Freshness(_)
-        ));
+        let mut seen = Vec::new();
+        while let Ok(crate::serve::state::ServerEvent::Freshness(f)) = rx.try_recv() {
+            seen.push(f);
+        }
+        assert!(!seen.is_empty());
+        assert!(
+            seen.iter().any(|f| f.indexing),
+            "the badge must be told a refresh started"
+        );
+        assert!(!seen.last().unwrap().indexing);
     }
 
     #[tokio::test]

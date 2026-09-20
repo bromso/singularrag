@@ -22,6 +22,21 @@ fn reject(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
+fn token_from_query(query: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("token=").map(|v| v.trim().to_string()))
+}
+
+/// `?token=` exists only for `EventSource`, which cannot send headers. Every other route
+/// takes the bearer header, so the token never lands in a referrer, a proxy log or the
+/// address bar for them. `nest("/api", ..)` strips the prefix before this layer runs, so
+/// the path seen here is `/events`; the full form is accepted in case it is ever mounted
+/// without the nest.
+fn accepts_query_token(path: &str) -> bool {
+    path == "/events" || path == "/api/events"
+}
+
 fn presented_token(req: &Request<Body>) -> Option<String> {
     if let Some(h) = req
         .headers()
@@ -32,10 +47,10 @@ fn presented_token(req: &Request<Body>) -> Option<String> {
             return Some(t.trim().to_string());
         }
     }
-    req.uri().query().and_then(|q| {
-        q.split('&')
-            .find_map(|kv| kv.strip_prefix("token=").map(|v| v.to_string()))
-    })
+    if !accepts_query_token(req.uri().path()) {
+        return None;
+    }
+    req.uri().query().and_then(token_from_query)
 }
 
 pub async fn require_token(State(state): State<AppState>, req: Request, next: Next) -> Response {
@@ -135,7 +150,9 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
+        // `?token=` is for EventSource only: it is honoured on /api/events and nowhere else.
         let r = app
+            .clone()
             .oneshot(req(
                 "GET",
                 &format!("/api/health?token={token}"),
@@ -144,7 +161,28 @@ mod tests {
             ))
             .await
             .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = app
+            .oneshot(req(
+                "GET",
+                &format!("/api/events?token={token}"),
+                "localhost:4173",
+                None,
+            ))
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn query_token_is_trimmed_and_scoped_to_events() {
+        assert_eq!(token_from_query("token= abc "), Some("abc".to_string()));
+        assert_eq!(token_from_query("x=1&token=abc"), Some("abc".to_string()));
+        assert_eq!(token_from_query("x=1"), None);
+        assert!(accepts_query_token("/events"));
+        assert!(accepts_query_token("/api/events"));
+        assert!(!accepts_query_token("/status"));
+        assert!(!accepts_query_token("/map"));
     }
 
     #[tokio::test]

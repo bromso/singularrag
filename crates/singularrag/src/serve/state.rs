@@ -15,6 +15,9 @@ pub struct Freshness {
     pub stale_count: usize,
     pub lock_timeout: bool,
     pub foreign_indexing: bool,
+    /// True while this process is inside a refresh. `foreign_indexing` is the same
+    /// condition for *another* process holding the lock (I8).
+    pub indexing: bool,
     pub drain: DrainStatsJson,
     pub indexed_at_ms: Option<i64>,
 }

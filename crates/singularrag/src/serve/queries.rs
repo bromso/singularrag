@@ -22,6 +22,7 @@ pub struct StatusDto {
     pub stale_count: usize,
     pub lock_timeout: bool,
     pub foreign_indexing: bool,
+    pub indexing: bool,
     pub files: FileCounts,
     pub drain: DrainStatsJson,
 }
@@ -142,6 +143,7 @@ pub fn status(store: &Store, f: &Freshness) -> Result<StatusDto> {
         stale_count: f.stale_count,
         lock_timeout: f.lock_timeout,
         foreign_indexing: f.foreign_indexing,
+        indexing: f.indexing,
         files: FileCounts { indexed, skipped },
         drain: f.drain.clone(),
     })
