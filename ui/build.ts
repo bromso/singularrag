@@ -4,6 +4,8 @@ const result = await Bun.build({
   entrypoints: ["./index.html"],
   outdir: "./dist",
   minify: true,
+  // Ship React's production build; without this the embedded bundle is the dev build.
+  define: { "process.env.NODE_ENV": JSON.stringify("production") },
   sourcemap: "none",
   plugins: [tailwind],
   naming: {

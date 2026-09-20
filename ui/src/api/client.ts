@@ -5,14 +5,24 @@ export class ApiError extends Error {
   constructor(public status: number, message: string, public field?: string, public current?: unknown) { super(message); }
 }
 
+// The token read from this page load's fragment. Memoised because the first read
+// strips the fragment from the address bar, and React StrictMode runs the mount
+// effect twice: without the memo the second run reads an empty hash and wipes the token.
+let fragmentToken: string | null = null;
+
 export function tokenFromFragment(): string {
+  if (fragmentToken !== null) return fragmentToken;
   const m = /(?:^#|&)token=([0-9a-fA-F]+)/i.exec(window.location.hash);
   if (!m) return "";
+  fragmentToken = m[1];
   // Once read, drop the fragment from the address bar: the token should not sit in a
   // shared screenshot, a copied URL or the browser's history entry.
   try { history.replaceState(null, "", window.location.pathname); } catch {}
-  return m[1];
+  return fragmentToken;
 }
+
+/** Test seam: forget the memoised fragment token between cases. */
+export function resetTokenMemo() { fragmentToken = null; }
 
 let token = "";
 export function setToken(t: string) { token = t; }
