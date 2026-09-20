@@ -38,7 +38,9 @@ impl From<DrainStats> for DrainStatsJson {
 /// Events broadcast to SSE clients for live updates.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    Change { max_retrieval_id: i64 },
+    Change {
+        max_retrieval_id: i64,
+    },
     #[allow(dead_code)]
     Freshness(Freshness),
 }

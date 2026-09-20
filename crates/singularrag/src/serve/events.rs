@@ -39,7 +39,9 @@ pub fn spawn_poller(state: AppState) -> tokio::task::JoinHandle<()> {
         let db_path = state.root.join(singularrag_core::engine::DB_FILE);
         loop {
             tokio::time::sleep(POLL_EVERY).await;
-            // Open a fresh read-only connection to see the latest data
+            // Open a fresh read-only connection to guarantee visibility of commits from other
+            // connections. Track max_retrieval_id to detect changes, as it reliably reflects
+            // committed data in this WAL configuration.
             let Ok(fresh_store) = singularrag_core::store::Store::open_read_only(&db_path) else {
                 continue;
             };
