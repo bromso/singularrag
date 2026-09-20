@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+mod score;
 mod stream;
 
 #[derive(Parser, Debug)]
