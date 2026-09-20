@@ -25,4 +25,4 @@ tracing-subscriber = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
-rmcp = { version = "3.4", features = ["client", "transport-child-process"] }
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }

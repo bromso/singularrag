@@ -146,7 +146,14 @@ fn mcp_exits_cleanly_when_stdin_closes() {
 fn readme_mcp_json_snippet_is_valid_and_points_at_the_mcp_subcommand() {
     let readme =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
-    let start = readme.find("```json").expect("json snippet") + "```json".len();
+    // Anchored on the heading, not on the first json fence in the file: this test is
+    // about Claude Code's `.mcp.json`, and reordering the README or adding a snippet
+    // above it must not silently point the assertions at someone else's config.
+    let section = readme
+        .find("### Claude Code")
+        .expect("a Claude Code section");
+    let start =
+        readme[section..].find("```json").expect("json snippet") + section + "```json".len();
     let end = readme[start..].find("```").unwrap() + start;
     let v: serde_json::Value = serde_json::from_str(readme[start..end].trim()).unwrap();
     assert_eq!(v["mcpServers"]["singularrag"]["command"], "singularrag");

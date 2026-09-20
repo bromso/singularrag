@@ -154,8 +154,11 @@ impl ServerHandler for SingularragServer {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
-        if let Ok(mut slot) = self.session_key.lock() {
-            *slot = Some(client_slug(&request.client_info.name));
+        match self.session_key.lock() {
+            Ok(mut slot) => *slot = Some(client_slug(&request.client_info.name)),
+            // Not fatal — the actor falls back to `unknown` — but every retrieval this
+            // session records would then be unattributable, which is worth a line.
+            Err(e) => tracing::warn!("session key mutex poisoned; client will log as unknown: {e}"),
         }
         context.peer.set_peer_info(request.clone());
         self.negotiate_initialize(&request)

@@ -16,6 +16,8 @@ Requires a Rust toolchain (1.85+). The binary is self-contained; the index lives
 
 The server reads the repo from its working directory, or `--repo PATH`.
 
+If your host shows up as `unknown` in the retrieval rail, tell us what `clientInfo.name` it sends.
+
 ### Claude Code
 
 ```sh

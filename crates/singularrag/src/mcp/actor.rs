@@ -3,7 +3,7 @@
 //! where spec §8's background refresh lives.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -90,9 +90,6 @@ impl EngineHandle {
     }
 }
 
-/// How long the actor waits for a job before checking whether a drain is due.
-const IDLE_TICK: Duration = Duration::from_millis(20);
-
 /// Sends the moment the actor thread leaves `run`, by returning *or* by unwinding out
 /// of a panic — `Drop` runs either way. That is the point: spec §2's one fatal path is
 /// the actor dying, and a panic is how it dies without anyone asking it to.
@@ -123,6 +120,10 @@ pub fn spawn(config: EngineConfig) -> (EngineHandle, JoinHandle<()>, oneshot::Re
 
 struct Actor {
     config: EngineConfig,
+    /// When this actor started, not when its first job arrived: spec §2's session key is
+    /// `mcp:<client>:<pid>:<start_ms>`, and `<pid>:<start_ms>` is what makes two runs of
+    /// the same host in the same repo tell apart in the retrieval rail.
+    start_ms: i64,
     engine: Option<Result<Engine, String>>,
     last_stats: IndexStats,
     /// Number of `drain_chunk` calls that have run a `refresh` (incremented even when
@@ -145,11 +146,7 @@ impl Actor {
             .map(|g| g.clone())
             .unwrap_or(None)
             .unwrap_or_else(|| "unknown".to_string());
-        format!(
-            "mcp:{client}:{}:{}",
-            std::process::id(),
-            singularrag_core::time::now_ms()
-        )
+        format!("mcp:{client}:{}:{}", std::process::id(), self.start_ms)
     }
 
     fn engine(&mut self) -> Result<&mut Engine, String> {
@@ -267,6 +264,7 @@ impl Actor {
 fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
     let mut actor = Actor {
         config,
+        start_ms: singularrag_core::time::now_ms(),
         engine: None,
         last_stats: IndexStats::default(),
         drain_chunks: 0,
@@ -290,14 +288,16 @@ fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
                 }
             }
         }
-        match rx.recv_timeout(IDLE_TICK) {
+        // Nothing to drain: block. `drain_pending` only ever changes inside this loop
+        // (in `handle`), so there is nothing a timeout could wake up to notice — the
+        // old 20 ms poll just woke the thread fifty times a second to find that out.
+        match rx.recv() {
             Ok(job) => {
                 if !actor.handle(job) {
                     return;
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvError) => return,
         }
     }
 }

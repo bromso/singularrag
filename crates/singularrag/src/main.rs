@@ -73,6 +73,12 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let root = cli.repo.unwrap_or(std::env::current_dir()?);
+    // `mcp` returns before the `Engine::open` below, and must: the Engine is `!Sync` and
+    // belongs to the actor thread, which opens it lazily at the first job with a session
+    // key derived from the client name that MCP `initialize` delivers (spec §2). Opening
+    // one here would give the actor a second connection under a `cli-<pid>` key, and
+    // would turn a bad `--repo` into a startup failure instead of the `is_error` tool
+    // result the spec asks for.
     if let Cmd::Mcp { refresh_budget_ms } = cli.cmd {
         return mcp::run(root, Duration::from_millis(refresh_budget_ms));
     }
