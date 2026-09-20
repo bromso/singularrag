@@ -45,6 +45,8 @@ beforeEach(() => {
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
     if (init?.headers && (init.headers as Record<string, string>).Authorization !== "Bearer deadbeef") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
     if (url.endsWith("/api/status")) return json(status);
+    if (url.includes("/api/blast?")) return json({ root: { path: "src/auth/session.ts", symbol: "createSession" }, files: [{ path: "src/http/middleware.ts", depth: 1, via: "createSession" }], truncated: null });
+    if (url.endsWith("/api/graph")) return json({ index_version: "abc123", nodes: tree.map((f) => ({ path: f.path, symbols: f.symbols.length, lang: f.lang })), edges: [] });
     if (url.includes("/api/retrievals?")) return json(retrievalList);
     if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }] });
     if (url.endsWith("/api/tree")) return json(tree);
@@ -236,5 +238,37 @@ describe("App", () => {
         expect(cls).not.toContain("duration-");
       }
     }
+  });
+  test("a file can be added to a new boundary and removed again", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await user.click(screen.getAllByRole("button", { name: /Actions for src\/auth\/session.ts/ })[0]);
+    const input = await screen.findByLabelText("Add to boundary");
+    await user.type(input, "auth");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(saved?.boundary).toEqual([{ name: "auth", paths: ["src/auth/session.ts"] }]));
+    await user.click(await screen.findByRole("button", { name: "Remove from auth" }));
+    await waitFor(() => expect(saved?.boundary).toEqual([]));
+  });
+
+  test("a symbol row can show its blast radius in the panel", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(await screen.findByRole("button", { name: "Actions for createSession" }));
+    await user.click(await screen.findByRole("button", { name: "Show blast radius" }));
+    const list = await screen.findByRole("list", { name: "Blast radius" });
+    expect(within(list).getByText(/src\/http\/middleware.ts \(depth 1, via createSession\)/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Hide blast radius" })).toBeTruthy();
+  });
+
+  test("a file row offers Show symbols and toggles to Hide symbols", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await user.click(screen.getAllByRole("button", { name: /Actions for src\/auth\/session.ts/ })[0]);
+    await user.click(await screen.findByRole("button", { name: "Show symbols" }));
+    expect(await screen.findByRole("button", { name: "Hide symbols" })).toBeTruthy();
   });
 });

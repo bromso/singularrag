@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { ApiError, api, setToken, tokenFromFragment } from "@/api/client";
 import { subscribe } from "@/api/events";
-import type { MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
+import type { BlastResult, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
 import { joinRetrieval } from "@/lib/join";
-import { noteFor, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
+import { addToBoundary, noteFor, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
 import { DetailPanel } from "@/components/DetailPanel";
 import { FreshnessBadge, freshnessText } from "@/components/FreshnessBadge";
 import { LiveRegion } from "@/components/LiveRegion";
@@ -30,6 +30,9 @@ export function App() {
   const [map, setMap] = useState<MapConfig>(emptyMap);
   const [focused, setFocused] = useState<TreeRow | null>(null);
   const [filter, setFilter] = useState("");
+  const [blast, setBlast] = useState<BlastResult | null>(null);
+  const [blastLoading, setBlastLoading] = useState(false);
+  const [expandedPath, setExpandedPath] = useState<string | null>(null);
   const [messages, setMessages] = useState<string[]>([]);
   const announce = useCallback((m: string) => setMessages((ms) => [...ms.slice(-9), m]), []);
 
@@ -87,6 +90,24 @@ export function App() {
     requestAnimationFrame(() => document.getElementById("detail-heading")?.focus());
   }, []);
 
+  // Blast radius is scoped to the focused symbol; switching to a different row (or a
+  // file row) invalidates whatever was shown for the previous one.
+  const focusedSymbol = focused?.kind === "symbol" ? focused.symbol.symbol.name : undefined;
+  useEffect(() => { setBlast(null); }, [focused?.path, focusedSymbol]);
+
+  const toggleBlast = (path: string, symbol: string) => {
+    if (blast && blast.root.path === path && blast.root.symbol === symbol) { setBlast(null); return; }
+    setBlastLoading(true);
+    api.blast(path, symbol)
+      .then((b) => {
+        setBlast(b);
+        announce(`Blast radius: ${b.files.length} files to depth ${Math.max(0, ...b.files.map((f) => f.depth))}`);
+      })
+      .catch(toastError)
+      .finally(() => setBlastLoading(false));
+  };
+  const toggleExpand = (path: string) => setExpandedPath((p) => (p === path ? null : path));
+
   // `edit` is applied when the save's turn comes, to the config as it is then — not at
   // click time — so the second of two rapid clicks does not discard the first.
   const save = (edit: (cfg: MapConfig) => MapConfig) => {
@@ -124,7 +145,11 @@ export function App() {
       <DetailPanel row={focused} map={map}
         onPin={(p, s) => save((c) => togglePin(c, p, s))}
         onExclude={(p) => save((c) => toggleExclude(c, p))}
-        onNote={(p, s, t) => { if (t !== noteFor(map, p, s)) save((c) => setNote(c, p, s, t)); }} />
+        onNote={(p, s, t) => { if (t !== noteFor(map, p, s)) save((c) => setNote(c, p, s, t)); }}
+        blast={blast} blastLoading={blastLoading} onToggleBlast={toggleBlast}
+        expandedPath={expandedPath} onToggleExpand={toggleExpand}
+        onAddBoundary={(n, p) => save((c) => addToBoundary(c, n, p))}
+        onRemoveBoundary={(n, p) => save((c) => removeFromBoundary(c, n, p))} />
       <LiveRegion messages={messages} />
       <Toaster />
     </div>

@@ -19,3 +19,23 @@ export function setNote(c: MapConfig, path: string, symbol: string | undefined, 
   return { ...c, note };
 }
 export const noteFor = (c: MapConfig, path: string, symbol?: string) => c.note.find((n) => n.path === path && (n.symbol ?? undefined) === symbol)?.text ?? "";
+
+export const boundaryNames = (c: MapConfig) => c.boundary.map((b) => b.name);
+export const boundariesOf = (c: MapConfig, path: string) => c.boundary.filter((b) => b.paths.includes(path)).map((b) => b.name);
+export function addToBoundary(c: MapConfig, name: string, path: string): MapConfig {
+  const n = name.trim();
+  if (!n) return c;
+  const existing = c.boundary.find((b) => b.name === n);
+  if (existing?.paths.includes(path)) return c;
+  const boundary = existing
+    ? c.boundary.map((b) => (b.name === n ? { ...b, paths: [...b.paths, path] } : b))
+    : [...c.boundary, { name: n, paths: [path] }];
+  return { ...c, boundary };
+}
+export function removeFromBoundary(c: MapConfig, name: string, path: string): MapConfig {
+  if (!c.boundary.some((b) => b.name === name && b.paths.includes(path))) return c;
+  const boundary = c.boundary
+    .map((b) => (b.name === name ? { ...b, paths: b.paths.filter((p) => p !== path) } : b))
+    .filter((b) => b.paths.length > 0);
+  return { ...c, boundary };
+}
