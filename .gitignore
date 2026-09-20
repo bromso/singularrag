@@ -4,3 +4,7 @@ node_modules/
 .claude/worktrees/
 .superpowers/
 ui/dist/*
+eval/runs/*
+!eval/runs/*/
+eval/runs/*/*
+!eval/runs/*/summary.md

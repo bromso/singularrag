@@ -1787,6 +1787,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "singularrag-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "predicates",
+ "serde",
+ "serde_json",
+ "singularrag-core",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "singularrag-core"
 version = "0.1.0"
 dependencies = [

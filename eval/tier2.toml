@@ -1,0 +1,25 @@
+# Tier-two eval (spec docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md).
+# Run: cargo run -p singularrag-bench -- run --config eval/tier2.toml
+repo = "../../hono"                # a honojs/hono checkout at `commit`, next to this repo
+commit = "098e11912ab244c5c33931de007f04dc8e3c2929"
+questions = "questions.toml"
+repeats = 3
+max_turns = 25
+max_budget_usd = 0.50
+tools = ["Read", "Grep", "Glob"]
+answer_max = 15
+
+[[condition]]
+name = "alone"
+baseline = true
+
+[[condition]]
+name = "singularrag"
+mcp_config = "conditions/singularrag.json"
+warmup = ["singularrag", "index", "--repo", "<checkout>"]
+
+[[condition]]
+name = "serena"
+mcp_config = "conditions/serena.json"
+warmup = ["uvx", "--from", "git+https://github.com/oraios/serena", "serena", "project", "index", "<checkout>"]
+reset = [".serena/memories"]
