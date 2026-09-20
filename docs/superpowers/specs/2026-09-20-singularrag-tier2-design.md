@@ -72,12 +72,15 @@ claude -p <prompt>
   --tools Read,Grep,Glob            # from `tools`
   --strict-mcp-config
   [--mcp-config <temp condition json>]   # absent for a condition with no mcp_config
+  --setting-sources "" --disable-slash-commands
   --permission-mode dontAsk --permission-prompts none
   --no-session-persistence
   --max-turns 25 --max-budget-usd 0.50
 ```
 
-`--strict-mcp-config` is what keeps the developer's own MCP servers out of every condition; `--tools` names the built-ins explicitly so the alone condition is Read, Grep and Glob and nothing else. Claude Code's minimal mode (`--bare`) is not used because it authenticates only with an API key, and the harness runs on the developer's subscription login.
+`--strict-mcp-config` is what keeps the developer's own MCP servers out of every condition; `--tools` names the built-ins explicitly so the alone condition is Read, Grep and Glob and nothing else. `--setting-sources ""` loads no user, project or local settings, which is what keeps the developer's hooks and plugins out: probed on 2026-09-20, a session without it ran the SessionStart hooks of the superpowers plugin and cached a 22k-token system prompt; with it and `--disable-slash-commands` the init message reports no plugins and no skills, the explicit MCP config is still loaded, and the cached prompt is 4k tokens. Claude Code's minimal mode (`--bare`) is not used because it authenticates only with an API key, and `--safe-mode` is not used because it also drops the explicit MCP config.
+
+The structured answer is delivered as a tool call named `StructuredOutput`; it is excluded from tool-call counts because it is the answer mechanism, not retrieval.
 
 Stdout is streamed to `<qid>-<repeat>.stream.jsonl` in the condition's directory as it arrives; stderr is captured to `<qid>-<repeat>.stderr` only when non-empty. After the child exits the harness re-checks the tree is clean (same exclusions as §2); a dirty tree aborts the run, because later sessions would see a different repository.
 
