@@ -33,13 +33,13 @@ Calls core `graph::build_graph(store, &config, &[], &HashSet::new())`: no query 
 
 ### `GET /api/blast?path=<repo-relative>&symbol=<name>`
 
-One recursive CTE in the core store layer (`store::blast_radius(conn, path, symbol, max_depth, max_files)`), depth cap 3, file cap 200:
+A breadth-first walk over `refs`, `symbols` and `files` in a new core module (`blast::blast_radius(store, config, path, symbol, max_depth, max_files)`), depth cap 3, file cap 200. *(Amended at plan time from "one recursive CTE": a walk with two prepared statements per level gives the same result and is testable level by level.)*
 
 - Depth 0: the file `path`, which must define `symbol` (else 404 `{ "error": "symbol not found" }`).
 - Depth n+1: every non-excluded, non-skipped file with a `refs` row whose `name` equals any symbol defined in a depth-n file, and that has not been reached at a shallower depth. A file is reported once at its minimum depth, with `via` the name that reached it first (lowest depth, then alphabetical).
 - Stops at depth 3 or when 200 files are reached; `truncated` says which cap hit, if any.
 
-Response: `{ "root": { "path", "symbol" }, "files": [ { "path", "depth", "via" } ], "truncated": false }`, files ordered by depth then path. Depth 1 answers "what references this symbol"; deeper levels are what the parent spec calls blast radius.
+Response: `{ "root": { "path", "symbol" }, "files": [ { "path", "depth", "via" } ], "truncated": null }`, files ordered by depth then path; `truncated` is `null`, `"depth"` or `"files"`. Missing `path` or `symbol` is 400 `{ "error": "path and symbol are required" }`. Depth 1 answers "what references this symbol"; deeper levels are what the parent spec calls blast radius.
 
 ### `PUT /api/map` validation addition
 
@@ -96,7 +96,7 @@ In the detail panel, for a focused file or a symbol's file, a "Boundaries" line:
 
 ## 9. Dependencies
 
-`sigma` 3.0.3, `graphology` 0.26, `graphology-layout-forceatlas2` 0.10, `graphology-layout-noverlap` 0.4, `graphology-layout` 0.6. No React wrapper. No new Rust crates.
+`sigma` 3.0.3 with `@sigma/node-border` 3.0.0 (the ring rendering for cut and focused nodes), `graphology` 0.26, `graphology-layout-forceatlas2` 0.10, `graphology-layout-noverlap` 0.4, `graphology-layout` 0.6. No React wrapper. No new Rust crates.
 
 ## 10. Decisions recorded
 
