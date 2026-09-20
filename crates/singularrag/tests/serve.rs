@@ -127,7 +127,37 @@ async fn shell_and_assets_are_served_without_a_token() {
         .to_str()
         .unwrap()
         .starts_with("text/html"));
-    assert!(r.text().await.unwrap().contains("singularrag"));
+    let r_text = r.text().await.unwrap();
+    assert!(r_text.contains("singularrag"));
+    // Verify the HTML references a hashed asset under /assets/
+    let src = r_text
+        .split("src=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("a script tag");
+    assert!(
+        src.starts_with("/assets/") || src.starts_with("./assets/") || src.starts_with("assets/"),
+        "{src}"
+    );
+    let asset_path = src.trim_start_matches('.').trim_start_matches('/');
+    let r = client()
+        .get(format!("{}/{asset_path}", s.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("javascript"));
+    assert_eq!(
+        r.headers().get("cache-control").unwrap(),
+        "public, max-age=31536000, immutable"
+    );
+    // Verify a non-existent asset returns 404
     let r = client()
         .get(format!("{}/assets/nope.js", s.url))
         .send()

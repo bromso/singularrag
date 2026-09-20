@@ -4,5 +4,3 @@ node_modules/
 .claude/worktrees/
 .superpowers/
 ui/dist/*
-!ui/dist/index.html
-!ui/dist/.gitkeep

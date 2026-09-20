@@ -60,6 +60,18 @@ In `~/.copilot/mcp-config.json` (or `.copilot/mcp-config.json` in the repo):
 }
 ```
 
+## See what the agent was given
+
+```sh
+singularrag serve
+```
+
+Opens `http://127.0.0.1:<port>/#token=…` in your browser. The page shows every retrieval an agent made (grouped by host), the repo as a keyboard-navigable treegrid with each symbol marked served, cut or untouched for the selected retrieval, and the reasons in plain sentences. Pin or exclude files and symbols and leave notes; they are written to `.singularrag/map.toml` (commit it) and apply to the agent's next retrieval. The index refreshes as files change; the badge says how fresh it is.
+
+The server binds to localhost only and requires the per-run token in the URL. `--port N` pins a port, `--no-open` skips the browser.
+
+Building from source needs Bun for the UI: `cd ui && bun install && bun run build`, then `cargo build --release`.
+
 ## What the agent sees
 
 Two tools. `repo_map` returns something like:
@@ -83,6 +95,7 @@ singularrag index            # build or refresh the index
 singularrag query "text"     # print the map the agent would get
 singularrag find NAME        # look a symbol up
 singularrag eval             # tier-one recall against eval/questions.toml
+singularrag serve            # open the map UI on localhost
 singularrag mcp              # serve over stdio
 ```
 
