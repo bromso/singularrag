@@ -20,12 +20,9 @@ pub type Reply<T> = Result<T, String>;
 /// exists so callers (and tests) can tell "no drain has happened yet" apart from "the
 /// drain finished with nothing remaining" — both look like `remaining == 0` otherwise.
 ///
-/// Not yet driven by any production caller (`mcp::run` doesn't poll drain progress); the
-/// actor's unit tests exercise it directly through `EngineHandle::stats`. Allowed dead in
-/// the non-test build rather than deleted, since a future task is expected to surface this
-/// over MCP (a resource or a `stats` tool).
+/// Used by `serve::state::AppState`'s `Freshness.drain` (mirrored as `DrainStatsJson`
+/// since this type isn't `Serialize`).
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct DrainStats {
     pub last: IndexStats,
     pub chunks: u64,
