@@ -17,6 +17,8 @@ let mapVersion = 0;
 // When set, `PUT /api/map` waits on this before responding, so a test can fire two
 // clicks while the first write is still in flight.
 let putGate: Promise<void> | null = null;
+// When set, `PUT /api/map` answers with it instead of writing.
+let putRejection: { status: number; body: unknown } | null = null;
 // The `subscribe()` module registers its "change" listener via
 // `EventSource#addEventListener`; capturing it here lets a test simulate a
 // live SSE "change" event (another agent's retrieval) without a real
@@ -28,6 +30,7 @@ beforeEach(() => {
   mapState = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
   mapVersion = 1;
   putGate = null;
+  putRejection = null;
   retrievalList = [retrieval];
   changeHandler = null;
   (globalThis as any).EventSource = class {
@@ -52,6 +55,7 @@ beforeEach(() => {
     // effect dependency on `map`'s identity would have broken.
     if (url.endsWith("/api/map") && init?.method === "PUT") {
       if (putGate) await putGate;
+      if (putRejection) return new Response(JSON.stringify(putRejection.body), { status: putRejection.status });
       const { expected_version, ...cfg } = JSON.parse(String(init.body));
       if (expected_version !== mapVersion) {
         return new Response(JSON.stringify({ error: "map.toml changed on disk", field: "expected_version", current: { ...mapState, version: mapVersion } }), { status: 409 });
@@ -83,7 +87,7 @@ describe("App", () => {
     await waitFor(() => expect(saved).not.toBeNull());
     expect((saved as any).exclude).toEqual([{ path: "src/auth/session.ts" }]);
     expect(await screen.findByText("Saved. Applies to the next retrieval.")).toBeTruthy();
-    const badge = screen.getByRole("status", { name: "Index freshness" });
+    const badge = screen.getByLabelText("Index freshness");
     expect(badge.textContent).toContain("fresh");
     expect(badge.textContent).toContain("9b1e0d4");
     await user.click(screen.getByRole("button", { name: /Skipped files/ }));
@@ -181,6 +185,17 @@ describe("App", () => {
       expect(saved?.pin).toEqual([{ path: "src/auth/session.ts" }]);
       expect(saved?.exclude).toEqual([{ path: "src/auth/session.ts" }]);
     });
+  });
+  test("a_422_names_the_offending_field_in_the_toast", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await user.click(within(grid).getByText("src/auth/session.ts"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    putRejection = { status: 422, body: { error: "path must not contain ..", field: "exclude[0].path" } };
+    await user.click(within(panel).getByRole("button", { name: "Exclude file" }));
+    expect(await screen.findByText("exclude[0].path: path must not contain ..")).toBeTruthy();
+    expect(saved).toBeNull();
   });
   test("a_409_reloads_and_tells_the_user", async () => {
     const user = userEvent.setup();

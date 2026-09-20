@@ -19,7 +19,9 @@ function age(ms: number | null): string {
 }
 export function FreshnessBadge({ status }: { status: Status | null }) {
   return (
-    <span role="status" aria-label="Index freshness" className="rounded border px-2 py-1 text-sm">
+    // Not `role="status"`: the polite live region already announces freshness changes,
+    // and a second live region would say everything twice.
+    <span aria-label="Index freshness" className="rounded border px-2 py-1 text-sm">
       <span className="font-medium">{freshnessText(status)}</span>
       {status?.git_head && <span className="ml-2 font-mono text-xs">{status.git_head.slice(0, 7)}</span>}
       <span className="ml-2 text-xs text-muted-foreground">{age(status?.indexed_at_ms ?? null)}</span>

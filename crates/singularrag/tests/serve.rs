@@ -208,6 +208,71 @@ async fn shell_and_assets_are_served_without_a_token() {
     assert_eq!(r.status(), 404);
 }
 
+/// `/assets/{*path}` is an exact lookup into the embedded bundle, so a traversal attempt
+/// cannot reach anything outside it. The `..` is percent-encoded because the client would
+/// otherwise normalise it away before the request left the process.
+#[tokio::test]
+async fn assets_traversal_is_404() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    for path in [
+        "/assets/%2e%2e/index.html",
+        "/assets/..%2f..%2fetc%2fpasswd",
+        "/assets/%2e%2e%2f%2e%2e%2fCargo.toml",
+    ] {
+        let r = client()
+            .get(format!("{}{path}", s.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "{path}");
+    }
+}
+
+/// A foreign process holding the indexer lock is reported, never an error (spec §2).
+#[tokio::test]
+async fn a_foreign_lock_shows_up_as_foreign_indexing() {
+    use singularrag_core::store::{lock, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+    // A pid no live process can have. `std::process::id() + 1` would not do: pids are
+    // handed out in order, so the server this test just spawned is very likely to hold
+    // it, and the lock lets its own pid take the row over.
+    let foreign = u32::MAX - 7;
+    assert_ne!(foreign, s.child.id());
+    assert!(lock::try_acquire(&store, foreign, singularrag_core::time::now_ms()).unwrap());
+
+    // A file change makes the watcher try to refresh; it cannot take the lock.
+    std::fs::write(
+        dir.path().join("src/util/log.ts"),
+        "export function logWhileLocked(): void {}\n",
+    )
+    .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        // Keep the lock alive: a heartbeat older than LOCK_STALE_MS may be taken over.
+        lock::heartbeat(&store, foreign, singularrag_core::time::now_ms()).unwrap();
+        let now: serde_json::Value = get(&s, "/status").await.json().await.unwrap();
+        if now["foreign_indexing"] == true {
+            assert_eq!(now["lock_timeout"], true);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "foreign_indexing never went true: {now}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    lock::release(&store, foreign).unwrap();
+}
+
 #[tokio::test]
 async fn routes_have_the_documented_shapes() {
     let dir = tempfile::tempdir().unwrap();

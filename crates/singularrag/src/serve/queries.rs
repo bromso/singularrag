@@ -155,15 +155,22 @@ const SUMMARY_SQL: &str = "SELECT r.id, r.session_key, r.tool, r.query, r.focus_
   FROM retrievals r";
 
 fn summary_from_row(r: &rusqlite::Row) -> rusqlite::Result<RetrievalSummary> {
+    let id: i64 = r.get(0)?;
     let key: String = r.get(1)?;
     let focus: String = r.get(4)?;
+    // A row the writer produced should always parse; if one does not, the UI degrades to
+    // an empty list rather than failing the request, so say so on stderr.
+    let focus_files = serde_json::from_str(&focus).unwrap_or_else(|e| {
+        tracing::warn!("retrieval {id}: focus_files is not valid JSON ({e}); reporting none");
+        Vec::new()
+    });
     Ok(RetrievalSummary {
-        id: r.get(0)?,
+        id,
         session_label: session_label(&key),
         session_key: key,
         tool: r.get(2)?,
         query: r.get(3)?,
-        focus_files: serde_json::from_str(&focus).unwrap_or_default(),
+        focus_files,
         budget: r.get(5)?,
         limit_n: r.get(6)?,
         index_version: r.get(7)?,
@@ -200,16 +207,24 @@ pub fn retrieval(store: &Store, id: i64) -> Result<Option<RetrievalDetail>> {
     )?;
     let items = stmt
         .query_map([id], |r| {
+            let rank: i64 = r.get(0)?;
             let raw: String = r.get(7)?;
+            let reasons = serde_json::from_str(&raw).unwrap_or_else(|e| {
+                tracing::warn!(
+                    "retrieval {id} rank {rank}: reasons_json is not valid JSON ({e}); \
+                     reporting null reasons"
+                );
+                serde_json::Value::Null
+            });
             Ok(ItemDto {
-                rank: r.get(0)?,
+                rank,
                 symbol_id: r.get(1)?,
                 path: r.get(2)?,
                 name: r.get(3)?,
                 line_start: r.get(4)?,
                 score: r.get(5)?,
                 served: r.get::<_, i64>(6)? == 1,
-                reasons: serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null),
+                reasons,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;

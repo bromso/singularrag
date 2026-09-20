@@ -40,6 +40,10 @@ fn check_path(field: &str, p: &str) -> std::result::Result<(), MapConfigError> {
     if p.is_empty() {
         return Err(bad("path is empty"));
     }
+    // `nth(1) == ':'` catches a Windows drive letter (`C:\x`, `C:/x`). It over-rejects —
+    // any path whose second character is a colon goes with it — but no repo-relative path
+    // looks like that in practice, and the failure mode is a clear 422 rather than a write
+    // outside the repo. Ruled acceptable in Task 3.
     if p.starts_with('/') || p.contains('\\') || p.chars().nth(1) == Some(':') {
         return Err(bad("path must be repo-relative with forward slashes"));
     }

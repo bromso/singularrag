@@ -14,6 +14,12 @@ import { SkippedSheet } from "@/components/SkippedSheet";
 
 const emptyMap: MapConfig = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
 
+/** A caught value is `unknown`; only an `ApiError` is known to carry `field`/`message`. */
+function toastError(e: unknown) {
+  if (e instanceof ApiError) toast.error(e.field ? `${e.field}: ${e.message}` : e.message);
+  else toast.error(e instanceof Error ? e.message : String(e));
+}
+
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [retrievals, setRetrievals] = useState<RetrievalSummary[]>([]);
@@ -59,7 +65,7 @@ export function App() {
       }
       knownMax = Math.max(seen ?? 0, ...rs.map((r) => r.id));
     };
-    load().catch((e) => toast.error(String(e.message ?? e)));
+    load().catch((e: unknown) => toastError(e));
     return subscribe(
       () => { load().catch(() => {}); },
       (s) => { setStatus(s); announce(`Index ${freshnessText(s)}`); },
@@ -68,7 +74,7 @@ export function App() {
 
   useEffect(() => {
     if (selected == null) { setDetail(null); return; }
-    api.retrieval(selected).then(setDetail).catch((e) => toast.error(String(e.message ?? e)));
+    api.retrieval(selected).then(setDetail).catch((e: unknown) => toastError(e));
   }, [selected]);
 
   const rows = useMemo(() => joinRetrieval(tree, detail?.items ?? null), [tree, detail]);
@@ -92,10 +98,8 @@ export function App() {
         if (e instanceof ApiError && e.status === 409 && e.current) {
           applyMapDoc(e.current as MapDoc);
           toast.error("map.toml changed on disk; reloaded, please redo that change");
-        } else if (e instanceof ApiError) {
-          toast.error(e.field ? `${e.field}: ${e.message}` : e.message);
         } else {
-          toast.error(String(e));
+          toastError(e);
         }
       }
     });

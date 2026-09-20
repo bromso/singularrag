@@ -7,7 +7,11 @@ export class ApiError extends Error {
 
 export function tokenFromFragment(): string {
   const m = /(?:^#|&)token=([0-9a-fA-F]+)/i.exec(window.location.hash);
-  return m?.[1] ?? "";
+  if (!m) return "";
+  // Once read, drop the fragment from the address bar: the token should not sit in a
+  // shared screenshot, a copied URL or the browser's history entry.
+  try { history.replaceState(null, "", window.location.pathname); } catch {}
+  return m[1];
 }
 
 let token = "";
