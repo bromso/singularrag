@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { App } from "./App";
@@ -19,6 +19,9 @@ let mapVersion = 0;
 let putGate: Promise<void> | null = null;
 // When set, `PUT /api/map` answers with it instead of writing.
 let putRejection: { status: number; body: unknown } | null = null;
+// When set, `GET /api/blast` waits on this before responding, so a test can move
+// focus (or click again) while a blast request is still in flight.
+let blastGate: Promise<void> | null = null;
 // The `subscribe()` module registers its "change" listener via
 // `EventSource#addEventListener`; capturing it here lets a test simulate a
 // live SSE "change" event (another agent's retrieval) without a real
@@ -31,6 +34,7 @@ beforeEach(() => {
   mapVersion = 1;
   putGate = null;
   putRejection = null;
+  blastGate = null;
   retrievalList = [retrieval];
   changeHandler = null;
   (globalThis as any).EventSource = class {
@@ -45,7 +49,10 @@ beforeEach(() => {
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
     if (init?.headers && (init.headers as Record<string, string>).Authorization !== "Bearer deadbeef") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
     if (url.endsWith("/api/status")) return json(status);
-    if (url.includes("/api/blast?")) return json({ root: { path: "src/auth/session.ts", symbol: "createSession" }, files: [{ path: "src/http/middleware.ts", depth: 1, via: "createSession" }], truncated: null });
+    if (url.includes("/api/blast?")) {
+      if (blastGate) await blastGate;
+      return json({ root: { path: "src/auth/session.ts", symbol: "createSession" }, files: [{ path: "src/http/middleware.ts", depth: 1, via: "createSession" }], truncated: null });
+    }
     if (url.endsWith("/api/graph")) return json({ index_version: "abc123", nodes: tree.map((f) => ({ path: f.path, symbols: f.symbols.length, lang: f.lang })), edges: [] });
     if (url.includes("/api/retrievals?")) return json(retrievalList);
     if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }] });
@@ -270,5 +277,41 @@ describe("App", () => {
     await user.click(screen.getAllByRole("button", { name: /Actions for src\/auth\/session.ts/ })[0]);
     await user.click(await screen.findByRole("button", { name: "Show symbols" }));
     expect(await screen.findByRole("button", { name: "Hide symbols" })).toBeTruthy();
+  });
+
+  test("a_blast_response_arriving_after_focus_moved_is_dropped", async () => {
+    const user = userEvent.setup();
+    let release!: () => void;
+    blastGate = new Promise<void>((r) => { release = r; });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(await screen.findByRole("button", { name: "Actions for createSession" }));
+    await user.click(await screen.findByRole("button", { name: "Show blast radius" }));
+    await user.click(screen.getAllByRole("button", { name: /Actions for src\/auth\/session.ts/ })[0]);
+    await act(async () => {
+      release();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("list", { name: "Blast radius" })).toBeNull();
+    const live = screen.getByRole("log", { name: "Announcements" });
+    expect(live.textContent).not.toContain("Blast radius:");
+  });
+
+  test("toggling_blast_twice_while_loading_fetches_once", async () => {
+    const user = userEvent.setup();
+    let release!: () => void;
+    blastGate = new Promise<void>((r) => { release = r; });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(await screen.findByRole("button", { name: "Actions for createSession" }));
+    await user.click(await screen.findByRole("button", { name: "Show blast radius" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Show blast radius" }) as HTMLButtonElement).disabled).toBe(true));
+    const blastCalls = () => (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).includes("/api/blast?")).length;
+    expect(blastCalls()).toBe(1);
+    release();
+    const list = await screen.findByRole("list", { name: "Blast radius" });
+    expect(list).toBeTruthy();
   });
 });

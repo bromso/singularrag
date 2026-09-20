@@ -91,20 +91,38 @@ export function App() {
   }, []);
 
   // Blast radius is scoped to the focused symbol; switching to a different row (or a
-  // file row) invalidates whatever was shown for the previous one.
+  // file row) invalidates whatever was shown for the previous one. `blastReq` is a
+  // request-generation counter: a response only applies its state if the generation
+  // it was issued under is still current, so a stale in-flight `api.blast()` (the
+  // focus moved, or a newer request for a different target was issued) is dropped
+  // instead of clobbering `blast`/`blastLoading`/the announcement for whatever is
+  // focused now. `pendingBlastRef` records which (path, symbol) the current
+  // generation is for, so a second click while that request is still loading is a
+  // no-op instead of double-fetching.
   const focusedSymbol = focused?.kind === "symbol" ? focused.symbol.symbol.name : undefined;
-  useEffect(() => { setBlast(null); }, [focused?.path, focusedSymbol]);
+  const blastReq = useRef(0);
+  const pendingBlastRef = useRef<{ gen: number; path: string; symbol: string } | null>(null);
+  useEffect(() => {
+    blastReq.current += 1;
+    setBlast(null);
+    setBlastLoading(false);
+  }, [focused?.path, focusedSymbol]);
 
   const toggleBlast = (path: string, symbol: string) => {
+    const pending = pendingBlastRef.current;
+    if (blastLoading && pending && pending.path === path && pending.symbol === symbol) return;
     if (blast && blast.root.path === path && blast.root.symbol === symbol) { setBlast(null); return; }
+    const gen = ++blastReq.current;
+    pendingBlastRef.current = { gen, path, symbol };
     setBlastLoading(true);
     api.blast(path, symbol)
       .then((b) => {
+        if (blastReq.current !== gen) return;
         setBlast(b);
         announce(`Blast radius: ${b.files.length} files to depth ${Math.max(0, ...b.files.map((f) => f.depth))}`);
       })
-      .catch(toastError)
-      .finally(() => setBlastLoading(false));
+      .catch((e: unknown) => { if (blastReq.current === gen) toastError(e); })
+      .finally(() => { if (blastReq.current === gen) setBlastLoading(false); });
   };
   const toggleExpand = (path: string) => setExpandedPath((p) => (p === path ? null : path));
 
