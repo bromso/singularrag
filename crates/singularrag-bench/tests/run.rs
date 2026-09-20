@@ -256,6 +256,34 @@ fn unknown_question_id_is_an_error() {
 }
 
 #[test]
+#[cfg(unix)]
+fn unreadable_mcp_config_names_the_file_in_the_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = workspace();
+    let path = ws.root.join("eval/conditions/singularrag.json");
+    let original = std::fs::metadata(&path).unwrap().permissions();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_to_string(&path).is_ok() {
+        // Running as root (or on a filesystem that ignores the mode bits): nothing to pin here.
+        std::fs::set_permissions(&path, original).unwrap();
+        return;
+    }
+    bench(&ws)
+        .args([
+            "run",
+            "--config",
+            "eval/tier2.toml",
+            "--conditions",
+            "singularrag",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(path.to_str().unwrap()))
+        .stderr(predicate::str::contains("reading"));
+    std::fs::set_permissions(&path, original).unwrap();
+}
+
+#[test]
 fn a_session_that_dirties_the_tree_aborts_the_run_after_recording_it() {
     let ws = workspace();
     bench(&ws)

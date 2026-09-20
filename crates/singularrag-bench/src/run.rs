@@ -40,8 +40,10 @@ fn uses_singularrag(c: &Condition) -> Result<bool> {
     let Some(path) = &c.mcp_config else {
         return Ok(false);
     };
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     let servers = v.get("mcpServers").and_then(|s| s.as_object());
     Ok(servers.into_iter().flatten().any(|(_, s)| {
         s.get("command")
@@ -243,7 +245,9 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
         std::fs::create_dir_all(&cdir)?;
         let mcp = match &c.mcp_config {
             Some(src) => {
-                let text = std::fs::read_to_string(src)?.replace("<checkout>", &checkout);
+                let text = std::fs::read_to_string(src)
+                    .with_context(|| format!("reading {}", src.display()))?
+                    .replace("<checkout>", &checkout);
                 let dst = cdir.join("mcp.json");
                 std::fs::write(&dst, text)?;
                 Some(dst)
