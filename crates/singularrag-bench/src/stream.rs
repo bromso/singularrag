@@ -17,7 +17,6 @@ pub struct Tokens {
 
 impl Tokens {
     /// The comparison metric: input + output + cache creation + cache read.
-    #[allow(dead_code)]
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_creation + self.cache_read
     }

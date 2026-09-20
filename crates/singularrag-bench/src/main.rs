@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 mod config;
 mod score;
 mod stream;
+mod summary;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -23,6 +24,8 @@ struct Cli {
 enum Cmd {
     /// Print the parsed record of one stream-json transcript
     Parse { stream: PathBuf },
+    /// Rewrite summary.md from the records in a run directory
+    Score { run_dir: PathBuf },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -32,6 +35,12 @@ fn main() -> anyhow::Result<()> {
             let text = std::fs::read_to_string(&stream)?;
             let parsed = stream::parse_stream(&text);
             println!("{}", serde_json::to_string_pretty(&parsed)?);
+        }
+        Cmd::Score { run_dir } => {
+            let (meta, baseline, conditions, questions) = summary::load_run(&run_dir)?;
+            let md = summary::render(&meta, &baseline, &conditions, &questions);
+            std::fs::write(run_dir.join("summary.md"), &md)?;
+            print!("{md}");
         }
     }
     Ok(())

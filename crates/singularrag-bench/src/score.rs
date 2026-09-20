@@ -30,7 +30,6 @@ pub struct Record {
 }
 
 impl Record {
-    #[allow(dead_code)]
     pub fn tool_call_total(&self) -> u64 {
         self.tool_calls.values().sum()
     }
