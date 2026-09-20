@@ -112,6 +112,9 @@ struct Actor {
     drain_chunks: u64,
     /// True after a response reported stale files and the refresh did not lose the lock.
     drain_pending: bool,
+    /// Backlog the current drain is working against: the `stale_count` that armed it,
+    /// then each chunk's `remaining`. A chunk that does not shrink it made no progress.
+    drain_remaining: usize,
 }
 
 impl Actor {
@@ -151,6 +154,7 @@ impl Actor {
         // drain_pending is derived from stale_count only; a foreign lock is detected one
         // chunk later by drain_chunk (refresh reports lock_timeout and indexes nothing).
         self.drain_pending = stale_count > 0;
+        self.drain_remaining = stale_count;
     }
 
     fn handle(&mut self, job: Job) -> bool {
@@ -175,6 +179,12 @@ impl Actor {
             }
             Job::SetRefreshBudget(budget, reply) => {
                 self.config.refresh_budget = budget;
+                // A drain that stopped for want of budget deserves another go with the
+                // new one; without this, "too small to index a file" would be permanent
+                // for the rest of the session.
+                if self.drain_remaining > 0 {
+                    self.drain_pending = true;
+                }
                 let out = self.engine().map(|e| e.set_refresh_budget(budget));
                 let _ = reply.send(out);
             }
@@ -189,16 +199,38 @@ impl Actor {
         true
     }
 
-    /// One drain chunk. Returns true when more work remains and the lock was ours.
+    /// One drain chunk. Returns true when more work remains, the lock was ours, and
+    /// this chunk actually shrank the backlog.
+    ///
+    /// The progress term is what keeps a budget smaller than one file's parse from
+    /// spinning: `Indexer::refresh_with` walks the tree before it looks at the deadline,
+    /// so such a chunk indexes nothing, reports the same `remaining` as the last one, and
+    /// would re-arm the drain forever — re-walking, rewriting meta and taking the
+    /// advisory lock tens of times a second. Progress is measured as the backlog
+    /// shrinking rather than as `indexed + skipped + removed > 0`, because the walk
+    /// re-reports denylisted files (`.env` and friends) in `skipped` on *every* chunk,
+    /// so that sum is never zero on a real repo. `indexed`/`removed` are still accepted
+    /// as progress on their own, so a chunk that keeps up with a repo being edited
+    /// underneath it is not mistaken for a stalled one.
     fn drain_chunk(&mut self) -> bool {
-        self.drain_chunks += 1;
         let budget = self.config.refresh_budget;
         let Ok(engine) = self.engine() else {
             return false;
         };
-        match engine.refresh(budget) {
+        let refreshed = engine.refresh(budget);
+        self.drain_chunks += 1;
+        match refreshed {
             Ok(stats) => {
-                let more = stats.remaining > 0 && !stats.lock_timeout;
+                let progressed = stats.indexed > 0
+                    || stats.removed > 0
+                    || stats.remaining < self.drain_remaining;
+                let more = stats.remaining > 0 && !stats.lock_timeout && progressed;
+                if stats.remaining > 0 && !stats.lock_timeout && !progressed {
+                    tracing::warn!(
+                        "refresh budget too small to index a file; background drain stopped"
+                    );
+                }
+                self.drain_remaining = stats.remaining;
                 self.last_stats = stats;
                 more
             }
@@ -217,6 +249,7 @@ fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
         last_stats: IndexStats::default(),
         drain_chunks: 0,
         drain_pending: false,
+        drain_remaining: 0,
     };
     loop {
         if actor.drain_pending {
@@ -373,6 +406,30 @@ mod tests {
         let second = handle.map(MapRequest::default()).await.unwrap();
         assert_eq!(second.stale_count, 0);
         assert!(second.text.contains("· fresh ·"));
+    }
+
+    /// A budget too small to index even one file makes every chunk identical: the walk
+    /// runs, nothing is indexed, `remaining` does not move. Without a progress term the
+    /// actor re-arms forever and burns a core (measured at ~85% on a real repo with
+    /// `--refresh-budget-ms 1`). One chunk, then silence.
+    #[tokio::test]
+    async fn a_chunk_that_makes_no_progress_stops_the_drain() {
+        let dir = fixture();
+        let (handle, _join) = spawn(config(dir.path(), Duration::ZERO));
+        let first = handle.map(MapRequest::default()).await.unwrap();
+        assert!(first.stale_count > 0, "{first:?}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let a = handle.stats().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let b = handle.stats().await.unwrap();
+        assert_eq!(
+            a.chunks, b.chunks,
+            "the drain kept re-arming with no progress: {a:?} then {b:?}"
+        );
+        assert!(
+            a.chunks <= 1,
+            "one no-progress chunk is enough to stop: {a:?}"
+        );
     }
 
     #[tokio::test]
