@@ -20,12 +20,9 @@ pub type Reply<T> = Result<T, String>;
 /// exists so callers (and tests) can tell "no drain has happened yet" apart from "the
 /// drain finished with nothing remaining" — both look like `remaining == 0` otherwise.
 ///
-/// Not yet driven by any production caller (`mcp::run` doesn't poll drain progress); the
-/// actor's unit tests exercise it directly through `EngineHandle::stats`. Allowed dead in
-/// the non-test build rather than deleted, since a future task is expected to surface this
-/// over MCP (a resource or a `stats` tool).
+/// Used by `serve::state::AppState`'s `Freshness.drain` (mirrored as `DrainStatsJson`
+/// since this type isn't `Serialize`).
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct DrainStats {
     pub last: IndexStats,
     pub chunks: u64,
@@ -34,6 +31,10 @@ pub struct DrainStats {
 pub enum Job {
     Map(MapRequest, oneshot::Sender<Reply<MapResponse>>),
     Find(FindRequest, oneshot::Sender<Reply<FindResponse>>),
+    /// One budgeted refresh with no retrieval recorded and no drain armed: the file
+    /// watcher's job, not a tool response. Constructed by `serve::watcher` through
+    /// `EngineHandle::refresh`, and exercised directly by the actor's unit tests.
+    Refresh(oneshot::Sender<Reply<IndexStats>>),
     // Constructed only by `EngineHandle::set_refresh_budget`/`stats`, which are currently
     // test-only (see the `#[allow(dead_code)]` note on `DrainStats`).
     #[allow(dead_code)]
@@ -43,12 +44,21 @@ pub enum Job {
     Shutdown,
 }
 
+/// Where the `<client>` part of the session key comes from.
+#[derive(Clone)]
+pub enum SessionKey {
+    /// A process that knows its own name (`serve`, tests): the key is used verbatim.
+    /// Built by `serve::run` (`SessionKey::Fixed("serve".into())`); also exercised
+    /// directly by the actor's unit tests.
+    Fixed(String),
+    /// The MCP server: filled from `clientInfo.name` during initialize, read at first job.
+    FromHandshake(Arc<Mutex<Option<String>>>),
+}
+
 #[derive(Clone)]
 pub struct EngineConfig {
     pub root: PathBuf,
-    /// Filled by the server from `clientInfo.name` during initialize; read once at the
-    /// first job. `None` means initialize never ran.
-    pub session_key: Arc<Mutex<Option<String>>>,
+    pub session_key: SessionKey,
     pub refresh_budget: Duration,
 }
 
@@ -72,6 +82,12 @@ impl EngineHandle {
 
     pub async fn find(&self, req: FindRequest) -> Reply<FindResponse> {
         self.ask(|tx| Job::Find(req, tx)).await
+    }
+
+    // One budgeted refresh with no retrieval recorded. The watcher's job; see the
+    // doc comment on `Job::Refresh`.
+    pub async fn refresh(&self) -> Reply<IndexStats> {
+        self.ask(Job::Refresh).await
     }
 
     // Test-only for now; see the `#[allow(dead_code)]` note on `DrainStats`.
@@ -139,14 +155,17 @@ struct Actor {
 
 impl Actor {
     fn session_key(&self) -> String {
-        let client = self
-            .config
-            .session_key
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or(None)
-            .unwrap_or_else(|| "unknown".to_string());
-        format!("mcp:{client}:{}:{}", std::process::id(), self.start_ms)
+        match &self.config.session_key {
+            SessionKey::Fixed(k) => k.clone(),
+            SessionKey::FromHandshake(slot) => {
+                let client = slot
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| "unknown".to_string());
+                format!("mcp:{client}:{}:{}", std::process::id(), self.start_ms)
+            }
+        }
     }
 
     fn engine(&mut self) -> Result<&mut Engine, String> {
@@ -193,6 +212,18 @@ impl Actor {
                     .and_then(|e| e.find_symbol(&req).map_err(|e| e.to_string()));
                 if let Ok(r) = &out {
                     self.note(r.stale_count, r.lock_timeout);
+                }
+                let _ = reply.send(out);
+            }
+            Job::Refresh(reply) => {
+                let budget = self.config.refresh_budget;
+                let out = self
+                    .engine()
+                    .and_then(|e| e.refresh(budget).map_err(|e| e.to_string()));
+                if let Ok(stats) = &out {
+                    self.last_stats = stats.clone();
+                    // A refresh from the watcher is not a tool response; it does not arm
+                    // the drain (the caller decides whether to refresh again).
                 }
                 let _ = reply.send(out);
             }
@@ -319,7 +350,9 @@ mod tests {
     fn config(root: &std::path::Path, budget: Duration) -> EngineConfig {
         EngineConfig {
             root: root.to_path_buf(),
-            session_key: Arc::new(Mutex::new(Some("test-client".into()))),
+            session_key: SessionKey::FromHandshake(Arc::new(Mutex::new(Some(
+                "test-client".into(),
+            )))),
             refresh_budget: budget,
         }
     }
@@ -387,7 +420,7 @@ mod tests {
     async fn unknown_client_when_initialize_never_ran() {
         let dir = fixture();
         let mut cfg = config(dir.path(), REFRESH_BUDGET);
-        cfg.session_key = Arc::new(Mutex::new(None));
+        cfg.session_key = SessionKey::FromHandshake(Arc::new(Mutex::new(None)));
         let (handle, _join, _died) = spawn(cfg);
         handle.map(MapRequest::default()).await.unwrap();
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
@@ -484,7 +517,7 @@ mod tests {
     async fn bad_root_yields_errors_and_the_actor_stays_alive() {
         let cfg = EngineConfig {
             root: std::path::PathBuf::from("/nonexistent/singularrag-test-root"),
-            session_key: Arc::new(Mutex::new(None)),
+            session_key: SessionKey::FromHandshake(Arc::new(Mutex::new(None))),
             refresh_budget: REFRESH_BUDGET,
         };
         let (handle, _join, _died) = spawn(cfg);
@@ -527,5 +560,59 @@ mod tests {
         join.join().unwrap();
         let err = handle.map(MapRequest::default()).await.unwrap_err();
         assert!(err.contains("engine thread is gone"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fixed_session_key_is_used_verbatim() {
+        let dir = fixture();
+        let (handle, _join, _died) = spawn(EngineConfig {
+            root: dir.path().to_path_buf(),
+            session_key: SessionKey::Fixed("serve".into()),
+            refresh_budget: REFRESH_BUDGET,
+        });
+        handle.map(MapRequest::default()).await.unwrap();
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let key: String = store
+            .conn()
+            .query_row(
+                "SELECT session_key FROM retrievals ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(key, "serve");
+    }
+
+    #[tokio::test]
+    async fn refresh_job_indexes_and_returns_stats() {
+        let dir = fixture();
+        let (handle, _join, _died) = spawn(config(dir.path(), REFRESH_BUDGET));
+        let stats = handle.refresh().await.unwrap();
+        assert!(stats.indexed >= 4, "{stats:?}");
+        assert_eq!(stats.remaining, 0);
+        assert!(!stats.lock_timeout);
+        let again = handle.refresh().await.unwrap();
+        assert_eq!(again.indexed, 0);
+        assert!(again.unchanged >= 4);
+        // A refresh is not a retrieval: nothing recorded.
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let n: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM retrievals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn refresh_job_reports_lock_timeout_under_a_foreign_lock() {
+        let dir = fixture();
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let foreign = std::process::id() + 1;
+        assert!(lock::try_acquire(&store, foreign, singularrag_core::time::now_ms()).unwrap());
+        let (handle, _join, _died) = spawn(config(dir.path(), REFRESH_BUDGET));
+        let stats = handle.refresh().await.unwrap();
+        assert!(stats.lock_timeout);
+        assert_eq!(stats.indexed, 0);
+        lock::release(&store, foreign).unwrap();
     }
 }

@@ -13,7 +13,7 @@ use rmcp::service::RequestContext;
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
 use singularrag_core::engine::{FindRequest, MapRequest};
 
-use super::actor::EngineHandle;
+use crate::actor::EngineHandle;
 
 pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this repository. Call repo_map first with your task as the query, then read only the files it points at. Use find_symbol to locate a name. Both tools are read-only. A STALE header means files changed since indexing; the index catches up in the background.";
 
