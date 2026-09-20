@@ -43,14 +43,21 @@ export function App() {
 
   useEffect(() => {
     setToken(tokenFromFragment());
-    let knownMax = 0;
+    // `null` until the first load: history is not news, so the initial page-load
+    // announces one summary instead of reading out up to ten past retrievals (I5).
+    let knownMax: number | null = null;
     const load = async () => {
       const [s, rs, t, sk, m] = await Promise.all([api.status(), api.retrievals(), api.tree(), api.skipped(), api.map()]);
       setStatus(s); setRetrievals(rs); setTree(t); setSkipped(sk); applyMapDoc(m);
-      for (const r of rs.filter((r) => r.id > knownMax).reverse()) {
-        announce(`New retrieval from ${r.session_label}: ${r.tool}, ${r.served} served, ${r.cut} cut, ${r.stale_count ? `${r.stale_count} stale` : "fresh"}`);
+      const seen = knownMax;
+      if (seen === null) {
+        announce(`Loaded ${rs.length} retrievals`);
+      } else {
+        for (const r of rs.filter((r) => r.id > seen).reverse()) {
+          announce(`New retrieval from ${r.session_label}: ${r.tool}, ${r.served} served, ${r.cut} cut, ${r.stale_count ? `${r.stale_count} stale` : "fresh"}`);
+        }
       }
-      knownMax = Math.max(knownMax, ...rs.map((r) => r.id));
+      knownMax = Math.max(seen ?? 0, ...rs.map((r) => r.id));
     };
     load().catch((e) => toast.error(String(e.message ?? e)));
     return subscribe(
@@ -65,6 +72,14 @@ export function App() {
   }, [selected]);
 
   const rows = useMemo(() => joinRetrieval(tree, detail?.items ?? null), [tree, detail]);
+
+  // A row's action button only selected the row, which row focus had already done, so it
+  // did nothing a screen-reader user could notice (I10). Move DOM focus to the panel it
+  // controls; the rAF lets React commit the panel's new heading first.
+  const openDetail = useCallback((row: TreeRow) => {
+    setFocused(row);
+    requestAnimationFrame(() => document.getElementById("detail-heading")?.focus());
+  }, []);
 
   // `edit` is applied when the save's turn comes, to the config as it is then — not at
   // click time — so the second of two rapid clicks does not discard the first.
@@ -100,7 +115,7 @@ export function App() {
       <RetrievalsRail retrievals={retrievals} selected={selected} onSelect={setSelected}
         onMore={() => api.retrievals(retrievals[retrievals.length - 1]?.id).then((more) => setRetrievals((rs) => [...rs, ...more]))} />
       <main className="overflow-auto">
-        <RepoTree rows={rows} filter={filter} onFocusRow={setFocused} onAction={setFocused} />
+        <RepoTree rows={rows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
       </main>
       <DetailPanel row={focused} map={map}
         onPin={(p, s) => save((c) => togglePin(c, p, s))}

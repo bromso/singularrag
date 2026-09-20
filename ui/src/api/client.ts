@@ -14,18 +14,28 @@ let token = "";
 export function setToken(t: string) { token = t; }
 export function getToken() { return token; }
 
+/** Spec §2: a busy read connection answers 503 and the client retries with backoff. */
+const BUSY_RETRY_MS = [200, 400, 800];
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    let msg = res.statusText, field: string | undefined, current: unknown;
-    try { const j = await res.json(); msg = j.error ?? msg; field = j.field; current = j.current; } catch {}
-    throw new ApiError(res.status, msg, field, current);
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`/api${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (res.status === 503 && attempt < BUSY_RETRY_MS.length) {
+      await sleep(BUSY_RETRY_MS[attempt]);
+      continue;
+    }
+    if (!res.ok) {
+      let msg = res.statusText, field: string | undefined, current: unknown;
+      try { const j = await res.json(); msg = j.error ?? msg; field = j.field; current = j.current; } catch {}
+      throw new ApiError(res.status, msg, field, current);
+    }
+    return (await res.json()) as T;
   }
-  return (await res.json()) as T;
 }
 
 export const api = {

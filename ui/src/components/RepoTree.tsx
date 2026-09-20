@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Collection, Tree, TreeItem, TreeItemContent, type Key } from "react-aria-components";
 import { ChevronRight, MoreHorizontal } from "lucide-react";
 import { StatusMark } from "@/lib/status";
@@ -7,6 +7,11 @@ import { reasonsToSentences } from "@/lib/reasons";
 import { cn } from "@/lib/utils";
 
 export type TreeRow = { kind: "file"; path: string; file: FileRow } | { kind: "symbol"; path: string; file: FileRow; symbol: SymbolRow };
+// The accent tint alone is ~1.07:1 against the background — not a focus indicator (I4).
+// `outline-none` is deliberately absent here (it stays on the Tree container); react-aria
+// sets data-focus-visible on the row only for keyboard focus.
+const FOCUSABLE_ROW =
+  "data-[focused]:bg-accent data-[focus-visible]:outline-2 data-[focus-visible]:outline-offset-[-2px] data-[focus-visible]:outline-ring";
 type SortKey = "path" | "status" | "score";
 const statusOrder = { served: 0, cut: 1, untouched: 2 } as const;
 
@@ -29,7 +34,7 @@ function FileRowView({ file, isFocused, onFocusRow, onAction }: {
       <span className="font-mono text-sm">{file.path}</span>
       <span className="text-xs text-muted-foreground">{file.lang ?? ""}</span>
       {file.served + file.cut > 0 && <span className="text-xs">{file.served} served · {file.cut} cut</span>}
-      <Button className="ml-auto size-6 rounded" aria-label={`Actions for ${file.path}`} onPress={() => onAction({ kind: "file", path: file.path, file })}>
+      <Button className="ml-auto size-6 rounded" aria-label={`Actions for ${file.path}`} aria-controls="detail-panel" onPress={() => onAction({ kind: "file", path: file.path, file })}>
         <MoreHorizontal className="size-4" aria-hidden="true" />
       </Button>
     </div>
@@ -51,22 +56,38 @@ function SymbolRowView({ file, symbol, isFocused, onFocusRow, onAction }: {
       {symbol.item && <span className="text-xs tabular-nums">{symbol.item.score.toFixed(2)}</span>}
       {symbol.item && <span className="truncate text-xs text-muted-foreground">{reason}</span>}
       <span className="truncate text-xs text-muted-foreground" title={symbol.symbol.signature}>{symbol.symbol.signature}</span>
-      <Button className="ml-auto size-6 rounded" aria-label={`Actions for ${symbol.symbol.name}`} onPress={() => onAction({ kind: "symbol", path: file.path, file, symbol })}>
+      <Button className="ml-auto size-6 rounded" aria-label={`Actions for ${symbol.symbol.name}`} aria-controls="detail-panel" onPress={() => onAction({ kind: "symbol", path: file.path, file, symbol })}>
         <MoreHorizontal className="size-4" aria-hidden="true" />
       </Button>
     </div>
   );
 }
 
-export function RepoTree({ rows, filter, onFocusRow, onAction }: {
-  rows: FileRow[]; filter: string; onFocusRow: (row: TreeRow) => void; onAction: (row: TreeRow) => void;
+const defaultExpansion = (rows: FileRow[]) => new Set<Key>(rows.filter((r) => r.expandedByDefault).map((r) => r.path));
+
+export function RepoTree({ rows, filter, seedKey, onFocusRow, onAction }: {
+  rows: FileRow[]; filter: string; seedKey: number; onFocusRow: (row: TreeRow) => void; onAction: (row: TreeRow) => void;
 }) {
   const [sort, setSort] = useState<SortKey>("path");
-  const [expanded, setExpanded] = useState<Set<Key>>(() => new Set(rows.filter((r) => r.expandedByDefault).map((r) => r.path)));
+  const [expanded, setExpanded] = useState<Set<Key>>(() => defaultExpansion(rows));
 
-  // Task 12 will re-render with new `rows` when a retrieval is selected; reopen the newly touched files.
+  // The expansion is seeded by the *retrieval*, not by the rows: a live "change" event
+  // hands down a fresh `rows` array several times a minute, and re-seeding on that would
+  // collapse whatever the user had opened and move focus mid-navigation (I2). `seedKey`
+  // is the selected retrieval's id, so this runs only when the selection lands.
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
   useEffect(() => {
-    setExpanded(new Set(rows.filter((r) => r.expandedByDefault).map((r) => r.path)));
+    setExpanded(defaultExpansion(rowsRef.current));
+  }, [seedKey]);
+
+  // New rows may have dropped files (a delete, a rename); forget their keys, keep the rest.
+  useEffect(() => {
+    setExpanded((prev) => {
+      const alive = new Set<Key>(rows.map((r) => r.path));
+      const next = new Set([...prev].filter((k) => alive.has(k)));
+      return next.size === prev.size ? prev : next;
+    });
   }, [rows]);
 
   const visible = useMemo(() => {
@@ -105,13 +126,13 @@ export function RepoTree({ rows, filter, onFocusRow, onAction }: {
         className="outline-none"
       >
         {(file) => (
-          <TreeItem id={file.path} textValue={file.path} className="outline-none data-[focused]:bg-accent">
+          <TreeItem id={file.path} textValue={file.path} className={FOCUSABLE_ROW}>
             <TreeItemContent>
               {({ isFocused }) => <FileRowView file={file} isFocused={isFocused} onFocusRow={onFocusRow} onAction={onAction} />}
             </TreeItemContent>
             <Collection items={file.symbols}>
               {(s) => (
-                <TreeItem id={s.key} textValue={`${s.symbol.name} ${s.symbol.kind}`} className="outline-none data-[focused]:bg-accent">
+                <TreeItem id={s.key} textValue={`${s.symbol.name} ${s.symbol.kind}`} className={FOCUSABLE_ROW}>
                   <TreeItemContent>
                     {({ isFocused }) => <SymbolRowView file={file} symbol={s} isFocused={isFocused} onFocusRow={onFocusRow} onAction={onAction} />}
                   </TreeItemContent>

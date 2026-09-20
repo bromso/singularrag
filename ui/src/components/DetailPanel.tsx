@@ -31,11 +31,13 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote }: {
       setText(saved);
     }
   }, [row?.path, symbol, saved]);
-  if (!row) return <section aria-label="Details" className="border-l p-3 text-sm text-muted-foreground">Select a file or symbol.</section>;
+  if (!row) return <section id="detail-panel" aria-label="Details" className="border-l p-3 text-sm text-muted-foreground">Select a file or symbol.</section>;
   const item = row.kind === "symbol" ? row.symbol.item : null;
   return (
-    <section aria-label="Details" className="flex flex-col gap-3 border-l p-3">
-      <h2 className="font-mono text-sm font-semibold">{symbol ? `${row.path} :: ${symbol}` : row.path}</h2>
+    <section id="detail-panel" aria-label="Details" className="flex flex-col gap-3 border-l p-3">
+      {/* The row action buttons are `aria-controls="detail-panel"` and move focus here,
+          so a screen-reader user lands on what they just opened (I10). */}
+      <h2 id="detail-heading" tabIndex={-1} className="font-mono text-sm font-semibold">{symbol ? `${row.path} :: ${symbol}` : row.path}</h2>
       {item ? (
         <ul className="list-disc pl-5 text-sm">{reasonsToSentences(item.reasons, item.rank, item.score).map((s) => <li key={s}>{s}</li>)}</ul>
       ) : (

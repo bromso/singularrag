@@ -1,9 +1,14 @@
 import type { Status } from "@/api/types";
 
+/**
+ * Four states, in priority order. `foreign_indexing` (another process holds the index
+ * lock) outranks our own `indexing`, which outranks the leftover stale count; `drain` is
+ * still on the API for the MCP side but is always 0 from serve, so the badge ignores it.
+ */
 export function freshnessText(s: Status | null): string {
   if (!s) return "loading";
   if (s.foreign_indexing) return "another process indexing";
-  if (s.drain.last.remaining > 0 && !s.lock_timeout && s.stale_count > 0) return `indexing, ${s.stale_count} stale`;
+  if (s.indexing) return "indexing";
   if (s.stale_count > 0) return `${s.stale_count} stale`;
   return "fresh";
 }

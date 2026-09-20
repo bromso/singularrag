@@ -4,12 +4,14 @@ import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { App } from "./App";
 
-const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, files: { indexed: 4, skipped: 1 }, drain: { chunks: 0, last: { scanned: 5, indexed: 4, unchanged: 0, skipped: 1, removed: 0, remaining: 0, lock_timeout: false } } };
+const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false, files: { indexed: 4, skipped: 1 }, drain: { chunks: 0, last: { scanned: 5, indexed: 4, unchanged: 0, skipped: 1, removed: 0, remaining: 0, lock_timeout: false } } };
 const r = { score: 0.1, file_rank: 0.1, seeds: ["query:session"], referenced_by: [{ path: "src/http/middleware.ts", count: 2 }], pinned: false, fts_hit: true, query_ident_match: true };
 const retrieval = { id: 7, session_key: "mcp:claude-code:1:2", session_label: "Claude Code", tool: "repo_map", query: "session", focus_files: [], budget: 1024, limit_n: null, index_version: "abc123", git_head: "9b1e0d4f", stale_count: 0, created_at_ms: Date.now(), served: 1, cut: 0 };
 const tree = [{ path: "src/auth/session.ts", lang: "typescript", skipped_reason: null, symbols: [{ id: 1, name: "createSession", kind: "function", line_start: 3, line_end: 6, signature: "export function createSession(user: User, ttl: number): Session" }] }];
 let saved: any = null;
 let mapState: any = null;
+// What `GET /api/retrievals` answers; a test can push to it before firing a change event.
+let retrievalList: any[] = [];
 // `map.toml`'s compare-and-swap token, as the server derives it from the file's mtime.
 let mapVersion = 0;
 // When set, `PUT /api/map` waits on this before responding, so a test can fire two
@@ -26,6 +28,7 @@ beforeEach(() => {
   mapState = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
   mapVersion = 1;
   putGate = null;
+  retrievalList = [retrieval];
   changeHandler = null;
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
@@ -39,7 +42,7 @@ beforeEach(() => {
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
     if (init?.headers && (init.headers as Record<string, string>).Authorization !== "Bearer deadbeef") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
     if (url.endsWith("/api/status")) return json(status);
-    if (url.includes("/api/retrievals?")) return json([retrieval]);
+    if (url.includes("/api/retrievals?")) return json(retrievalList);
     if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }] });
     if (url.endsWith("/api/tree")) return json(tree);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
@@ -87,10 +90,32 @@ describe("App", () => {
     expect(await screen.findByText(".env")).toBeTruthy();
     expect(screen.getByText("denylisted")).toBeTruthy();
   });
-  test("announces a new retrieval in the live region", async () => {
+  test("announces a summary at load and only new retrievals after it", async () => {
     render(<App />);
     const live = await screen.findByRole("log", { name: "Announcements" });
-    await waitFor(() => expect(live.textContent).toContain("New retrieval from Claude Code: repo_map, 1 served, 0 cut, fresh"));
+    // History is not news: the first load summarises instead of reading out every
+    // retrieval already on the page.
+    await waitFor(() => expect(live.textContent).toContain("Loaded 1 retrievals"));
+    expect(live.textContent).not.toContain("New retrieval from");
+
+    // A later retrieval, arriving live, is announced in full.
+    retrievalList = [{ ...retrieval, id: 8, session_label: "Codex", tool: "find_symbol", served: 2, cut: 1 }, retrieval];
+    expect(changeHandler).not.toBeNull();
+    changeHandler?.({ data: JSON.stringify({ max_retrieval_id: 8 }) });
+    await waitFor(() => expect(live.textContent).toContain("New retrieval from Codex: find_symbol, 2 served, 1 cut, fresh"));
+  });
+  test("a_row_action_button_moves_focus_to_the_detail_panel", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    const row = within(grid).getAllByRole("row")[0];
+    await user.click(within(row).getByText("src/auth/session.ts"));
+    const action = within(row).getByRole("button", { name: "Actions for src/auth/session.ts" });
+    expect(action.getAttribute("aria-controls")).toBe("detail-panel");
+    action.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(document.activeElement?.id).toBe("detail-heading"));
+    expect(document.activeElement?.textContent).toBe("src/auth/session.ts");
   });
   test("has no axe violations once loaded", async () => {
     const { container } = render(<App />);

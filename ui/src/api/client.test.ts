@@ -10,6 +10,7 @@ const mockStatus: Status = {
   stale_count: 0,
   lock_timeout: false,
   foreign_indexing: false,
+  indexing: false,
   files: { indexed: 10, skipped: 2 },
   drain: { chunks: 5, last: { scanned: 100, indexed: 95, unchanged: 5, skipped: 0, removed: 0, remaining: 0, lock_timeout: false } },
 };
@@ -116,6 +117,37 @@ describe("ApiError", () => {
       expect(err.message).toBe("bad");
       expect(err.field).toBe("pin[0].path");
     }
+  });
+
+  test("retries a 503 with backoff, then succeeds", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return calls <= 2
+        ? new Response(JSON.stringify({ error: "database is locked" }), { status: 503 })
+        : new Response(JSON.stringify(mockStatus), { status: 200 });
+    }) as any;
+
+    const result = await api.status();
+    expect(calls).toBe(3);
+    expect(result).toEqual(mockStatus);
+  });
+
+  test("gives up after three 503 retries", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: "database is locked" }), { status: 503 });
+    }) as any;
+
+    try {
+      await api.status();
+      expect.unreachable("should throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect((e as ApiError).status).toBe(503);
+    }
+    expect(calls).toBe(4); // the first try plus three retries
   });
 
   test("falls back to statusText for non-JSON error", async () => {
