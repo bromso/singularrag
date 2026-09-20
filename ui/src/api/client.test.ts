@@ -229,6 +229,53 @@ describe("api.saveMap()", () => {
   });
 });
 
+describe("api.graph() and api.blast()", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    setToken("t0k");
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    setToken("");
+  });
+
+  test("graph() hits /api/graph with the bearer header", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, init: init ?? {} });
+      return new Response(JSON.stringify({ index_version: "v1", nodes: [], edges: [] }), { status: 200 });
+    }) as any;
+
+    const result = await api.graph();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("/api/graph");
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer t0k");
+    expect(result).toEqual({ index_version: "v1", nodes: [], edges: [] });
+  });
+
+  test("blast() encodes path and symbol into the query string", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, init: init ?? {} });
+      return new Response(
+        JSON.stringify({ root: { path: "src/a b.ts", symbol: "c::d" }, files: [], truncated: null }),
+        { status: 200 },
+      );
+    }) as any;
+
+    const result = await api.blast("src/a b.ts", "c::d");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(`/api/blast?path=${encodeURIComponent("src/a b.ts")}&symbol=${encodeURIComponent("c::d")}`);
+    expect(result.root.path).toBe("src/a b.ts");
+  });
+});
+
 describe("subscribe()", () => {
   let originalEventSource: typeof globalThis.EventSource;
 
