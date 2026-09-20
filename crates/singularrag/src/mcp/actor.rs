@@ -16,11 +16,20 @@ use tokio::sync::oneshot;
 /// and the MCP layer only ever renders them as `is_error` text.
 pub type Reply<T> = Result<T, String>;
 
+/// The last background `refresh` the actor saw, plus how many chunks have run. `chunks`
+/// exists so callers (and tests) can tell "no drain has happened yet" apart from "the
+/// drain finished with nothing remaining" — both look like `remaining == 0` otherwise.
+#[derive(Debug, Clone, Default)]
+pub struct DrainStats {
+    pub last: IndexStats,
+    pub chunks: u64,
+}
+
 pub enum Job {
     Map(MapRequest, oneshot::Sender<Reply<MapResponse>>),
     Find(FindRequest, oneshot::Sender<Reply<FindResponse>>),
     SetRefreshBudget(Duration, oneshot::Sender<Reply<()>>),
-    Stats(oneshot::Sender<Reply<IndexStats>>),
+    Stats(oneshot::Sender<Reply<DrainStats>>),
     Shutdown,
 }
 
@@ -59,7 +68,7 @@ impl EngineHandle {
         self.ask(|tx| Job::SetRefreshBudget(budget, tx)).await
     }
 
-    pub async fn stats(&self) -> Reply<IndexStats> {
+    pub async fn stats(&self) -> Reply<DrainStats> {
         self.ask(Job::Stats).await
     }
 
@@ -84,6 +93,10 @@ struct Actor {
     config: EngineConfig,
     engine: Option<Result<Engine, String>>,
     last_stats: IndexStats,
+    /// Number of `drain_chunk` calls that have run a `refresh` (incremented even when
+    /// that refresh hit `lock_timeout`), so `Job::Stats` can distinguish "no drain chunk
+    /// has run yet" from "a drain chunk ran and found nothing left to do".
+    drain_chunks: u64,
     /// True after a response reported stale files and the refresh did not lose the lock.
     drain_pending: bool,
 }
@@ -153,7 +166,10 @@ impl Actor {
                 let _ = reply.send(out);
             }
             Job::Stats(reply) => {
-                let _ = reply.send(Ok(self.last_stats.clone()));
+                let _ = reply.send(Ok(DrainStats {
+                    last: self.last_stats.clone(),
+                    chunks: self.drain_chunks,
+                }));
             }
             Job::Shutdown => return false,
         }
@@ -162,6 +178,7 @@ impl Actor {
 
     /// One drain chunk. Returns true when more work remains and the lock was ours.
     fn drain_chunk(&mut self) -> bool {
+        self.drain_chunks += 1;
         let budget = self.config.refresh_budget;
         let Ok(engine) = self.engine() else {
             return false;
@@ -173,6 +190,7 @@ impl Actor {
                 more
             }
             Err(e) => {
+                // TODO(plan 2, Task 3): swap eprintln! for tracing::warn! once tracing is a dependency
                 eprintln!("background refresh failed: {e}");
                 false
             }
@@ -185,6 +203,7 @@ fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
         config,
         engine: None,
         last_stats: IndexStats::default(),
+        drain_chunks: 0,
         drain_pending: false,
     };
     loop {
@@ -327,17 +346,18 @@ mod tests {
         // raise the budget through the handle and wait for the drain to finish.
         handle.set_refresh_budget(REFRESH_BUDGET).await.unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
+        let final_stats = loop {
             let stats = handle.stats().await.unwrap();
-            if stats.remaining == 0 {
-                break;
+            if stats.chunks >= 1 && stats.last.remaining == 0 {
+                break stats;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "drain never finished: {stats:?}"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        };
+        assert!(final_stats.chunks >= 1);
         let second = handle.map(MapRequest::default()).await.unwrap();
         assert_eq!(second.stale_count, 0);
         assert!(second.text.contains("· fresh ·"));
@@ -360,6 +380,11 @@ mod tests {
         assert_eq!(
             n, 0,
             "drain indexed while the lock was held by another process"
+        );
+        let stats = handle.stats().await.unwrap();
+        assert_eq!(
+            stats.chunks, 1,
+            "exactly one drain chunk should have run and hit lock_timeout: {stats:?}"
         );
         lock::release(&store, foreign_pid).unwrap();
     }
