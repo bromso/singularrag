@@ -93,13 +93,32 @@ impl EngineHandle {
 /// How long the actor waits for a job before checking whether a drain is due.
 const IDLE_TICK: Duration = Duration::from_millis(20);
 
-pub fn spawn(config: EngineConfig) -> (EngineHandle, JoinHandle<()>) {
+/// Sends the moment the actor thread leaves `run`, by returning *or* by unwinding out
+/// of a panic — `Drop` runs either way. That is the point: spec §2's one fatal path is
+/// the actor dying, and a panic is how it dies without anyone asking it to.
+struct DiedGuard(Option<oneshot::Sender<()>>);
+
+impl Drop for DiedGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Returns the handle, the thread's join handle, and a receiver that resolves when the
+/// actor thread is gone for any reason. `mcp::run` watches the third.
+pub fn spawn(config: EngineConfig) -> (EngineHandle, JoinHandle<()>, oneshot::Receiver<()>) {
     let (tx, rx) = mpsc::channel::<Job>();
+    let (died_tx, died_rx) = oneshot::channel();
     let join = std::thread::Builder::new()
         .name("singularrag-engine".into())
-        .spawn(move || run(config, rx))
+        .spawn(move || {
+            let _died = DiedGuard(Some(died_tx));
+            run(config, rx)
+        })
         .expect("spawn engine thread");
-    (EngineHandle { tx }, join)
+    (EngineHandle { tx }, join, died_rx)
 }
 
 struct Actor {
@@ -308,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn map_and_find_match_a_direct_engine_call() {
         let dir = fixture();
-        let (handle, _join) = spawn(config(dir.path(), REFRESH_BUDGET));
+        let (handle, _join, _died) = spawn(config(dir.path(), REFRESH_BUDGET));
         let map = handle
             .map(MapRequest {
                 query: Some("session".into()),
@@ -345,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn session_key_carries_client_name_pid_and_start() {
         let dir = fixture();
-        let (handle, _join) = spawn(config(dir.path(), REFRESH_BUDGET));
+        let (handle, _join, _died) = spawn(config(dir.path(), REFRESH_BUDGET));
         handle.map(MapRequest::default()).await.unwrap();
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         let key: String = store
@@ -369,7 +388,7 @@ mod tests {
         let dir = fixture();
         let mut cfg = config(dir.path(), REFRESH_BUDGET);
         cfg.session_key = Arc::new(Mutex::new(None));
-        let (handle, _join) = spawn(cfg);
+        let (handle, _join, _died) = spawn(cfg);
         handle.map(MapRequest::default()).await.unwrap();
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         let key: String = store
@@ -387,7 +406,7 @@ mod tests {
     async fn stale_first_response_is_drained_in_the_background() {
         let dir = fixture();
         // Zero budget: the first call indexes nothing and reports STALE.
-        let (handle, _join) = spawn(config(dir.path(), Duration::ZERO));
+        let (handle, _join, _died) = spawn(config(dir.path(), Duration::ZERO));
         let first = handle.map(MapRequest::default()).await.unwrap();
         assert!(first.stale_count > 0, "{first:?}");
         // The drain uses the same (zero) budget, so it cannot make progress by itself;
@@ -418,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn a_chunk_that_makes_no_progress_stops_the_drain() {
         let dir = fixture();
-        let (handle, _join) = spawn(config(dir.path(), Duration::ZERO));
+        let (handle, _join, _died) = spawn(config(dir.path(), Duration::ZERO));
         let first = handle.map(MapRequest::default()).await.unwrap();
         assert!(first.stale_count > 0, "{first:?}");
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -441,7 +460,7 @@ mod tests {
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         let foreign_pid = std::process::id() + 1;
         assert!(lock::try_acquire(&store, foreign_pid, singularrag_core::time::now_ms()).unwrap());
-        let (handle, _join) = spawn(config(dir.path(), REFRESH_BUDGET));
+        let (handle, _join, _died) = spawn(config(dir.path(), REFRESH_BUDGET));
         let first = handle.map(MapRequest::default()).await.unwrap();
         assert!(first.stale_count > 0);
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -468,7 +487,7 @@ mod tests {
             session_key: Arc::new(Mutex::new(None)),
             refresh_budget: REFRESH_BUDGET,
         };
-        let (handle, _join) = spawn(cfg);
+        let (handle, _join, _died) = spawn(cfg);
         let err = handle.map(MapRequest::default()).await.unwrap_err();
         assert!(err.contains("/nonexistent/singularrag-test-root"), "{err}");
         let err2 = handle
@@ -482,10 +501,28 @@ mod tests {
         assert!(err2.contains("/nonexistent/singularrag-test-root"));
     }
 
+    /// Spec §2's only fatal path: the actor thread dying. `mcp::run` selects on this
+    /// receiver and exits non-zero so the host restarts the server instead of every
+    /// later tool call answering "engine thread is gone" forever. The signal is a guard
+    /// whose `Drop` sends, so it fires on a panic (which unwinds through it) exactly as
+    /// it does on a clean return; a clean return is what this test can observe in-process.
+    #[tokio::test]
+    async fn the_died_signal_fires_when_the_actor_thread_leaves() {
+        let dir = fixture();
+        let (handle, join, died) = spawn(config(dir.path(), REFRESH_BUDGET));
+        handle.map(MapRequest::default()).await.unwrap();
+        handle.shutdown();
+        join.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), died)
+            .await
+            .expect("died signal never fired")
+            .expect("died sender was dropped without sending");
+    }
+
     #[tokio::test]
     async fn dropped_engine_thread_reports_gone() {
         let dir = fixture();
-        let (handle, join) = spawn(config(dir.path(), REFRESH_BUDGET));
+        let (handle, join, _died) = spawn(config(dir.path(), REFRESH_BUDGET));
         handle.shutdown();
         join.join().unwrap();
         let err = handle.map(MapRequest::default()).await.unwrap_err();

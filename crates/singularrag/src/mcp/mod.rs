@@ -13,7 +13,7 @@ use rmcp::{transport::stdio, ServiceExt};
 /// stdout is the protocol; logs go to stderr (initialised by `main`).
 pub fn run(root: PathBuf, refresh_budget: Duration) -> anyhow::Result<()> {
     let session_key = Arc::new(Mutex::new(None));
-    let (handle, join) = actor::spawn(actor::EngineConfig {
+    let (handle, join, mut died) = actor::spawn(actor::EngineConfig {
         root,
         session_key: Arc::clone(&session_key),
         refresh_budget,
@@ -45,10 +45,19 @@ pub fn run(root: PathBuf, refresh_budget: Duration) -> anyhow::Result<()> {
                 return Err(anyhow::anyhow!("mcp initialize failed: {msg}"));
             }
         };
-        service
-            .waiting()
-            .await
-            .map_err(|e| anyhow::anyhow!("mcp transport error: {e}"))?;
+        // Spec §2: the one fatal path is the actor thread dying. Without this arm a
+        // panicked actor leaves the server up and answering "engine thread is gone" to
+        // every call for the rest of the session, with nothing on stderr and no exit for
+        // the host to restart.
+        tokio::select! {
+            served = service.waiting() => {
+                served.map_err(|e| anyhow::anyhow!("mcp transport error: {e}"))?;
+            }
+            _ = &mut died => {
+                tracing::error!("engine thread exited unexpectedly");
+                std::process::exit(2);
+            }
+        }
         Ok::<(), anyhow::Error>(())
     });
     handle.shutdown();
