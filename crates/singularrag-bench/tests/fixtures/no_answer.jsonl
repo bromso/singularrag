@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp/hono","session_id":"2","tools":["Read","Grep","Glob","StructuredOutput"],"mcp_servers":[],"model":"claude-fable-5-1","permissionMode":"dontAsk","claude_code_version":"2.1.261"}
+{"type":"assistant","message":{"model":"claude-fable-5-1","id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"Routing is decided in src/router.ts."}]},"session_id":"2"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":5000,"duration_api_ms":4000,"num_turns":1,"result":"Routing is decided in src/router.ts.","session_id":"2","total_cost_usd":0.05,"usage":{"input_tokens":5,"cache_creation_input_tokens":4000,"cache_read_input_tokens":0,"output_tokens":40},"permission_denials":[]}
