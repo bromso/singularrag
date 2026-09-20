@@ -7,7 +7,9 @@ use clap::{Parser, Subcommand};
 use singularrag_core::engine::{Engine, FindRequest, MapRequest};
 use singularrag_core::map::DEFAULT_BUDGET;
 
+mod actor;
 mod mcp;
+mod serve;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -60,6 +62,13 @@ enum Cmd {
         #[arg(long, default_value_t = 2000, hide = true)]
         refresh_budget_ms: u64,
     },
+    /// Open the map UI on localhost
+    Serve {
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -81,6 +90,9 @@ fn main() -> anyhow::Result<()> {
     // result the spec asks for.
     if let Cmd::Mcp { refresh_budget_ms } = cli.cmd {
         return mcp::run(root, Duration::from_millis(refresh_budget_ms));
+    }
+    if let Cmd::Serve { port, no_open } = cli.cmd {
+        return serve::run(root, port, !no_open);
     }
     let mut engine = Engine::open(&root, &format!("cli-{}", std::process::id()))?;
     match cli.cmd {
@@ -126,6 +138,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Mcp { .. } => unreachable!("handled above before Engine::open"),
+        Cmd::Serve { .. } => unreachable!("handled above before Engine::open"),
     }
     Ok(())
 }

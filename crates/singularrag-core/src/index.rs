@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rusqlite::{params, Connection};
+use serde::Serialize;
 
 use crate::config::MapConfig;
 use crate::lang::{extract_tags, Language};
@@ -19,7 +20,7 @@ use crate::{Error, Result};
 
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct IndexStats {
     pub scanned: usize,
     pub indexed: usize,
