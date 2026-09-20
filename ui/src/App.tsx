@@ -5,6 +5,7 @@ import { subscribe } from "@/api/events";
 import type { BlastResult, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
 import { joinRetrieval } from "@/lib/join";
 import { addToBoundary, noteFor, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
+import { fileStatusOf } from "@/lib/mapStyle";
 import { summaryLabel } from "@/lib/mapSummary";
 import { DetailPanel } from "@/components/DetailPanel";
 import { FreshnessBadge, freshnessText } from "@/components/FreshnessBadge";
@@ -155,26 +156,16 @@ export function App() {
   // `MapView`'s treegrid target may be freshly (re)mounted this same tick — a real
   // rAF never fires in a hidden/background tab (and happy-dom does not schedule it
   // reliably either), so a macrotask tick is what actually lands the focus.
-  //
-  // react-aria-components' Tree uses a roving tabindex: the first time real DOM
-  // focus enters the group, it hands focus off to the active row via an effect
-  // (so the container itself is never the *lasting* focus target on a cold
-  // entry). Focusing once lets that hand-off settle; focusing again afterwards
-  // — now that the group is already "focus within" — lands and keeps focus on
-  // the treegrid itself, which is what a screen-reader user landing here needs
-  // announced (the region, not an arbitrary row).
+  // Focus lands on the tree's current row, not the treegrid container itself —
+  // that's react-aria's roving-tabindex design for the APG treegrid pattern.
   const switchToTable = () => {
     changeView("tree");
-    setTimeout(() => {
-      const el = document.querySelector('[role="treegrid"]') as HTMLElement | null;
-      el?.focus();
-      setTimeout(() => el?.focus(), 0);
-    }, 0);
+    setTimeout(() => (document.querySelector('[role="treegrid"]') as HTMLElement | null)?.focus(), 0);
   };
 
   const fileCounts = useMemo(() => ({
-    served: rows.filter((r) => r.served > 0).length,
-    cut: rows.filter((r) => r.served === 0 && r.cut > 0).length,
+    served: rows.filter((r) => fileStatusOf(r, true) === "served").length,
+    cut: rows.filter((r) => fileStatusOf(r, true) === "cut").length,
   }), [rows]);
   const mapLabel = summaryLabel(graph?.nodes.length ?? 0, detail ? { id: detail.id, ...fileCounts } : null, map.boundary.length);
 

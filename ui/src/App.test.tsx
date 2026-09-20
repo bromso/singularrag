@@ -329,7 +329,8 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByRole("log", { name: "Announcements" }).textContent).toContain("Map layout ready"));
     await user.click(screen.getByRole("button", { name: "Switch to table" }));
     expect(await screen.findByRole("treegrid")).toBeTruthy();
-    expect(document.activeElement?.getAttribute("role")).toBe("treegrid");
+    const ae = document.activeElement;
+    expect(ae?.getAttribute("role") === "treegrid" || (ae?.getAttribute("role") === "row" && ae.closest('[role="treegrid"]') !== null)).toBe(true);
     expect(localStorage.getItem("singularrag.view")).toBe("tree");
   });
 
