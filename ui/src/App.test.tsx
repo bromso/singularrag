@@ -8,8 +8,13 @@ const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: D
 const r = { score: 0.1, file_rank: 0.1, seeds: ["query:session"], referenced_by: [{ path: "src/http/middleware.ts", count: 2 }], pinned: false, fts_hit: true, query_ident_match: true };
 const retrieval = { id: 7, session_key: "mcp:claude-code:1:2", session_label: "Claude Code", tool: "repo_map", query: "session", focus_files: [], budget: 1024, limit_n: null, index_version: "abc123", git_head: "9b1e0d4f", stale_count: 0, created_at_ms: Date.now(), served: 1, cut: 0 };
 const tree = [{ path: "src/auth/session.ts", lang: "typescript", skipped_reason: null, symbols: [{ id: 1, name: "createSession", kind: "function", line_start: 3, line_end: 6, signature: "export function createSession(user: User, ttl: number): Session" }] }];
-let saved: unknown = null;
+let saved: any = null;
 let mapState: any = null;
+// `map.toml`'s compare-and-swap token, as the server derives it from the file's mtime.
+let mapVersion = 0;
+// When set, `PUT /api/map` waits on this before responding, so a test can fire two
+// clicks while the first write is still in flight.
+let putGate: Promise<void> | null = null;
 // The `subscribe()` module registers its "change" listener via
 // `EventSource#addEventListener`; capturing it here lets a test simulate a
 // live SSE "change" event (another agent's retrieval) without a real
@@ -19,6 +24,8 @@ let changeHandler: ((e: { data: string }) => void) | null = null;
 beforeEach(() => {
   saved = null;
   mapState = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
+  mapVersion = 1;
+  putGate = null;
   changeHandler = null;
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
@@ -40,8 +47,16 @@ beforeEach(() => {
     // whatever was last PUT — this both matches how the real server behaves
     // (a re-fetch is never the same object) and exercises the case a stale
     // effect dependency on `map`'s identity would have broken.
-    if (url.endsWith("/api/map") && init?.method === "PUT") { mapState = JSON.parse(String(init.body)); saved = mapState; return json(mapState); }
-    if (url.endsWith("/api/map")) return json({ ...mapState });
+    if (url.endsWith("/api/map") && init?.method === "PUT") {
+      if (putGate) await putGate;
+      const { expected_version, ...cfg } = JSON.parse(String(init.body));
+      if (expected_version !== mapVersion) {
+        return new Response(JSON.stringify({ error: "map.toml changed on disk", field: "expected_version", current: { ...mapState, version: mapVersion } }), { status: 409 });
+      }
+      mapState = cfg; saved = cfg; mapVersion += 1;
+      return json({ ...mapState, version: mapVersion });
+    }
+    if (url.endsWith("/api/map")) return json({ ...mapState, version: mapVersion });
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;
 });
@@ -124,6 +139,42 @@ describe("App", () => {
     await waitFor(() => expect(note().value).toBe(""));
     await user.click(within(grid).getByText("createSession"));
     await waitFor(() => expect(note().value).toBe("draft"));
+  });
+  test("rapid_pin_then_exclude_both_persist", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await user.click(within(grid).getByText("src/auth/session.ts"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    // Hold the first PUT open so the second click is made against the pre-save map.
+    let release!: () => void;
+    putGate = new Promise<void>((r) => { release = r; });
+    await user.click(within(panel).getByRole("button", { name: "Pin file" }));
+    await user.click(within(panel).getByRole("button", { name: "Exclude file" }));
+    release();
+    await waitFor(() => {
+      expect(saved?.pin).toEqual([{ path: "src/auth/session.ts" }]);
+      expect(saved?.exclude).toEqual([{ path: "src/auth/session.ts" }]);
+    });
+  });
+  test("a_409_reloads_and_tells_the_user", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await user.click(within(grid).getByText("src/auth/session.ts"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    // A hand edit lands on map.toml after the page read its copy.
+    mapState = { pin: [{ path: "src/util/log.ts" }], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
+    mapVersion = 42;
+    await user.click(within(panel).getByRole("button", { name: "Exclude file" }));
+    expect(await screen.findByText("map.toml changed on disk; reloaded, please redo that change")).toBeTruthy();
+    expect(saved).toBeNull();
+    // The client reloaded from the 409's `current`, so redoing the edit now lands and
+    // keeps the hand-written pin instead of destroying it.
+    await user.click(within(panel).getByRole("button", { name: "Exclude file" }));
+    await waitFor(() => expect(saved).not.toBeNull());
+    expect(saved.pin).toEqual([{ path: "src/util/log.ts" }]);
+    expect(saved.exclude).toEqual([{ path: "src/auth/session.ts" }]);
   });
   test("the skipped sheet has no animation classes (spec §6: nothing animates in 3a)", async () => {
     const user = userEvent.setup();

@@ -1,7 +1,8 @@
-import type { MapConfig, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "./types";
+import type { MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "./types";
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public field?: string) { super(message); }
+  /** `current` carries the server's document on a 409 so the caller can reload from it. */
+  constructor(public status: number, message: string, public field?: string, public current?: unknown) { super(message); }
 }
 
 export function tokenFromFragment(): string {
@@ -20,9 +21,9 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    let msg = res.statusText, field: string | undefined;
-    try { const j = await res.json(); msg = j.error ?? msg; field = j.field; } catch {}
-    throw new ApiError(res.status, msg, field);
+    let msg = res.statusText, field: string | undefined, current: unknown;
+    try { const j = await res.json(); msg = j.error ?? msg; field = j.field; current = j.current; } catch {}
+    throw new ApiError(res.status, msg, field, current);
   }
   return (await res.json()) as T;
 }
@@ -33,6 +34,8 @@ export const api = {
   retrieval: (id: number) => req<RetrievalDetail>("GET", `/retrievals/${id}`),
   tree: () => req<TreeFile[]>("GET", "/tree"),
   skipped: () => req<SkippedFile[]>("GET", "/skipped"),
-  map: () => req<MapConfig>("GET", "/map"),
-  saveMap: (cfg: MapConfig) => req<MapConfig>("PUT", "/map", cfg),
+  map: () => req<MapDoc>("GET", "/map"),
+  // Compare-and-swap: the server refuses the write with 409 if `map.toml`'s mtime moved
+  // since `expectedVersion` was read (a hand edit, or another tab).
+  saveMap: (cfg: MapConfig, expectedVersion: number) => req<MapDoc>("PUT", "/map", { ...cfg, expected_version: expectedVersion }),
 };

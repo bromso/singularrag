@@ -17,6 +17,8 @@ export type Target = { path: string; symbol?: string };
 export type Note = { path: string; symbol?: string; text: string };
 export type Boundary = { name: string; paths: string[] };
 export type MapConfig = { pin: Target[]; exclude: Target[]; note: Note[]; boundary: Boundary[]; deny: { extra_patterns: string[] } };
+/** `MapConfig` plus `map.toml`'s mtime in ms (0 when absent): the compare-and-swap token. */
+export type MapDoc = MapConfig & { version: number };
 export type Status = {
   index_version: string; git_head: string | null; indexed_at_ms: number | null; stale_count: number;
   lock_timeout: boolean; foreign_indexing: boolean; files: { indexed: number; skipped: number };

@@ -147,22 +147,41 @@ describe("api.saveMap()", () => {
     setToken("");
   });
 
-  test("sends PUT method with JSON body", async () => {
+  test("sends PUT method with JSON body and the compare-and-swap version", async () => {
     const calls: { url: string; init: RequestInit }[] = [];
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
       calls.push({ url, init: init ?? {} });
       const cfg: MapConfig = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
-      return new Response(JSON.stringify(cfg), { status: 200 });
+      return new Response(JSON.stringify({ ...cfg, version: 7 }), { status: 200 });
     }) as any;
 
     const cfg: MapConfig = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
-    await api.saveMap(cfg);
+    const doc = await api.saveMap(cfg, 6);
 
     expect(calls).toHaveLength(1);
     expect(calls[0].init.method).toBe("PUT");
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers["Content-Type"]).toBe("application/json");
-    expect(calls[0].init.body).toBe(JSON.stringify(cfg));
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ ...cfg, expected_version: 6 });
+    expect(doc.version).toBe(7);
+  });
+
+  test("a 409 carries the server's current document on the error", async () => {
+    const current = { pin: [{ path: "src/a.ts" }], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] }, version: 99 };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "map.toml changed on disk", field: "expected_version", current }), { status: 409 })) as any;
+
+    const cfg: MapConfig = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
+    try {
+      await api.saveMap(cfg, 1);
+      expect.unreachable("should throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ApiError);
+      const err = e as ApiError;
+      expect(err.status).toBe(409);
+      expect(err.field).toBe("expected_version");
+      expect(err.current).toEqual(current);
+    }
   });
 });
 
