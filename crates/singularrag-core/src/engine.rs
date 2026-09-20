@@ -16,8 +16,8 @@ use crate::Result;
 
 pub const DB_FILE: &str = ".singularrag/index.db";
 /// Spec §8: a refresh that exceeds this answers with the stale count in the header.
-/// The other half of §8 — finishing the remaining files in the background — lands with
-/// the MCP server (plan 2); here the leftover is simply reported as `remaining`.
+/// The other half of §8, finishing the remaining files in the background, is the MCP
+/// server's drain loop (plan 2).
 pub const REFRESH_BUDGET: Duration = Duration::from_secs(2);
 pub const LOCK_WAIT_MS: u64 = 500;
 pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
@@ -36,6 +36,7 @@ pub struct Engine {
     heartbeat_every: Duration,
     heartbeats: std::cell::Cell<usize>,
     last_heartbeat_ms: std::cell::Cell<i64>,
+    refresh_budget: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +100,7 @@ impl Engine {
             heartbeat_every: HEARTBEAT_EVERY,
             heartbeats: std::cell::Cell::new(0),
             last_heartbeat_ms: std::cell::Cell::new(0),
+            refresh_budget: REFRESH_BUDGET,
         })
     }
 
@@ -127,6 +129,17 @@ impl Engine {
     /// Timestamp of the last heartbeat written, or 0 if none.
     pub fn last_heartbeat_ms(&self) -> i64 {
         self.last_heartbeat_ms.get()
+    }
+
+    /// Inline refresh budget used by `repo_map` and `find_symbol` (spec §8). The MCP
+    /// server (plan 2) uses the same value for its background drain chunks; tests set
+    /// it to zero to force a stale response without holding the lock.
+    pub fn set_refresh_budget(&mut self, budget: Duration) {
+        self.refresh_budget = budget;
+    }
+
+    pub fn refresh_budget(&self) -> Duration {
+        self.refresh_budget
     }
 
     /// `map.toml` is authored while this process is alive (the UI writes it), so its
@@ -189,7 +202,7 @@ impl Engine {
     }
 
     pub fn repo_map(&mut self, req: &MapRequest) -> Result<MapResponse> {
-        let stats = self.refresh(REFRESH_BUDGET)?;
+        let stats = self.refresh(self.refresh_budget)?;
         let budget = map::clamp_budget(req.budget_tokens);
         let ranked = rank_symbols(
             &self.store,
@@ -231,7 +244,7 @@ impl Engine {
     }
 
     pub fn find_symbol(&mut self, req: &FindRequest) -> Result<FindResponse> {
-        let stats = self.refresh(REFRESH_BUDGET)?;
+        let stats = self.refresh(self.refresh_budget)?;
         // `find` shares `repo_map`'s cut semantics: look up the served hits plus the
         // candidates just below the limit, serve the first `limit` and record the rest
         // as `served = 0` so the provenance rows of the two tools are comparable.
@@ -663,5 +676,31 @@ mod tests {
         assert!(!lock::try_acquire(e.store(), 2, now).unwrap());
         lock::release(e.store(), 1).unwrap();
         assert!(lock::try_acquire(e.store(), 2, now).unwrap());
+    }
+
+    #[test]
+    fn zero_refresh_budget_makes_the_first_call_stale_and_default_catches_up() {
+        let (_dir, mut e) = engine();
+        assert_eq!(e.refresh_budget(), REFRESH_BUDGET);
+        e.set_refresh_budget(Duration::ZERO);
+        let first = e
+            .repo_map(&MapRequest {
+                query: None,
+                focus_files: vec![],
+                budget_tokens: 1024,
+            })
+            .unwrap();
+        assert!(first.stale_count > 0, "{first:?}");
+        assert!(first.text.contains("STALE:"));
+        e.set_refresh_budget(REFRESH_BUDGET);
+        let second = e
+            .repo_map(&MapRequest {
+                query: None,
+                focus_files: vec![],
+                budget_tokens: 1024,
+            })
+            .unwrap();
+        assert_eq!(second.stale_count, 0);
+        assert!(second.text.contains("· fresh ·"));
     }
 }
