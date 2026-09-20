@@ -204,6 +204,8 @@ Exact wording and gold sets are fixed in `eval/questions.toml` before the first 
 
 **Better means:** correctness not worse than baseline, and tokens or tool calls down by at least 25%. Miss that and the tool is not earning its place in the agent's context.
 
+*Amended 2026-09-20 by plan 4 (`docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md`): placement questions are scored by gold recall in tier two as well, not by the 0 to 2 rubric; their gold sets exist and tier one already scores them that way. "Correctness not worse" is mean recall at least the baseline's minus 0.02; "tokens" is input + output + cache creation + cache read.*
+
 ## 13. Stack decisions
 
 | Leaning from brief | Decision | Why |
@@ -230,7 +232,7 @@ Crates to verify at planning time: `rusqlite` (bundled, `fts5` feature), `tree-s
 3. **Session identity.** Hosts don't pass a session id to MCP servers. v0 keys sessions by MCP process pid + start time. Check whether Claude Code's hooks or env expose a session id that `mcp` can read.
 4. **singularmem export.** Whether and when retrievals and annotations flow into singularmem as facts.
 5. **Token counting.** chars/4 versus a real tokenizer; decide after seeing how far the soft budget drifts on the eval repo.
-6. **Tier-two harness host coverage.** Codex and Copilot CLI headless modes for the eval, or Claude Code only in v0.
+6. **Tier-two harness host coverage.** Codex and Copilot CLI headless modes for the eval, or Claude Code only in v0. *Answered 2026-09-20 by plan 4: Claude Code only; neither other CLI is installed on the development machine.*
 
 ## 15. Testing strategy (for the plan)
 
