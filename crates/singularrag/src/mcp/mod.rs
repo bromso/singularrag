@@ -1,6 +1,5 @@
 //! `singularrag mcp`: stdio MCP server over the plan-1 Engine.
 
-pub mod actor;
 pub mod server;
 
 use std::path::PathBuf;
@@ -13,9 +12,9 @@ use rmcp::{transport::stdio, ServiceExt};
 /// stdout is the protocol; logs go to stderr (initialised by `main`).
 pub fn run(root: PathBuf, refresh_budget: Duration) -> anyhow::Result<()> {
     let session_key = Arc::new(Mutex::new(None));
-    let (handle, join, mut died) = actor::spawn(actor::EngineConfig {
+    let (handle, join, mut died) = crate::actor::spawn(crate::actor::EngineConfig {
         root,
-        session_key: Arc::clone(&session_key),
+        session_key: crate::actor::SessionKey::FromHandshake(Arc::clone(&session_key)),
         refresh_budget,
     });
     let rt = tokio::runtime::Builder::new_multi_thread()

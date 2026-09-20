@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use singularrag_core::engine::{Engine, FindRequest, MapRequest};
 use singularrag_core::map::DEFAULT_BUDGET;
 
+mod actor;
 mod mcp;
 
 #[derive(Parser, Debug)]
