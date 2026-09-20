@@ -67,15 +67,36 @@ fn select_questions(all: Vec<Question>, ids: Option<&[String]>) -> Result<Vec<Qu
     }
 }
 
-fn spec_for(cfg: &RunConfig, q: &Question, mcp: Option<&Path>) -> SessionSpec {
+fn spec_for(
+    cfg: &RunConfig,
+    q: &Question,
+    mcp: Option<&Path>,
+    allowed_tools: Vec<String>,
+) -> SessionSpec {
     SessionSpec {
         prompt: session::prompt_for(&q.query, cfg.answer_max),
         schema: session::schema_for(cfg.answer_max),
         tools: cfg.tools.clone(),
         mcp_config: mcp.map(Path::to_path_buf),
+        allowed_tools,
         max_turns: cfg.max_turns,
         max_budget_usd: cfg.max_budget_usd,
     }
+}
+
+/// The keys of `mcpServers` in `mcp_json_text`, sorted for a deterministic order
+/// (`serde_json::Map` preserves insertion order only with the `preserve_order` feature).
+fn mcp_server_names(mcp_json_text: &str) -> Result<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(mcp_json_text).context("parsing mcp config")?;
+    let mut names: Vec<String> = v
+        .get("mcpServers")
+        .and_then(|s| s.as_object())
+        .into_iter()
+        .flatten()
+        .map(|(k, _)| k.clone())
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 fn shell_quote(s: &str) -> String {
@@ -151,9 +172,20 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
     if opts.dry_run {
         let mut n = 0;
         for c in &conditions {
+            let allowed_tools = match &c.mcp_config {
+                Some(src) => {
+                    let text = std::fs::read_to_string(src)
+                        .with_context(|| format!("reading {}", src.display()))?;
+                    mcp_server_names(&text)?
+                        .into_iter()
+                        .map(|n| format!("mcp__{n}"))
+                        .collect()
+                }
+                None => Vec::new(),
+            };
             for q in &questions {
                 for _ in 1..=cfg.repeats {
-                    let spec = spec_for(&cfg, q, c.mcp_config.as_deref());
+                    let spec = spec_for(&cfg, q, c.mcp_config.as_deref(), allowed_tools.clone());
                     let args: Vec<String> = session::command_args(&spec)
                         .iter()
                         .map(|a| shell_quote(a))
@@ -243,11 +275,16 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
         }
         let cdir = run_dir.join(&c.name);
         std::fs::create_dir_all(&cdir)?;
+        let mut allowed_tools: Vec<String> = Vec::new();
         let mcp = match &c.mcp_config {
             Some(src) => {
                 let text = std::fs::read_to_string(src)
-                    .with_context(|| format!("reading {}", src.display()))?
-                    .replace("<checkout>", &checkout);
+                    .with_context(|| format!("reading {}", src.display()))?;
+                allowed_tools = mcp_server_names(&text)?
+                    .into_iter()
+                    .map(|n| format!("mcp__{n}"))
+                    .collect();
+                let text = text.replace("<checkout>", &checkout);
                 let dst = cdir.join("mcp.json");
                 std::fs::write(&dst, text)?;
                 Some(dst)
@@ -264,7 +301,7 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
                 let stream_path = cdir.join(format!("{}-{repeat}.stream.jsonl", q.id));
                 let stderr_path = cdir.join(format!("{}-{repeat}.stderr", q.id));
                 eprintln!("[{}/{}#{repeat}] running", c.name, q.id);
-                let spec = spec_for(&cfg, q, mcp.as_deref());
+                let spec = spec_for(&cfg, q, mcp.as_deref(), allowed_tools.clone());
                 let outcome = session::run_session(&cfg.repo, &spec, &stream_path, &stderr_path)?;
                 let parsed = stream::parse_stream(&std::fs::read_to_string(&stream_path)?);
                 let spawn_error = match outcome.exit_code {
@@ -291,6 +328,14 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
                     if record.failed { " · FAILED" } else { "" }
                 );
                 dirty_after(&cfg, &format!("{}/{}#{repeat}", c.name, q.id))?;
+                if !parsed.permission_denials.is_empty() {
+                    let reason =
+                        format!("tool {} denied by permission", parsed.permission_denials[0]);
+                    eprintln!("[{}] aborted: {reason}", c.name);
+                    rf.run.aborted.insert(c.name.clone(), reason);
+                    write_run_file(&run_dir, &rf)?;
+                    break 'condition;
+                }
                 if let Some(bad) = parsed.mcp_servers.iter().find(|s| s.status != "connected") {
                     let reason = format!("mcp server {} status {}", bad.name, bad.status);
                     eprintln!("[{}] aborted: {reason}", c.name);

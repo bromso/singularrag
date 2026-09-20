@@ -63,18 +63,4 @@ nothing in `src/` references.
 
 Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.
 
-Smoke run 2026-09-20 (one question, one repeat, two conditions; the run directory was outside the repo):
-
-commit 098e11912ab244c5c33931de007f04dc8e3c2929 · claude 2.1.261 (Claude Code) · singularrag singularrag 0.1.0 · models: claude-opus-5[1m]
-tokens = input + output + cache creation + cache read
-
-| condition | sessions | failed | mean recall | mean tokens | median tokens | mean tool calls | mean wall s | total cost |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| alone | 1 | 0 | 0.50 | 92397 | 92397 | 9.0 | 36.7 | $0.31 |
-| singularrag | 1 | 0 | 0.50 | 137874 | 137874 | 16.0 | 45.1 | $0.39 |
-
-| question | alone | singularrag |
-|---|---:|---:|
-| L1 | 0.50 | 0.50 |
-
-singularrag does not earn its place: efficiency: tokens 137874 vs 92397 (+49.2%), tool calls 16.0 vs 9.0 (+77.8%); need -25% on either
+Smoke run: re-recorded after the permission fix; see below.

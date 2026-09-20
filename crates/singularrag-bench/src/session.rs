@@ -47,6 +47,7 @@ pub struct SessionSpec {
     pub schema: String,
     pub tools: Vec<String>,
     pub mcp_config: Option<PathBuf>,
+    pub allowed_tools: Vec<String>,
     pub max_turns: u32,
     pub max_budget_usd: f64,
 }
@@ -68,6 +69,10 @@ pub fn command_args(spec: &SessionSpec) -> Vec<String> {
     if let Some(m) = &spec.mcp_config {
         a.push("--mcp-config".into());
         a.push(m.display().to_string());
+        if !spec.allowed_tools.is_empty() {
+            a.push("--allowedTools".into());
+            a.push(spec.allowed_tools.join(","));
+        }
     }
     a.extend([
         "--setting-sources".to_string(),
@@ -144,6 +149,7 @@ mod tests {
             schema: schema_for(15),
             tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
             mcp_config: Some(PathBuf::from("/tmp/mcp.json")),
+            allowed_tools: vec!["mcp__singularrag".into()],
             max_turns: 25,
             max_budget_usd: 0.5,
         }
@@ -181,6 +187,8 @@ mod tests {
             "--strict-mcp-config",
             "--mcp-config",
             "/tmp/mcp.json",
+            "--allowedTools",
+            "mcp__singularrag",
             "--setting-sources",
             "",
             "--disable-slash-commands",
@@ -204,8 +212,18 @@ mod tests {
     fn no_mcp_config_means_no_mcp_flag() {
         let mut s = spec();
         s.mcp_config = None;
+        s.allowed_tools = vec![];
         let args = command_args(&s);
         assert!(!args.iter().any(|a| a == "--mcp-config"));
+        assert!(!args.iter().any(|a| a == "--allowedTools"));
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn allowed_tools_are_only_emitted_when_present() {
+        let mut s = spec();
+        s.allowed_tools = vec![];
+        let args = command_args(&s);
+        assert!(!args.iter().any(|a| a == "--allowedTools"));
     }
 }

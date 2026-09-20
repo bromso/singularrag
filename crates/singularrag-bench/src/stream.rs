@@ -47,6 +47,8 @@ pub struct Parsed {
     /// Tool calls by tool name. `StructuredOutput` is the answer mechanism and is never counted.
     pub tool_calls: BTreeMap<String, u64>,
     pub result: Option<ResultLine>,
+    /// Tool names denied by permission on the result line, deduplicated, first-seen order.
+    pub permission_denials: Vec<String>,
     /// Non-blank lines seen, and how many of them were not JSON objects.
     pub lines: usize,
     pub bad_lines: usize,
@@ -115,6 +117,15 @@ pub fn parse_stream(text: &str) -> Parsed {
             }
             (Some("result"), subtype) => {
                 let usage = v.get("usage").cloned().unwrap_or(Value::Null);
+                if let Some(denials) = v.get("permission_denials").and_then(Value::as_array) {
+                    for d in denials {
+                        if let Some(name) = d.get("tool_name").and_then(Value::as_str) {
+                            if !p.permission_denials.iter().any(|n| n == name) {
+                                p.permission_denials.push(name.to_string());
+                            }
+                        }
+                    }
+                }
                 p.result = Some(ResultLine {
                     subtype: subtype.unwrap_or("unknown").to_string(),
                     is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
@@ -153,6 +164,7 @@ mod tests {
     #[test]
     fn success_stream_yields_model_servers_tool_counts_and_result() {
         let p = parse_stream(&fixture("success.jsonl"));
+        assert!(p.permission_denials.is_empty());
         assert_eq!(p.model.as_deref(), Some("claude-fable-5-1"));
         assert_eq!(p.claude_version.as_deref(), Some("2.1.261"));
         assert_eq!(p.mcp_servers.len(), 1);
@@ -194,6 +206,7 @@ mod tests {
         assert!(r.is_error);
         assert!(r.structured_output.is_none());
         assert_eq!(p.tool_calls.get("Read"), Some(&2));
+        assert!(p.permission_denials.is_empty());
     }
 
     #[test]
@@ -203,6 +216,7 @@ mod tests {
         assert_eq!(r.subtype, "success");
         assert!(r.structured_output.is_none());
         assert!(p.tool_calls.is_empty());
+        assert!(p.permission_denials.is_empty());
     }
 
     #[test]
@@ -239,6 +253,17 @@ mod tests {
         assert!(r.structured_output.is_some());
         assert!(p.model.is_some());
         assert_eq!(p.mcp_servers[0].status, "connected");
+        assert_eq!(p.tool_calls.get("mcp__singularrag__repo_map"), Some(&1));
+        assert_eq!(p.permission_denials.len(), 2);
+    }
+
+    #[test]
+    fn denied_stream_lists_each_denied_tool_once() {
+        let p = parse_stream(&fixture("denied.jsonl"));
+        assert_eq!(
+            p.permission_denials,
+            vec!["mcp__singularrag__repo_map".to_string()]
+        );
         assert_eq!(p.tool_calls.get("mcp__singularrag__repo_map"), Some(&1));
     }
 }

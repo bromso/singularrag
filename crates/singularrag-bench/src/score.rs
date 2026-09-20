@@ -26,6 +26,8 @@ pub struct Record {
     pub duration_ms: u64,
     pub failed: bool,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub denied: Vec<String>,
 }
 
 impl Record {
@@ -115,6 +117,7 @@ pub fn score(
         duration_ms: result.map(|r| r.duration_ms).unwrap_or(0),
         failed: reason.is_some(),
         reason,
+        denied: parsed.permission_denials.clone(),
     }
 }
 
@@ -240,6 +243,21 @@ mod tests {
         let r = score(&q(&[]), "serena", 1, &p, 15, None);
         assert_eq!(r.recall, 1.0);
         assert_eq!(r.precision, 0.0);
+        assert!(!r.failed);
+    }
+
+    #[test]
+    fn denied_tools_are_recorded_but_not_a_scoring_failure() {
+        let p = parse_stream(&fixture("denied.jsonl"));
+        let r = score(
+            &q(&["src/router.ts::Router"]),
+            "singularrag",
+            1,
+            &p,
+            15,
+            None,
+        );
+        assert_eq!(r.denied, s(&["mcp__singularrag__repo_map"]));
         assert!(!r.failed);
     }
 

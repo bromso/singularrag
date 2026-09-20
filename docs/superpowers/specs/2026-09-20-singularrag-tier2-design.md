@@ -72,6 +72,7 @@ claude -p <prompt>
   --tools Read,Grep,Glob            # from `tools`
   --strict-mcp-config
   [--mcp-config <temp condition json>]   # absent for a condition with no mcp_config
+  [--allowedTools mcp__<server>[,mcp__<server>…]]   # one entry per server in that config
   --setting-sources "" --disable-slash-commands
   --permission-mode dontAsk --permission-prompts none
   --no-session-persistence
@@ -81,6 +82,10 @@ claude -p <prompt>
 `--strict-mcp-config` is what keeps the developer's own MCP servers out of every condition; `--tools` names the built-ins explicitly so the alone condition is Read, Grep and Glob and nothing else. `--setting-sources ""` loads no user, project or local settings, which is what keeps the developer's hooks and plugins out: probed on 2026-09-20, a session without it ran the SessionStart hooks of the superpowers plugin and cached a 22k-token system prompt; with it and `--disable-slash-commands` the init message reports no plugins and no skills, the explicit MCP config is still loaded, and the cached prompt is 4k tokens. Claude Code's minimal mode (`--bare`) is not used because it authenticates only with an API key, and `--safe-mode` is not used because it also drops the explicit MCP config.
 
 The structured answer is delivered as a tool call named `StructuredOutput`; it is excluded from tool-call counts because it is the answer mechanism, not retrieval.
+
+`--allowedTools` is required for MCP tools: under `--permission-mode dontAsk` with `--permission-prompts none`, a tool call that would prompt is denied, and MCP tools prompt while the read-only built-ins do not. The first smoke run (2026-09-20) proved it: both singularrag tool calls were denied, the agent fell back to Read, Grep and Glob, and the verdict measured the misconfiguration. The harness derives the entries from the server names in the condition's MCP config (`mcp__<server>` allows every tool of that server), so the committed condition files need no tool lists.
+
+A permission denial is a configuration defect, never a result: the parser keeps the `permission_denials` tool names from the result line, the record stores them as `denied`, and a session with any denial aborts its condition after its record is written (§8), with the reason `tool <name> denied by permission`.
 
 Stdout is streamed to `<qid>-<repeat>.stream.jsonl` in the condition's directory as it arrives; stderr is captured to `<qid>-<repeat>.stderr` only when non-empty. After the child exits the harness re-checks the tree is clean (same exclusions as §2); a dirty tree aborts the run, because later sessions would see a different repository.
 
@@ -130,7 +135,7 @@ The same text prints to stdout. `singularrag-bench score <run-dir>` rewrites `su
 ## 8. Failures
 
 - Before any session (§2 step 1): hard error, no run directory.
-- Per condition: if the first session's init message reports any MCP server whose status is not `connected`, the condition is aborted after that session; its record is kept, the abort and the reported status go in the summary, and the run continues with the remaining conditions.
+- Per condition: if a session's init message reports any MCP server whose status is not `connected`, or its result reports any permission denial, the condition is aborted after that session; its record is kept, the abort and the reason go in the summary, and the run continues with the remaining conditions.
 - Per session: non-zero exit, an unparseable stream, or no `result` line is a failed session with the reason; the run continues.
 - A run whose baseline condition was aborted prints the tables but no verdict.
 

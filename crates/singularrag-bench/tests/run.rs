@@ -138,6 +138,7 @@ fn dry_run_prints_every_command_and_creates_nothing() {
         .success()
         .stdout(predicate::str::contains("--strict-mcp-config").count(4))
         .stdout(predicate::str::contains("where is request routing decided"))
+        .stdout(predicate::str::contains("--allowedTools mcp__singularrag").count(2))
         .stdout(predicate::str::contains("dry run: 4 sessions"));
     assert!(run_dirs(&ws).is_empty());
 }
@@ -403,4 +404,89 @@ fn resume_skips_sessions_that_have_records() {
         "the new session ran with the failing fake"
     );
     assert_eq!(run_dirs(&ws).len(), 1, "resume creates no second directory");
+}
+
+#[test]
+fn a_permission_denial_aborts_that_condition() {
+    let ws = workspace();
+    bench(&ws)
+        .env("FAKE_CLAUDE_FIXTURE", fixtures().join("denied.jsonl"))
+        .args([
+            "run",
+            "--config",
+            "eval/tier2.toml",
+            "--conditions",
+            "singularrag",
+            "--repeats",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "aborted: singularrag (tool mcp__singularrag__repo_map denied by permission)",
+        ));
+    let run = &run_dirs(&ws)[0];
+    let rec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("singularrag/L1-1.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        rec["denied"],
+        serde_json::json!(["mcp__singularrag__repo_map"])
+    );
+    assert!(!run.join("singularrag/L2-1.json").exists());
+}
+
+#[test]
+fn mcp_conditions_pass_allowed_tools_and_alone_does_not() {
+    let ws = workspace();
+    let args_file = ws.root.join("args.txt");
+    bench(&ws)
+        .env("FAKE_CLAUDE_ARGS_FILE", &args_file)
+        .args([
+            "run",
+            "--config",
+            "eval/tier2.toml",
+            "--conditions",
+            "singularrag",
+            "--questions",
+            "L1",
+            "--repeats",
+            "1",
+        ])
+        .assert()
+        .success();
+    let args = std::fs::read_to_string(&args_file).unwrap();
+    let lines: Vec<&str> = args.lines().collect();
+    let mcp_idx = lines
+        .iter()
+        .position(|l| *l == "--mcp-config")
+        .expect("--mcp-config present");
+    let allowed_idx = lines
+        .iter()
+        .position(|l| *l == "--allowedTools")
+        .expect("--allowedTools present");
+    assert!(
+        mcp_idx < allowed_idx,
+        "--mcp-config precedes --allowedTools"
+    );
+    assert_eq!(lines[allowed_idx + 1], "mcp__singularrag");
+
+    let args_file2 = ws.root.join("args2.txt");
+    bench(&ws)
+        .env("FAKE_CLAUDE_ARGS_FILE", &args_file2)
+        .args([
+            "run",
+            "--config",
+            "eval/tier2.toml",
+            "--conditions",
+            "alone",
+            "--questions",
+            "L1",
+            "--repeats",
+            "1",
+        ])
+        .assert()
+        .success();
+    let args2 = std::fs::read_to_string(&args_file2).unwrap();
+    assert!(!args2.lines().any(|l| l == "--allowedTools"));
 }

@@ -341,6 +341,7 @@ mod tests {
             duration_ms: 2000,
             failed,
             reason: None,
+            denied: vec![],
         }
     }
 
