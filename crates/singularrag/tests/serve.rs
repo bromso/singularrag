@@ -277,6 +277,67 @@ async fn exclude_via_put_map_changes_the_next_retrieval() {
     assert_eq!(e["field"], "pin[0].path");
 }
 
+/// C1: `PUT /api/map` is compare-and-swap. A hand edit to `map.toml` between a GET and a
+/// PUT must not be silently overwritten: the stale `expected_version` is refused with 409
+/// and the caller is handed the current document to rebuild its edit on.
+#[tokio::test]
+async fn put_map_with_stale_version_is_409() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let doc: serde_json::Value = get(&s, "/map").await.json().await.unwrap();
+    let stale_version = doc["version"].as_i64().expect("version in GET /api/map");
+
+    // A hand edit behind the server's back.
+    std::fs::create_dir_all(dir.path().join(".singularrag")).unwrap();
+    std::fs::write(
+        dir.path().join(".singularrag/map.toml"),
+        "[[pin]]\npath = \"src/auth/session.ts\"\n",
+    )
+    .unwrap();
+
+    let put = |body: serde_json::Value| {
+        let url = format!("{}/api/map", s.url);
+        let token = s.token.clone();
+        async move {
+            client()
+                .put(url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let edit = |version: i64| {
+        serde_json::json!({
+            "pin": [{ "path": "src/util/log.ts" }],
+            "exclude": [], "note": [], "boundary": [],
+            "deny": { "extra_patterns": [] },
+            "expected_version": version,
+        })
+    };
+
+    let r = put(edit(stale_version)).await;
+    assert_eq!(r.status(), 409);
+    let e: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(e["field"], "expected_version");
+    assert_eq!(e["error"], "map.toml changed on disk");
+    assert_eq!(e["current"]["pin"][0]["path"], "src/auth/session.ts");
+    let fresh_version = e["current"]["version"].as_i64().unwrap();
+    assert_ne!(fresh_version, stale_version);
+    // The refused write left the hand edit alone.
+    let on_disk = std::fs::read_to_string(dir.path().join(".singularrag/map.toml")).unwrap();
+    assert!(on_disk.contains("src/auth/session.ts"), "{on_disk}");
+
+    // Retrying with the version the 409 handed back succeeds.
+    let r = put(edit(fresh_version)).await;
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let saved: serde_json::Value = get(&s, "/map").await.json().await.unwrap();
+    assert_eq!(saved["pin"][0]["path"], "src/util/log.ts");
+    assert_ne!(saved["version"].as_i64().unwrap(), fresh_version);
+}
+
 #[tokio::test]
 async fn touching_a_file_changes_freshness_within_two_seconds() {
     let dir = tempfile::tempdir().unwrap();

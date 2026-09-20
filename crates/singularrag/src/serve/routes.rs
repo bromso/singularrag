@@ -4,7 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use singularrag_core::config::MapConfig;
 
 use super::queries;
@@ -87,21 +87,72 @@ pub async fn skipped(
     Ok(Json(locked(&s, queries::skipped)?))
 }
 
-pub async fn get_map(State(s): State<AppState>) -> Result<Json<MapConfig>, ApiError> {
-    Ok(Json(MapConfig::load(&s.root)?))
+/// `MapConfig` plus the token a client must hand back to write: `map.toml`'s mtime in
+/// milliseconds, 0 when the file does not exist. Kept here rather than in core so
+/// `MapConfig` stays the on-disk shape (spec §3).
+#[derive(Serialize)]
+pub struct MapDoc {
+    #[serde(flatten)]
+    pub config: MapConfig,
+    pub version: i64,
+}
+
+/// A `PUT /api/map` body: the config, plus an optional `expected_version` that turns the
+/// write into a compare-and-swap. Absent means "write regardless" (the pre-C1 behaviour,
+/// kept so `curl` stays usable).
+#[derive(Deserialize)]
+pub struct MapPut {
+    #[serde(flatten)]
+    pub config: MapConfig,
+    #[serde(default)]
+    pub expected_version: Option<i64>,
+}
+
+fn map_version(root: &std::path::Path) -> i64 {
+    std::fs::metadata(root.join(singularrag_core::config::MAP_FILE))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn map_doc(root: &std::path::Path) -> Result<MapDoc, ApiError> {
+    // Read the version first: if a writer lands between the two reads we would rather
+    // report a version older than the config (the next CAS fails and the client reloads)
+    // than newer (which would let a stale write through).
+    let version = map_version(root);
+    Ok(MapDoc {
+        config: MapConfig::load(root)?,
+        version,
+    })
+}
+
+pub async fn get_map(State(s): State<AppState>) -> Result<Json<MapDoc>, ApiError> {
+    Ok(Json(map_doc(&s.root)?))
 }
 
 pub async fn put_map(
     State(s): State<AppState>,
-    Json(cfg): Json<MapConfig>,
-) -> Result<Json<MapConfig>, ApiError> {
-    let current = MapConfig::load(&s.root)?;
-    if let Err(e) = cfg.validate(&current.deny.extra_patterns) {
+    Json(body): Json<MapPut>,
+) -> Result<Json<MapDoc>, ApiError> {
+    let current = map_doc(&s.root)?;
+    if body.expected_version.is_some_and(|v| v != current.version) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": "map.toml changed on disk",
+                "field": "expected_version",
+                "current": current,
+            }),
+        ));
+    }
+    if let Err(e) = body.config.validate(&current.config.deny.extra_patterns) {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             serde_json::json!({ "error": e.message, "field": e.field }),
         ));
     }
-    cfg.save_atomic(&s.root)?;
-    Ok(Json(MapConfig::load(&s.root)?))
+    body.config.save_atomic(&s.root)?;
+    Ok(Json(map_doc(&s.root)?))
 }

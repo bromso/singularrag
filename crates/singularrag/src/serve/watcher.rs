@@ -58,7 +58,16 @@ fn interesting(root: &Path, p: &Path) -> bool {
     let Ok(rel) = p.strip_prefix(root) else {
         return false;
     };
-    !rel.starts_with(".git") && !rel.starts_with(".singularrag")
+    if rel.starts_with(".git") {
+        return false;
+    }
+    if rel.starts_with(".singularrag") {
+        // The index and its WAL are our own writes — watching them would loop. `map.toml`
+        // is the exception: a hand edit there must refresh (the Engine reloads the config
+        // by mtime) and bump `data_version` so the UI refetches the map it is editing.
+        return rel == Path::new(singularrag_core::config::MAP_FILE);
+    }
+    true
 }
 
 /// Start watching `state.root`. The returned debouncer must be kept alive.
@@ -111,6 +120,20 @@ mod tests {
             refresh_budget: singularrag_core::engine::REFRESH_BUDGET,
         });
         (dir, state, handle)
+    }
+
+    #[test]
+    fn map_toml_is_watched_but_the_rest_of_dot_singularrag_is_not() {
+        let root = Path::new("/repo");
+        assert!(interesting(root, &root.join("src/a.ts")));
+        assert!(
+            interesting(root, &root.join(".singularrag/map.toml")),
+            "a hand edit to map.toml must produce a refresh (C1)"
+        );
+        assert!(!interesting(root, &root.join(".singularrag/index.db")));
+        assert!(!interesting(root, &root.join(".singularrag/index.db-wal")));
+        assert!(!interesting(root, &root.join(".singularrag/map.toml.tmp")));
+        assert!(!interesting(root, &root.join(".git/HEAD")));
     }
 
     #[tokio::test]
