@@ -190,8 +190,7 @@ impl Actor {
                 more
             }
             Err(e) => {
-                // TODO(plan 2, Task 3): swap eprintln! for tracing::warn! once tracing is a dependency
-                eprintln!("background refresh failed: {e}");
+                tracing::warn!("background refresh failed: {e}");
                 false
             }
         }
