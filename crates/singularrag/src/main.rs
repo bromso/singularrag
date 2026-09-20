@@ -7,7 +7,6 @@ use clap::{Parser, Subcommand};
 use singularrag_core::engine::{Engine, FindRequest, MapRequest};
 use singularrag_core::map::DEFAULT_BUDGET;
 
-#[allow(dead_code)]
 mod mcp;
 
 #[derive(Parser, Debug)]
@@ -55,11 +54,28 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Serve the repo_map and find_symbol tools to an agent over stdio (MCP)
+    Mcp {
+        /// Inline refresh budget in milliseconds (spec §8). Tests lower it.
+        #[arg(long, default_value_t = 2000, hide = true)]
+        refresh_budget_ms: u64,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
     let root = cli.repo.unwrap_or(std::env::current_dir()?);
+    if let Cmd::Mcp { refresh_budget_ms } = cli.cmd {
+        return mcp::run(root, Duration::from_millis(refresh_budget_ms));
+    }
     let mut engine = Engine::open(&root, &format!("cli-{}", std::process::id()))?;
     match cli.cmd {
         Cmd::Index => {
@@ -103,6 +119,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", singularrag_core::eval::render_report(&results));
             }
         }
+        Cmd::Mcp { .. } => unreachable!("handled above before Engine::open"),
     }
     Ok(())
 }

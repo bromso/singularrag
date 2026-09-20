@@ -120,3 +120,24 @@ fn budget_over_cap_is_clamped_not_rejected() {
         .assert()
         .success();
 }
+
+#[test]
+fn help_lists_the_mcp_subcommand() {
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mcp").and(predicate::str::contains("stdio")));
+}
+
+#[test]
+fn mcp_exits_cleanly_when_stdin_closes() {
+    let dir = fixture();
+    let mut cmd = Command::cargo_bin("singularrag").unwrap();
+    cmd.args(["mcp", "--repo", dir.path().to_str().unwrap()]);
+    cmd.write_stdin("");
+    cmd.timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .success();
+}

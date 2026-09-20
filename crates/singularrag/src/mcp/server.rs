@@ -17,8 +17,14 @@ use super::actor::EngineHandle;
 
 pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this repository. Call repo_map first with your task as the query, then read only the files it points at. Use find_symbol to locate a name. Both tools are read-only. A STALE header means files changed since indexing; the index catches up in the background.";
 
+// Only read by the unit test below, which asserts the router's reported description
+// equals these constants (see the note on the `#[tool_router]` impl block); the macro
+// itself needs a string literal, not a path to these, so they're otherwise unused outside
+// `#[cfg(test)]`.
+#[allow(dead_code)]
 pub const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the symbols most relevant to a task. Call this before reading files. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, max 8192. Returns paths, line numbers and signatures only, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
 
+#[allow(dead_code)]
 pub const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module. `limit` defaults to 10, max 50.";
 
 /// `clientInfo.name` → the `<client>` part of the session key. Lower-case; whitespace
@@ -132,7 +138,7 @@ impl SingularragServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router.clone())]
 impl ServerHandler for SingularragServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())

@@ -19,7 +19,13 @@ pub type Reply<T> = Result<T, String>;
 /// The last background `refresh` the actor saw, plus how many chunks have run. `chunks`
 /// exists so callers (and tests) can tell "no drain has happened yet" apart from "the
 /// drain finished with nothing remaining" — both look like `remaining == 0` otherwise.
+///
+/// Not yet driven by any production caller (`mcp::run` doesn't poll drain progress); the
+/// actor's unit tests exercise it directly through `EngineHandle::stats`. Allowed dead in
+/// the non-test build rather than deleted, since a future task is expected to surface this
+/// over MCP (a resource or a `stats` tool).
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct DrainStats {
     pub last: IndexStats,
     pub chunks: u64,
@@ -28,7 +34,11 @@ pub struct DrainStats {
 pub enum Job {
     Map(MapRequest, oneshot::Sender<Reply<MapResponse>>),
     Find(FindRequest, oneshot::Sender<Reply<FindResponse>>),
+    // Constructed only by `EngineHandle::set_refresh_budget`/`stats`, which are currently
+    // test-only (see the `#[allow(dead_code)]` note on `DrainStats`).
+    #[allow(dead_code)]
     SetRefreshBudget(Duration, oneshot::Sender<Reply<()>>),
+    #[allow(dead_code)]
     Stats(oneshot::Sender<Reply<DrainStats>>),
     Shutdown,
 }
@@ -64,10 +74,13 @@ impl EngineHandle {
         self.ask(|tx| Job::Find(req, tx)).await
     }
 
+    // Test-only for now; see the `#[allow(dead_code)]` note on `DrainStats`.
+    #[allow(dead_code)]
     pub async fn set_refresh_budget(&self, budget: Duration) -> Reply<()> {
         self.ask(|tx| Job::SetRefreshBudget(budget, tx)).await
     }
 
+    #[allow(dead_code)]
     pub async fn stats(&self) -> Reply<DrainStats> {
         self.ask(Job::Stats).await
     }
