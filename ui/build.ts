@@ -1,4 +1,10 @@
+import { rmSync } from "node:fs";
 import tailwind from "bun-plugin-tailwind";
+
+// A stale `dist/` can leave behind assets from a previous build (a hashed filename that
+// no longer exists in the new build's manifest but is still on disk), which the shell
+// then never references but a client with an old cached shell might still request.
+rmSync("dist", { recursive: true, force: true });
 
 const result = await Bun.build({
   entrypoints: ["./index.html"],

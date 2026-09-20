@@ -24,3 +24,8 @@ export type Status = {
   lock_timeout: boolean; foreign_indexing: boolean; indexing: boolean; files: { indexed: number; skipped: number };
   drain: { chunks: number; last: { scanned: number; indexed: number; unchanged: number; skipped: number; removed: number; remaining: number; lock_timeout: boolean } };
 };
+export type GraphNode = { path: string; symbols: number; lang: string | null };
+export type GraphEdge = { src: number; dst: number; weight: number; names: number };
+export type GraphPayload = { index_version: string; nodes: GraphNode[]; edges: GraphEdge[] };
+export type BlastFile = { path: string; depth: number; via: string };
+export type BlastResult = { root: { path: string; symbol: string }; files: BlastFile[]; truncated: null | "depth" | "files" };

@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod blast;
 pub mod config;
 pub mod engine;
 pub mod error;

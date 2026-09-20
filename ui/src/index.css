@@ -26,6 +26,10 @@
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --radius: 0.5rem;
+  --map-served: #047857; --map-cut: #b45309; --map-untouched: #9ca3af; --map-focus: #2563eb; --map-edge: #6b7280; --map-edge-dim: #e5e7eb;
+  /* Sigma's WebGL colour parser accepts only #hex and rgb()/rgba(), not the oklch()
+     values --foreground/--background use, so the map has its own hex-only tokens. */
+  --map-bg: #ffffff; --map-label: #111827;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -48,6 +52,8 @@
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.556 0 0);
+    --map-served: #34d399; --map-cut: #fbbf24; --map-untouched: #6b7280; --map-focus: #60a5fa; --map-edge: #9ca3af; --map-edge-dim: #374151;
+    --map-bg: #0a0a0a; --map-label: #fafafa;
   }
 }
 

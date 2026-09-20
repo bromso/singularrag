@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import type { MapConfig } from "@/api/types";
+import type { BlastResult, MapConfig } from "@/api/types";
 import { reasonsToSentences } from "@/lib/reasons";
-import { isExcluded, isPinned, noteFor } from "@/lib/mapEdits";
+import { boundariesOf, boundaryNames, isExcluded, isPinned, noteFor } from "@/lib/mapEdits";
 import type { TreeRow } from "./RepoTree";
 
-export function DetailPanel({ row, map, onPin, onExclude, onNote }: {
+export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLoading, onToggleBlast, expandedPath, onToggleExpand, onAddBoundary, onRemoveBoundary }: {
   row: TreeRow | null; map: MapConfig;
   onPin: (path: string, symbol?: string) => void; onExclude: (path: string) => void; onNote: (path: string, symbol: string | undefined, text: string) => void;
+  blast: BlastResult | null; blastLoading: boolean; onToggleBlast: (path: string, symbol: string) => void;
+  expandedPath: string | null; onToggleExpand: (path: string) => void;
+  onAddBoundary: (name: string, path: string) => void; onRemoveBoundary: (name: string, path: string) => void;
 }) {
+  const [newBoundary, setNewBoundary] = useState("");
   const symbol = row?.kind === "symbol" ? row.symbol.symbol.name : undefined;
   const [text, setText] = useState("");
   const saved = row ? noteFor(map, row.path, symbol) : "";
@@ -31,10 +35,11 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote }: {
       setText(saved);
     }
   }, [row?.path, symbol, saved]);
-  if (!row) return <section id="detail-panel" aria-label="Details" className="border-l p-3 text-sm text-muted-foreground">Select a file or symbol.</section>;
+  if (!row) return <section id="detail-panel" aria-label="Details" className="min-h-0 overflow-auto border-l p-3 text-sm text-muted-foreground">Select a file or symbol.</section>;
   const item = row.kind === "symbol" ? row.symbol.item : null;
+  const blastShown = row.kind === "symbol" && !!blast && blast.root.path === row.path && blast.root.symbol === row.symbol.symbol.name;
   return (
-    <section id="detail-panel" aria-label="Details" className="flex flex-col gap-3 border-l p-3">
+    <section id="detail-panel" aria-label="Details" className="flex min-h-0 flex-col gap-3 overflow-auto border-l p-3">
       {/* The row action buttons are `aria-controls="detail-panel"` and move focus here,
           so a screen-reader user lands on what they just opened (I10). */}
       <h2 id="detail-heading" tabIndex={-1} className="font-mono text-sm font-semibold">{symbol ? `${row.path} :: ${symbol}` : row.path}</h2>
@@ -51,6 +56,48 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote }: {
           {isExcluded(map, row.path) ? "Include file" : "Exclude file"}
         </Button>
       </div>
+      <div role="group" aria-labelledby="boundaries-label" className="flex flex-wrap items-center gap-2 text-sm">
+        <span id="boundaries-label">Boundaries</span>
+        {boundariesOf(map, row.path).map((name) => (
+          <span key={name} className="inline-flex items-center gap-1 rounded border px-2 py-0.5">
+            {name}
+            <Button type="button" variant="ghost" size="sm" aria-label={`Remove from ${name}`} onClick={() => onRemoveBoundary(name, row.path)}>×</Button>
+          </span>
+        ))}
+        <form className="inline-flex items-center gap-1" onSubmit={(e) => {
+          e.preventDefault();
+          const n = newBoundary.trim();
+          setNewBoundary("");
+          if (!n || boundariesOf(map, row.path).includes(n)) return;
+          onAddBoundary(newBoundary, row.path);
+        }}>
+          <label className="sr-only" htmlFor="boundary-input">Add to boundary</label>
+          <input id="boundary-input" list="boundary-names" value={newBoundary} onChange={(e) => setNewBoundary(e.target.value)} className="w-32 rounded border bg-background px-2 py-1" placeholder="boundary name" />
+          <datalist id="boundary-names">{boundaryNames(map).map((n) => <option key={n} value={n} />)}</datalist>
+          <Button type="submit" variant="outline" size="sm">Add</Button>
+        </form>
+      </div>
+      {row.kind === "file" && (
+        <Button type="button" variant="outline" aria-pressed={expandedPath === row.path} onClick={() => onToggleExpand(row.path)}>
+          {expandedPath === row.path ? "Hide symbols" : "Show symbols"}
+        </Button>
+      )}
+      {row.kind === "symbol" && (
+        <Button type="button" variant="outline" aria-pressed={blastShown} onClick={() => onToggleBlast(row.path, row.symbol.symbol.name)} aria-busy={blastLoading}>
+          {blastShown ? "Hide blast radius" : "Show blast radius"}
+        </Button>
+      )}
+      {blastShown && blast && (
+        <div>
+          <h3 id="blast-heading" className="text-sm font-semibold">Blast radius</h3>
+          {blast.files.length === 0 ? <p className="text-sm text-muted-foreground">Nothing references this symbol.</p> : (
+            <ol aria-labelledby="blast-heading" className="list-decimal pl-5 text-sm">
+              {blast.files.map((f) => <li key={f.path}>{f.path} (depth {f.depth}, via {f.via})</li>)}
+            </ol>
+          )}
+          {blast.truncated && <p className="text-xs text-muted-foreground">{blast.truncated === "depth" ? "Stopped at the depth cap" : "Stopped at 200 files"}</p>}
+        </div>
+      )}
       <label className="text-sm">
         Note
         <Textarea

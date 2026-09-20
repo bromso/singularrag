@@ -151,6 +151,22 @@ impl MapConfig {
                 check_path(&format!("boundary[{i}].paths[{j}]"), p)?;
             }
         }
+        let mut seen_names = std::collections::HashSet::new();
+        for (i, b) in self.boundary.iter().enumerate() {
+            let name = b.name.trim();
+            if name.is_empty() {
+                return Err(MapConfigError {
+                    field: format!("boundary[{i}].name"),
+                    message: "boundary name is empty".into(),
+                });
+            }
+            if !seen_names.insert(name.to_string()) {
+                return Err(MapConfigError {
+                    field: format!("boundary[{i}].name"),
+                    message: format!("duplicate boundary name {name}"),
+                });
+            }
+        }
         if let Some(missing) = current_extras
             .iter()
             .find(|p| !self.deny.extra_patterns.contains(p))
@@ -304,5 +320,17 @@ extra_patterns = ["*.snap"]
         let c2 = cfg("[[exclude]]\npath = \"src/legacy/\"\n");
         c2.save_atomic(dir.path()).unwrap();
         assert_eq!(MapConfig::load(dir.path()).unwrap(), c2);
+    }
+
+    #[test]
+    fn boundary_names_must_be_unique_and_non_empty() {
+        let c = cfg("[[boundary]]\nname = \"auth\"\npaths = [\"src/a\"]\n[[boundary]]\nname = \"auth\"\npaths = [\"src/b\"]\n");
+        let e = c.validate(&[]).unwrap_err();
+        assert_eq!(e.field, "boundary[1].name");
+        assert!(e.message.contains("duplicate"));
+        let c = cfg("[[boundary]]\nname = \"  \"\npaths = [\"src/a\"]\n");
+        let e = c.validate(&[]).unwrap_err();
+        assert_eq!(e.field, "boundary[0].name");
+        assert!(e.message.contains("empty"));
     }
 }

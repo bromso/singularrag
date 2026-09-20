@@ -34,6 +34,8 @@ pub fn router(state: AppState) -> Router {
         .route("/tree", get(routes::tree))
         .route("/skipped", get(routes::skipped))
         .route("/map", get(routes::get_map).put(routes::put_map))
+        .route("/graph", get(routes::graph))
+        .route("/blast", get(routes::blast))
         .route("/events", get(events::sse))
         // Before the layers, so an unknown /api path is answered *inside* them: it gets
         // the host and token checks and the no-store header, instead of falling out to

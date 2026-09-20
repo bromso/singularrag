@@ -12,8 +12,13 @@ struct Dist;
 
 pub async fn index() -> Response {
     match Dist::get("index.html") {
+        // The shell embeds hashed `/assets/*` URLs from the build it was served with; a
+        // cached shell after an upgrade would reference assets that no longer exist.
         Some(f) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             f.data.into_owned(),
         )
             .into_response(),

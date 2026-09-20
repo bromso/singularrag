@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { isExcluded, isPinned, setNote, togglePin, toggleExclude } from "./mapEdits";
+import { addToBoundary, boundariesOf, boundaryNames, isExcluded, isPinned, removeFromBoundary, setNote, togglePin, toggleExclude } from "./mapEdits";
 import type { MapConfig } from "@/api/types";
 
 const empty: MapConfig = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
+const base: MapConfig = { pin: [], exclude: [], note: [], boundary: [{ name: "auth", paths: ["src/a.ts"] }], deny: { extra_patterns: [] } };
 
 describe("map edits", () => {
   test("pin toggles at file and symbol level", () => {
@@ -28,5 +29,25 @@ describe("map edits", () => {
     expect(c.note).toEqual([{ path: "src/a.ts", text: "again" }]);
     c = setNote(c, "src/a.ts", undefined, "");
     expect(c.note).toEqual([]);
+  });
+});
+
+describe("boundaries", () => {
+  test("add creates or extends, trims, ignores empty and duplicates", () => {
+    expect(addToBoundary(base, " http ", "src/h.ts").boundary).toEqual([{ name: "auth", paths: ["src/a.ts"] }, { name: "http", paths: ["src/h.ts"] }]);
+    expect(addToBoundary(base, "auth", "src/b.ts").boundary[0].paths).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(addToBoundary(base, "auth", "src/a.ts")).toEqual(base);
+    expect(addToBoundary(base, "   ", "src/a.ts")).toEqual(base);
+  });
+  test("remove drops the boundary when empty and is a no-op otherwise", () => {
+    expect(removeFromBoundary(base, "auth", "src/a.ts").boundary).toEqual([]);
+    const two = addToBoundary(base, "auth", "src/b.ts");
+    expect(removeFromBoundary(two, "auth", "src/a.ts").boundary).toEqual([{ name: "auth", paths: ["src/b.ts"] }]);
+    expect(removeFromBoundary(base, "nope", "src/a.ts")).toEqual(base);
+  });
+  test("boundariesOf and boundaryNames", () => {
+    expect(boundariesOf(base, "src/a.ts")).toEqual(["auth"]);
+    expect(boundariesOf(base, "src/z.ts")).toEqual([]);
+    expect(boundaryNames(addToBoundary(base, "http", "src/h.ts"))).toEqual(["auth", "http"]);
   });
 });

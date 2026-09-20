@@ -156,3 +156,64 @@ pub async fn put_map(
     body.config.save_atomic(&s.root)?;
     Ok(Json(map_doc(&s.root)?))
 }
+
+pub async fn graph(State(s): State<AppState>) -> Result<Json<queries::GraphDto>, ApiError> {
+    let config = MapConfig::load(&s.root)?;
+    Ok(Json(locked(&s, |store| queries::graph(store, &config))?))
+}
+
+#[derive(Deserialize)]
+pub struct BlastQuery {
+    pub path: Option<String>,
+    pub symbol: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BlastRoot {
+    pub path: String,
+    pub symbol: String,
+}
+
+#[derive(Serialize)]
+pub struct BlastDto {
+    pub root: BlastRoot,
+    pub files: Vec<singularrag_core::blast::BlastFile>,
+    pub truncated: Option<&'static str>,
+}
+
+pub async fn blast(
+    State(s): State<AppState>,
+    Query(q): Query<BlastQuery>,
+) -> Result<Json<BlastDto>, ApiError> {
+    let (Some(path), Some(symbol)) = (q.path, q.symbol) else {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "path and symbol are required" }),
+        ));
+    };
+    let config = MapConfig::load(&s.root)?;
+    let b = locked(&s, |store| {
+        singularrag_core::blast::blast_radius(
+            store,
+            &config,
+            &path,
+            &symbol,
+            singularrag_core::blast::MAX_DEPTH,
+            singularrag_core::blast::MAX_FILES,
+        )
+    })?;
+    match b {
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "symbol not found" }),
+        )),
+        Some(b) => Ok(Json(BlastDto {
+            root: BlastRoot {
+                path: b.root_path,
+                symbol: b.root_symbol,
+            },
+            files: b.files,
+            truncated: b.truncated,
+        })),
+    }
+}
