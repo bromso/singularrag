@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 mod config;
+mod repo;
 mod score;
+mod session;
 mod stream;
 mod summary;
 
