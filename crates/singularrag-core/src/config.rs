@@ -8,8 +8,9 @@ use crate::{Error, Result};
 
 pub const MAP_FILE: &str = ".singularrag/map.toml";
 
-pub const MAP_HEADER: &str =
-    "# Managed by singularrag serve. Hand edits are kept; comments are not.\n";
+pub const MAP_HEADER: &str = "# Managed by singularrag serve. Hand edits and comments between sections are kept; a comment inside an entry the page rewrites is not.\n";
+
+const OWNED_KEYS: [&str; 5] = ["pin", "exclude", "note", "boundary", "deny"];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MapConfigError {
@@ -58,15 +59,15 @@ fn check_path(field: &str, p: &str) -> std::result::Result<(), MapConfigError> {
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MapConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pin: Vec<Target>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<Target>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub note: Vec<Note>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boundary: Vec<Boundary>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Deny::is_empty")]
     pub deny: Deny,
 }
 
@@ -95,6 +96,12 @@ pub struct Boundary {
 pub struct Deny {
     #[serde(default)]
     pub extra_patterns: Vec<String>,
+}
+
+impl Deny {
+    fn is_empty(&self) -> bool {
+        self.extra_patterns.is_empty()
+    }
 }
 
 impl MapConfig {
@@ -179,15 +186,87 @@ impl MapConfig {
         Ok(())
     }
 
-    /// Write `map.toml` via a temp file and rename so a reader never sees a torn file.
+    /// Edit the existing document in place so comments, blank lines, key order and keys
+    /// the page does not own survive; only the owned sections are replaced. Written via a
+    /// temp file and rename so a reader never sees a torn file.
     pub fn save_atomic(&self, root: &Path) -> Result<()> {
         let path = root.join(MAP_FILE);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let body = toml::to_string_pretty(self).map_err(|e| Error::Config(e.to_string()))?;
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+
+        // Preserve leading comments/blank lines from existing file
+        let leading_content = existing.as_ref().and_then(|text| {
+            let mut end = 0;
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    end += line.len() + 1; // +1 for newline
+                } else {
+                    break;
+                }
+            }
+            if end > 0 {
+                Some(text[..end].to_string())
+            } else {
+                None
+            }
+        });
+
+        let mut doc: toml_edit::DocumentMut = if let Some(text) = &existing {
+            text.parse()
+                .map_err(|e: toml_edit::TomlError| Error::Config(e.to_string()))?
+        } else {
+            toml_edit::DocumentMut::new()
+        };
+
+        // Preserve unknown keys (non-owned keys from the original document)
+        let unknown_keys: Vec<(String, toml_edit::Item)> = doc
+            .iter()
+            .filter(|(k, _)| !OWNED_KEYS.iter().any(|owned| owned == k))
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+
+        let fresh = toml_edit::ser::to_string_pretty(self)
+            .map_err(|e| Error::Config(e.to_string()))?
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e: toml_edit::TomlError| Error::Config(e.to_string()))?;
+        for key in OWNED_KEYS {
+            match fresh.get(key) {
+                Some(item) => {
+                    doc.remove(key);
+                    doc[key] = item.clone();
+                }
+                None => {
+                    doc.remove(key);
+                }
+            }
+        }
+
+        // Restore unknown keys
+        for (key, value) in unknown_keys {
+            if doc.get(&key).is_none() {
+                doc[&key] = value;
+            }
+        }
+
+        let mut output = doc.to_string();
+
+        // Restore leading content if it exists, otherwise add header for new files
+        if let Some(leading) = leading_content {
+            if !output.starts_with(&leading) {
+                output = format!("{}{}", leading, output);
+            }
+        } else if existing.is_none() && !output.starts_with(MAP_HEADER) {
+            output = format!("{}{}", MAP_HEADER, output);
+        }
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, format!("{MAP_HEADER}{body}"))?;
+        std::fs::write(&tmp, output)?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
@@ -304,6 +383,60 @@ extra_patterns = ["*.snap"]
             .unwrap_err();
         assert_eq!(err.field, "deny.extra_patterns");
         assert!(err.message.contains("*.lock"));
+    }
+
+    #[test]
+    fn save_atomic_keeps_comments_between_sections_and_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MAP_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "# mine, at the top\npin = []\n\n# between sections\n[[exclude]]\npath = \"src/legacy/\"\n\ncustom = \"keep me\"\n\n[deny]\nextra_patterns = []\n# at the end\n").unwrap();
+        let c = cfg("[[pin]]\npath = \"src/a.ts\"\n[[exclude]]\npath = \"src/legacy/\"\n");
+        c.save_atomic(dir.path()).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with("# mine, at the top"), "{written}");
+        assert!(
+            !written.contains("Managed by singularrag"),
+            "the header is only written to a new file"
+        );
+        assert!(written.contains("# between sections"), "{written}");
+        assert!(written.contains("custom = \"keep me\""), "{written}");
+        assert!(written.contains("# at the end"), "{written}");
+        assert!(written.contains("[[pin]]"), "{written}");
+        assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
+        assert!(!dir.path().join(".singularrag/map.toml.tmp").exists());
+    }
+
+    #[test]
+    fn save_atomic_writes_the_header_only_to_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg("[[pin]]\npath = \"src/a.ts\"\n");
+        c.save_atomic(dir.path()).unwrap();
+        let written = std::fs::read_to_string(dir.path().join(MAP_FILE)).unwrap();
+        assert!(written.starts_with(MAP_HEADER), "{written}");
+        assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
+        // A second save must not duplicate the header.
+        c.save_atomic(dir.path()).unwrap();
+        let again = std::fs::read_to_string(dir.path().join(MAP_FILE)).unwrap();
+        assert_eq!(
+            again.matches("Managed by singularrag").count(),
+            1,
+            "{again}"
+        );
+    }
+
+    #[test]
+    fn save_atomic_replaces_every_owned_section_even_when_emptied() {
+        let dir = tempfile::tempdir().unwrap();
+        cfg("[[pin]]\npath = \"src/a.ts\"\n[[note]]\npath = \"src/a.ts\"\ntext = \"n\"\n")
+            .save_atomic(dir.path())
+            .unwrap();
+        MapConfig::default().save_atomic(dir.path()).unwrap();
+        let loaded = MapConfig::load(dir.path()).unwrap();
+        assert!(
+            loaded.pin.is_empty() && loaded.note.is_empty(),
+            "{loaded:?}"
+        );
     }
 
     #[test]
