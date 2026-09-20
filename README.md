@@ -70,6 +70,8 @@ singularrag serve
 
 Opens `http://127.0.0.1:<port>/#token=…` in your browser. The page shows every retrieval an agent made (grouped by host), the repo as a keyboard-navigable treegrid with each symbol marked served, cut or untouched for the selected retrieval, and the reasons in plain sentences. Pin or exclude files and symbols and leave notes; they are written to `.singularrag/map.toml` (commit it) and apply to the agent's next retrieval. The index refreshes as files change; the badge says how fresh it is.
 
+Switch the main pane to **Map** for a Sigma.js projection of the same data: every indexed file is a node and every reference an edge, laid out once per index version; the selected retrieval paints files as served (filled), cut (ringed) or untouched (dimmed), a symbol's blast radius can be shown from the detail panel, and boundaries — named groups of files kept in `map.toml` — are drawn as labelled regions and edited from the panel. The treegrid stays the canonical view: the map has a summary label and a "Switch to table" control, and everything the map shows is also in the panel.
+
 The server binds to localhost only and requires the per-run token in the URL. `--port N` pins a port, `--no-open` skips the browser.
 
 Building from source needs Bun for the UI: `cd ui && bun install && bun run build`, then `cargo build --release`.

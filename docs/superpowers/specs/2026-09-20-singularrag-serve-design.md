@@ -99,7 +99,7 @@ Rust: `axum` 0.8, `tower-http` 0.7 (set-header), `rust-embed` 8, `mime_guess`, `
 
 ## 10. Non-goals (3a)
 
-The Sigma.js map and boundaries (3b); Playwright; multi-repo; remote access, HTTPS, or auth beyond the token; a theme toggle; editing the deny list from the UI; server-side search; a "try a query" box (a human-issued query would pollute the provenance rail; `serve` is an observer); comment-preserving `map.toml` writes.
+The Sigma.js map and boundaries (3b) — see docs/superpowers/specs/2026-09-20-singularrag-map-design.md; Playwright; multi-repo; remote access, HTTPS, or auth beyond the token; a theme toggle; editing the deny list from the UI; server-side search; a "try a query" box (a human-issued query would pollute the provenance rail; `serve` is an observer); comment-preserving `map.toml` writes.
 
 ## 11. Decisions recorded
 
