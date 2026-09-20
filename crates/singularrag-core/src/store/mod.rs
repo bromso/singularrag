@@ -35,6 +35,14 @@ impl Store {
     /// A second connection for readers (the UI). Read-only at the SQLite level, no DDL,
     /// no meta write; the writer side owns schema rebuilds, so a version mismatch is an
     /// error here rather than a rebuild.
+    ///
+    /// A WAL database needs the `-shm` file writable by this process even for readers; the
+    /// writer creates it with the DB's permissions and both run as the same user, so no extra
+    /// handling is needed. Opening from a different user or a read-only or network filesystem
+    /// is not supported.
+    ///
+    /// The `path.exists()` check is a friendlier error, not a guarantee; the open can still
+    /// race a rebuild.
     pub fn open_read_only(path: &Path) -> Result<Store> {
         use rusqlite::OpenFlags;
         if !path.exists() {
