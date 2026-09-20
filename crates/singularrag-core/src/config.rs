@@ -59,6 +59,12 @@ fn check_path(field: &str, p: &str) -> std::result::Result<(), MapConfigError> {
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MapConfig {
+    // `skip_serializing_if` stays on the four list fields for a `toml_edit::ser::to_string_pretty`
+    // reason, not a JSON one: pretty-printing an empty `Vec` of structs as an array of tables
+    // renders a bare `pin=` with no value (a toml_edit pretty-serializer bug), which then fails
+    // to parse back. Omitting the key for an empty list sidesteps it. `save_atomic` treats an
+    // owned key's absence from the freshly serialized document as "remove this section" either
+    // way, so the two are consistent for a section that's genuinely empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pin: Vec<Target>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -67,7 +73,10 @@ pub struct MapConfig {
     pub note: Vec<Note>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boundary: Vec<Boundary>,
-    #[serde(default, skip_serializing_if = "Deny::is_empty")]
+    // Deny is a plain struct (not a list of structs), so it does not hit the pretty-printer bug
+    // above; keeping it unconditional means `[deny]` — the never-shrinkable security section —
+    // always renders once map.toml owns it, even with an empty `extra_patterns`.
+    #[serde(default)]
     pub deny: Deny,
 }
 
@@ -98,12 +107,6 @@ pub struct Deny {
     pub extra_patterns: Vec<String>,
 }
 
-impl Deny {
-    fn is_empty(&self) -> bool {
-        self.extra_patterns.is_empty()
-    }
-}
-
 /// Extract the leading decorator (prefix) from a toml_edit::Item, which holds comments that
 /// precede the item.
 fn leading_prefix(item: &toml_edit::Item) -> Option<toml_edit::RawString> {
@@ -126,6 +129,51 @@ fn set_leading_prefix(item: &mut toml_edit::Item, prefix: toml_edit::RawString) 
         toml_edit::Item::Table(t) => t.decor_mut().set_prefix(prefix),
         toml_edit::Item::Value(v) => v.decor_mut().set_prefix(prefix),
         _ => {}
+    }
+}
+
+/// The document position of an owned item: a table's own position, or (for an array of
+/// tables) its first table's position. `None` for a plain value (e.g. `pin = []`) or an
+/// item that was never parsed from text (so has no recorded position).
+fn item_position(item: &toml_edit::Item) -> Option<isize> {
+    match item {
+        toml_edit::Item::Table(t) => t.position(),
+        toml_edit::Item::ArrayOfTables(a) => a.get(0).and_then(|t| t.position()),
+        _ => None,
+    }
+}
+
+/// Stamp `pos` onto every table within an owned item so it sorts at a known place among the
+/// document's other tables, regardless of where toml_edit's serializer or IndexMap happened
+/// to put it.
+fn set_item_position(item: &mut toml_edit::Item, pos: isize) {
+    match item {
+        toml_edit::Item::Table(t) => t.set_position(Some(pos)),
+        toml_edit::Item::ArrayOfTables(a) => {
+            for t in a.iter_mut() {
+                t.set_position(Some(pos));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The smallest position among the document's top-level tables (bare tables and every table
+/// inside an array of tables). `None` when no top-level table carries a position.
+fn min_table_position(doc: &toml_edit::DocumentMut) -> Option<isize> {
+    doc.iter().flat_map(|(_, item)| table_positions(item)).min()
+}
+
+/// The largest position among the document's top-level tables. See `min_table_position`.
+fn max_table_position(doc: &toml_edit::DocumentMut) -> Option<isize> {
+    doc.iter().flat_map(|(_, item)| table_positions(item)).max()
+}
+
+fn table_positions(item: &toml_edit::Item) -> Vec<isize> {
+    match item {
+        toml_edit::Item::Table(t) => t.position().into_iter().collect(),
+        toml_edit::Item::ArrayOfTables(a) => a.iter().filter_map(|t| t.position()).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -224,80 +272,48 @@ impl MapConfig {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
-
-        // Preserve leading comments/blank lines from existing file
-        let leading_content = existing.as_ref().and_then(|text| {
-            let mut end = 0;
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    end += line.len() + 1; // +1 for newline
-                } else {
-                    break;
-                }
-            }
-            if end > 0 {
-                Some(text[..end].to_string())
-            } else {
-                None
-            }
-        });
-
-        let mut doc: toml_edit::DocumentMut = if let Some(text) = &existing {
-            text.parse()
-                .map_err(|e: toml_edit::TomlError| Error::Config(e.to_string()))?
-        } else {
-            toml_edit::DocumentMut::new()
-        };
-
-        // Determine the first owned key in the document to avoid removing its prefix
-        let first_owned_key = OWNED_KEYS.iter().find(|k| doc.get(k).is_some()).copied();
-
-        // Preserve unknown keys (keys that are not in OWNED_KEYS) by extracting them
-        let mut unknown_keys = vec![];
-        for (key, item) in doc.iter() {
-            if !OWNED_KEYS.contains(&key) {
-                unknown_keys.push((key.to_string(), item.clone()));
-            }
-        }
-        // Remove unknown keys from doc to prevent them from being corrupted during manipulation
-        for (key, _) in &unknown_keys {
-            doc.remove(key);
-        }
-
+        let mut doc: toml_edit::DocumentMut = existing
+            .as_deref()
+            .unwrap_or(MAP_HEADER)
+            .parse()
+            .map_err(|e: toml_edit::TomlError| Error::Config(e.to_string()))?;
         let fresh = toml_edit::ser::to_string_pretty(self)
             .map_err(|e| Error::Config(e.to_string()))?
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e: toml_edit::TomlError| Error::Config(e.to_string()))?;
 
         for key in OWNED_KEYS {
+            let (old_prefix, old_pos, old_was_value) = {
+                let old = doc.get(key);
+                (
+                    old.and_then(leading_prefix),
+                    old.and_then(item_position),
+                    matches!(old, Some(toml_edit::Item::Value(_))),
+                )
+            };
+
             match fresh.get(key) {
                 Some(item) => {
-                    // Only remove if there's a type conflict (e.g., inline array vs array-of-tables)
-                    let needs_remove = if let Some(existing) = doc.get(key) {
-                        (existing.is_array() && item.is_array_of_tables())
-                            || (existing.is_array_of_tables() && !item.is_array_of_tables())
-                    } else {
-                        false
+                    let mut item = item.clone();
+                    if let Some(p) = old_prefix {
+                        set_leading_prefix(&mut item, p);
+                    }
+                    let pos = match old_pos {
+                        Some(p) => p,
+                        None if old_was_value => min_table_position(&doc)
+                            .map(|m| m.saturating_sub(1))
+                            .unwrap_or(0),
+                        None => max_table_position(&doc).map(|m| m + 1).unwrap_or(1),
                     };
-
-                    // Preserve the leading decorator (comments before the section),
-                    // but only for keys after the first owned key (leading_content handles the first key)
-                    let old_prefix = if Some(key) != first_owned_key {
-                        doc.get(key).and_then(leading_prefix)
-                    } else {
-                        None
-                    };
-
-                    if needs_remove {
+                    set_item_position(&mut item, pos);
+                    // A key that used to hold a plain value (`pin = []`) carries key-level
+                    // decor shaped for `key = value` formatting. Reusing that slot for a table
+                    // or array-of-tables leaves stray formatting around the new `[[key]]`
+                    // header, so drop the old key first and let the assignment recreate it.
+                    if old_was_value && !item.is_value() {
                         doc.remove(key);
                     }
-                    doc[key] = item.clone();
-
-                    // Apply the old prefix to the new item
-                    if let (Some(p), Some(new_item)) = (old_prefix, doc.get_mut(key)) {
-                        set_leading_prefix(new_item, p);
-                    }
+                    doc[key] = item;
                 }
                 None => {
                     doc.remove(key);
@@ -305,23 +321,17 @@ impl MapConfig {
             }
         }
 
-        // Re-insert unknown keys at the end in their original order
-        for (key, item) in unknown_keys {
-            doc.insert(&key, item);
+        // A brand-new file was seeded by parsing MAP_HEADER alone (no key follows it), so
+        // toml_edit has nothing to attach the comment to as a leading prefix and stores it as
+        // the document's trailing content instead — which always renders last. Move it back to
+        // the document's own leading decor so it renders first, ahead of every table just added.
+        if existing.is_none() && doc.trailing().as_str() == Some(MAP_HEADER) {
+            doc.set_trailing("");
+            doc.decor_mut().set_prefix(MAP_HEADER);
         }
 
-        let mut output = doc.to_string();
-
-        // Restore leading content if it exists, otherwise add header for new files
-        if let Some(leading) = leading_content {
-            if !output.starts_with(&leading) {
-                output = format!("{}{}", leading, output);
-            }
-        } else if existing.is_none() && !output.starts_with(MAP_HEADER) {
-            output = format!("{}{}", MAP_HEADER, output);
-        }
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, output)?;
+        std::fs::write(&tmp, doc.to_string())?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
@@ -508,6 +518,68 @@ extra_patterns = ["*.snap"]
         let c2 = cfg("[[exclude]]\npath = \"src/legacy/\"\n");
         c2.save_atomic(dir.path()).unwrap();
         assert_eq!(MapConfig::load(dir.path()).unwrap(), c2);
+    }
+
+    #[test]
+    fn save_atomic_keeps_file_order_and_comment_when_sections_precede_the_owned_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MAP_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Note: `pin` is written as a pre-existing `[[pin]]` array-of-tables, not a bare
+        // `pin = []` value. TOML has no way to place a bare root key like `pin = []` after a
+        // `[deny]` header (all bare root keys must precede every table header), so a bare-value
+        // form of this fixture would actually define `deny.pin`, not a top-level `pin` at all.
+        // `[[pin]]` is what the Critical finding's second cause is really about: a pre-existing
+        // array-of-tables whose position must survive the rewrite.
+        std::fs::write(
+            &path,
+            "[deny]\nextra_patterns = [\"*.snap\"]\n\n# user comment before pin\n[[pin]]\npath = \"src/old.ts\"\n",
+        )
+        .unwrap();
+        let c = cfg("[[pin]]\npath = \"src/a.ts\"\n[deny]\nextra_patterns = [\"*.snap\"]\n");
+        c.save_atomic(dir.path()).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# user comment before pin"), "{written}");
+        let i_deny = written.find("[deny]").expect("deny table");
+        let i_pin = written.find("[[pin]]").expect("pin table");
+        assert!(i_deny < i_pin, "{written}");
+        assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
+    }
+
+    #[test]
+    fn save_atomic_keeps_a_value_section_before_later_tables_when_it_becomes_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MAP_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "custom = \"x\"\npin = []\n\n[deny]\nextra_patterns = []\n",
+        )
+        .unwrap();
+        let c = cfg("[[pin]]\npath = \"src/a.ts\"\n");
+        c.save_atomic(dir.path()).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let i_custom = written.find("custom = \"x\"").expect("custom key");
+        let i_pin = written.find("[[pin]]").expect("pin table");
+        let i_deny = written.find("[deny]").expect("deny table");
+        assert!(i_custom < i_pin, "{written}");
+        assert!(i_pin < i_deny, "{written}");
+        assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
+    }
+
+    #[test]
+    fn save_atomic_appends_a_brand_new_section_after_existing_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MAP_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[deny]\nextra_patterns = []\n").unwrap();
+        let c = cfg("[[pin]]\npath = \"src/a.ts\"\n");
+        c.save_atomic(dir.path()).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let i_deny = written.find("[deny]").expect("deny table");
+        let i_pin = written.find("[[pin]]").expect("pin table");
+        assert!(i_deny < i_pin, "{written}");
+        assert_eq!(MapConfig::load(dir.path()).unwrap(), c);
     }
 
     #[test]
