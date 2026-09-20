@@ -35,12 +35,9 @@ impl From<DrainStats> for DrainStatsJson {
     }
 }
 
-/// Not yet constructed by any production caller: the SSE route and the watcher that would
-/// send these arrive in Tasks 5–8. `#[allow(dead_code)]` per-variant rather than deleted,
-/// since `router`/`AppState` are this task's deliverable and the variants are its contract.
+/// Events broadcast to SSE clients for live updates.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    #[allow(dead_code)]
     Change { max_retrieval_id: i64 },
     #[allow(dead_code)]
     Freshness(Freshness),
@@ -53,8 +50,6 @@ pub struct AppState {
     pub token: Arc<str>,
     pub read: Arc<Mutex<Store>>,
     pub freshness: Arc<RwLock<Freshness>>,
-    /// Not yet sent to or subscribed to (the watcher sends, the SSE route subscribes).
-    #[allow(dead_code)]
     pub events: broadcast::Sender<ServerEvent>,
 }
 

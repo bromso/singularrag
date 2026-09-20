@@ -2,6 +2,7 @@
 //! reads, SSE for liveness, an embedded React app for the page.
 
 pub mod auth;
+pub mod events;
 pub mod queries;
 pub mod routes;
 pub mod state;
@@ -31,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tree", get(routes::tree))
         .route("/skipped", get(routes::skipped))
         .route("/map", get(routes::get_map).put(routes::put_map))
+        .route("/events", get(events::sse))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -62,6 +64,7 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
                 tracing::warn!("could not open a browser: {e}");
             }
         }
+        let _poller = events::spawn_poller(state.clone());
         axum::serve(listener, router(state)).await?;
         Ok::<(), anyhow::Error>(())
     })

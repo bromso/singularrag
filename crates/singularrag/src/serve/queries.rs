@@ -113,8 +113,6 @@ pub fn session_label(key: &str) -> String {
     key.to_string()
 }
 
-/// Not yet called by any route (Task 6's SSE poller calls it to detect a change).
-#[allow(dead_code)]
 pub fn max_retrieval_id(store: &Store) -> Result<i64> {
     Ok(store
         .conn()
