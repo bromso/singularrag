@@ -75,4 +75,9 @@
   * { @apply border-border outline-ring/50; }
   body { @apply bg-background text-foreground; }
   :focus-visible { @apply outline-2 outline-offset-2 outline-ring; }
+  /* Spec §6: nothing animates in 3a. Belt-and-braces: even if a stray
+     transition/animation utility slips into a class list, kill it. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
 }

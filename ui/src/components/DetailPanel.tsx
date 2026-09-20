@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { MapConfig } from "@/api/types";
@@ -12,7 +12,25 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote }: {
 }) {
   const symbol = row?.kind === "symbol" ? row.symbol.symbol.name : undefined;
   const [text, setText] = useState("");
-  useEffect(() => { setText(row ? noteFor(map, row.path, symbol) : ""); }, [row, map, symbol]);
+  const saved = row ? noteFor(map, row.path, symbol) : "";
+  // A draft the user hasn't blurred yet must survive a background refetch of `map`
+  // (e.g. from an SSE "change" event triggered by another agent). `dirty` tracks
+  // whether the textarea has unsaved edits; the effect below only overwrites
+  // `text` from `saved` when the target (row/symbol) actually changed, or when
+  // it didn't but the field is clean.
+  const dirtyRef = useRef(false);
+  const lastKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = row ? `${row.path}::${symbol ?? ""}` : null;
+    const targetChanged = key !== lastKeyRef.current;
+    lastKeyRef.current = key;
+    if (targetChanged) {
+      dirtyRef.current = false;
+      setText(saved);
+    } else if (!dirtyRef.current) {
+      setText(saved);
+    }
+  }, [row?.path, symbol, saved]);
   if (!row) return <section aria-label="Details" className="border-l p-3 text-sm text-muted-foreground">Select a file or symbol.</section>;
   const item = row.kind === "symbol" ? row.symbol.item : null;
   return (
@@ -33,7 +51,13 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote }: {
       </div>
       <label className="text-sm">
         Note
-        <Textarea value={text} onChange={(e) => setText(e.target.value)} onBlur={() => onNote(row.path, symbol, text)} rows={3} className="mt-1" />
+        <Textarea
+          value={text}
+          onChange={(e) => { setText(e.target.value); dirtyRef.current = true; }}
+          onBlur={() => { onNote(row.path, symbol, text); dirtyRef.current = false; }}
+          rows={3}
+          className="mt-1"
+        />
       </label>
       {(isPinned(map, row.path, symbol) || isExcluded(map, row.path)) && (
         <p className="text-xs text-muted-foreground">{isPinned(map, row.path, symbol) ? "Pinned. " : ""}{isExcluded(map, row.path) ? "Excluded." : ""}</p>
