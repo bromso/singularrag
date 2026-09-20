@@ -29,6 +29,9 @@ let blastGate: Promise<void> | null = null;
 let changeHandler: ((e: { data: string }) => void) | null = null;
 
 beforeEach(() => {
+  // The Tree/Map choice persists in localStorage (Task 6); clear it so one test's
+  // switch to "map" does not become the next test's starting view.
+  localStorage.clear();
   saved = null;
   mapState = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
   mapVersion = 1;
@@ -313,5 +316,40 @@ describe("App", () => {
     release();
     const list = await screen.findByRole("list", { name: "Blast radius" });
     expect(list).toBeTruthy();
+  });
+
+  test("the map view shows the summary label, switch-to-table returns focus to the tree, and the choice persists", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(screen.getByRole("radio", { name: "Map" }));
+    const img = await screen.findByRole("img", { name: /Map of 1 files\. Retrieval 7: 1 served, 0 cut, 0 untouched\. 0 boundaries\./ });
+    expect(img).toBeTruthy();
+    expect(localStorage.getItem("singularrag.view")).toBe("map");
+    await waitFor(() => expect(screen.getByRole("log", { name: "Announcements" }).textContent).toContain("Map layout ready"));
+    await user.click(screen.getByRole("button", { name: "Switch to table" }));
+    expect(await screen.findByRole("treegrid")).toBeTruthy();
+    expect(document.activeElement?.getAttribute("role")).toBe("treegrid");
+    expect(localStorage.getItem("singularrag.view")).toBe("tree");
+  });
+
+  test("selecting a node on the map focuses the same row in the panel", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(screen.getByRole("radio", { name: "Map" }));
+    await screen.findByRole("img");
+    const s = (globalThis as any).__sigma.instances.at(-1);
+    await act(async () => { s.emit("clickNode", { node: "src/auth/session.ts" }); });
+    expect(screen.getByRole("heading", { name: "src/auth/session.ts" })).toBeTruthy();
+  });
+
+  test("the map view is axe clean", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await user.click(screen.getByRole("radio", { name: "Map" }));
+    await screen.findByRole("img");
+    expect((await axe.run(container)).violations).toEqual([]);
   });
 });

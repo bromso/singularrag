@@ -2,15 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { ApiError, api, setToken, tokenFromFragment } from "@/api/client";
 import { subscribe } from "@/api/events";
-import type { BlastResult, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
+import type { BlastResult, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
 import { joinRetrieval } from "@/lib/join";
 import { addToBoundary, noteFor, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
+import { summaryLabel } from "@/lib/mapSummary";
 import { DetailPanel } from "@/components/DetailPanel";
 import { FreshnessBadge, freshnessText } from "@/components/FreshnessBadge";
 import { LiveRegion } from "@/components/LiveRegion";
+import { MapView } from "@/components/MapView";
 import { RepoTree, type TreeRow } from "@/components/RepoTree";
 import { RetrievalsRail } from "@/components/RetrievalsRail";
 import { SkippedSheet } from "@/components/SkippedSheet";
+import { ViewToggle, loadView, saveView, type View } from "@/components/ViewToggle";
 
 const emptyMap: MapConfig = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
 
@@ -35,6 +38,14 @@ export function App() {
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
   const [messages, setMessages] = useState<string[]>([]);
   const announce = useCallback((m: string) => setMessages((ms) => [...ms.slice(-9), m]), []);
+  const [view, setView] = useState<View>(loadView);
+  const changeView = (v: View) => { setView(v); saveView(v); };
+  const [graph, setGraph] = useState<GraphPayload | null>(null);
+  const graphRef = useRef<string | null>(null);
+  const announcedLayouts = useRef(new Set<string>());
+  const onLayoutReady = useCallback((v: string) => {
+    if (!announcedLayouts.current.has(v)) { announcedLayouts.current.add(v); announce("Map layout ready"); }
+  }, [announce]);
 
   // The map is edited through a compare-and-swap, so a save must build on the newest
   // config the client has seen, not on whatever `map` the clicked render closed over.
@@ -58,6 +69,11 @@ export function App() {
     const load = async () => {
       const [s, rs, t, sk, m] = await Promise.all([api.status(), api.retrievals(), api.tree(), api.skipped(), api.map()]);
       setStatus(s); setRetrievals(rs); setTree(t); setSkipped(sk); applyMapDoc(m);
+      if (!graphRef.current || graphRef.current !== s.index_version) {
+        const g = await api.graph();
+        graphRef.current = g.index_version;
+        setGraph(g);
+      }
       const seen = knownMax;
       if (seen === null) {
         announce(`Loaded ${rs.length} retrievals`);
@@ -126,6 +142,42 @@ export function App() {
   };
   const toggleExpand = (path: string) => setExpandedPath((p) => (p === path ? null : path));
 
+  const onSelectNode = useCallback((path: string, symbol?: string) => {
+    const file = rows.find((r) => r.path === path);
+    if (!file) return;
+    if (symbol) {
+      const s = file.symbols.find((x) => x.symbol.name === symbol);
+      if (s) { setFocused({ kind: "symbol", path, file, symbol: s }); return; }
+    }
+    setFocused({ kind: "file", path, file });
+  }, [rows]);
+
+  // `MapView`'s treegrid target may be freshly (re)mounted this same tick — a real
+  // rAF never fires in a hidden/background tab (and happy-dom does not schedule it
+  // reliably either), so a macrotask tick is what actually lands the focus.
+  //
+  // react-aria-components' Tree uses a roving tabindex: the first time real DOM
+  // focus enters the group, it hands focus off to the active row via an effect
+  // (so the container itself is never the *lasting* focus target on a cold
+  // entry). Focusing once lets that hand-off settle; focusing again afterwards
+  // — now that the group is already "focus within" — lands and keeps focus on
+  // the treegrid itself, which is what a screen-reader user landing here needs
+  // announced (the region, not an arbitrary row).
+  const switchToTable = () => {
+    changeView("tree");
+    setTimeout(() => {
+      const el = document.querySelector('[role="treegrid"]') as HTMLElement | null;
+      el?.focus();
+      setTimeout(() => el?.focus(), 0);
+    }, 0);
+  };
+
+  const fileCounts = useMemo(() => ({
+    served: rows.filter((r) => r.served > 0).length,
+    cut: rows.filter((r) => r.served === 0 && r.cut > 0).length,
+  }), [rows]);
+  const mapLabel = summaryLabel(graph?.nodes.length ?? 0, detail ? { id: detail.id, ...fileCounts } : null, map.boundary.length);
+
   // `edit` is applied when the save's turn comes, to the config as it is then — not at
   // click time — so the second of two rapid clicks does not discard the first.
   const save = (edit: (cfg: MapConfig) => MapConfig) => {
@@ -150,6 +202,7 @@ export function App() {
         <h1 className="text-base font-semibold">singularrag</h1>
         <FreshnessBadge status={status} />
         <SkippedSheet skipped={skipped} />
+        <ViewToggle value={view} onChange={changeView} />
         <label className="ml-auto text-sm">
           Filter
           <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} className="ml-2 rounded border bg-background px-2 py-1" placeholder="path or symbol" />
@@ -157,8 +210,15 @@ export function App() {
       </header>
       <RetrievalsRail retrievals={retrievals} selected={selected} onSelect={setSelected}
         onMore={() => api.retrievals(retrievals[retrievals.length - 1]?.id).then((more) => setRetrievals((rs) => [...rs, ...more]))} />
-      <main className="overflow-auto">
-        <RepoTree rows={rows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
+      <main className={view === "tree" ? "overflow-auto" : "relative overflow-hidden"}>
+        {view === "tree" ? (
+          <RepoTree rows={rows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
+        ) : (
+          <MapView payload={graph} rows={rows} hasRetrieval={detail !== null}
+            focusedPath={focused?.path ?? null} focusedSymbol={focused?.kind === "symbol" ? focused.symbol.symbol.name : null}
+            expandedPath={expandedPath} blast={blast} boundaries={map.boundary} ariaLabel={mapLabel}
+            onSelectNode={onSelectNode} onToggleExpand={toggleExpand} onSwitchToTable={switchToTable} onLayoutReady={onLayoutReady} />
+        )}
       </main>
       <DetailPanel row={focused} map={map}
         onPin={(p, s) => save((c) => togglePin(c, p, s))}
