@@ -44,6 +44,12 @@ export function App() {
   const changeView = (v: View) => { setView(v); saveView(v); };
   const [graph, setGraph] = useState<GraphPayload | null>(null);
   const indexRef = useRef<string | null>(null);
+  // SSE "change" events are not coalesced, so two `load()` calls can overlap.
+  // Without a guard, whichever resolves last wins even if it started first,
+  // pinning `indexRef`/tree/graph to a stale version. `loadGen` orders loads by
+  // when they *started*, not when they resolve — the same pattern `toggleBlast`
+  // uses with `blastReq` — so a superseded load applies nothing at all.
+  const loadGen = useRef(0);
   const announcedLayouts = useRef(new Set<string>());
   const onLayoutReady = useCallback((v: string) => {
     if (!announcedLayouts.current.has(v)) { announcedLayouts.current.add(v); announce("Map layout ready"); }
@@ -69,11 +75,14 @@ export function App() {
     // announces one summary instead of reading out up to ten past retrievals (I5).
     let knownMax: number | null = null;
     const load = async () => {
+      const gen = ++loadGen.current;
       const [s, rs, sk, m] = await Promise.all([api.status(), api.retrievals(), api.skipped(), api.map()]);
+      if (gen !== loadGen.current) return;
       setStatus(s); setRetrievals(rs); setSkipped(sk); applyMapDoc(m);
       // The tree and the graph are functions of the index: refetch them only when it changed.
       if (indexRef.current !== s.index_version) {
         const [t, g] = await Promise.all([api.tree(), api.graph()]);
+        if (gen !== loadGen.current) return;
         indexRef.current = s.index_version;
         setTree(t); setGraph(g);
       }

@@ -40,6 +40,12 @@ let detailItems: unknown[] = [];
 // What `GET /api/status` answers as `index_version`; a test can change this before
 // firing a change event to simulate the index having moved on.
 let statusVersion = "abc123";
+// When non-null, each `GET /api/status` call captures its response body immediately
+// (reflecting `statusVersion` at call time, like a real server would) but blocks
+// on a fresh gate before returning it, and pushes that gate's resolver here — so a
+// test can fire two overlapping loads and then choose which one's status resolves
+// first, independent of call order.
+let statusGates: (() => void)[] | null = null;
 // Counts fetch calls whose URL contains `frag`.
 const calls = (frag: string) => (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).includes(frag)).length;
 
@@ -59,6 +65,7 @@ beforeEach(() => {
   extraRetrievalItems = [];
   detailItems = [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }];
   statusVersion = "abc123";
+  statusGates = null;
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
@@ -70,7 +77,11 @@ beforeEach(() => {
     const url = String(input);
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
     if (init?.headers && (init.headers as Record<string, string>).Authorization !== "Bearer deadbeef") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
-    if (url.endsWith("/api/status")) return json({ ...status, index_version: statusVersion });
+    if (url.endsWith("/api/status")) {
+      const body = { ...status, index_version: statusVersion };
+      if (statusGates) await new Promise<void>((resolve) => { statusGates!.push(resolve); });
+      return json(body);
+    }
     if (url.includes("/api/blast?")) {
       if (blastGate) await blastGate;
       return json({ root: { path: "src/auth/session.ts", symbol: "createSession" }, files: [{ path: "src/http/middleware.ts", depth: 1, via: "createSession" }], truncated: null });
@@ -348,6 +359,51 @@ describe("App", () => {
     await act(async () => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
     await waitFor(() => expect(calls("/api/tree")).toBe(tree0 + 1));
     expect(calls("/api/graph")).toBe(graph0 + 1);
+  });
+
+  test("a superseded load applies nothing, even if it resolves after the load that superseded it", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const tree0 = calls("/api/tree");
+
+    statusGates = [];
+    // Load A starts (older generation) and blocks on its /api/status call.
+    changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) });
+    await waitFor(() => expect(statusGates!.length).toBe(1));
+
+    // Load B starts (newer generation, newer index version) and also blocks.
+    statusVersion = "def456";
+    changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) });
+    await waitFor(() => expect(statusGates!.length).toBe(2));
+
+    // Release B's gate and let it run to completion (including its tree/graph
+    // refetch and its `indexRef` write) before releasing A — so A (started first)
+    // resolves LAST, the exact ordering that pinned `indexRef`/tree/graph to a
+    // stale version before the generation-counter fix.
+    const [resolveA, resolveB] = statusGates!;
+    await act(async () => { resolveB(); });
+    await waitFor(() => expect(calls("/api/tree")).toBe(tree0 + 1));
+    await act(async () => { resolveA(); });
+    // Give A's now-unblocked chain (Promise.all resolution, the indexRef check,
+    // and — in the pre-fix code — a second tree/graph fetch) every remaining tick
+    // it needs to finish; `waitFor`'s retrying poll (not a fixed flush count)
+    // makes the assertion below deterministic either way.
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+
+    // Only B's tree/graph refetch should have landed: A's late-arriving (superseded)
+    // load must not have refetched the tree a second time (the old bug: whichever
+    // load resolved last re-fetched and overwrote `indexRef` back to its own stale
+    // version, "abc123", causing a second, redundant tree fetch here).
+    expect(calls("/api/tree")).toBe(tree0 + 1);
+
+    // `indexRef` must have settled on B's version ("def456"), not A's stale
+    // "abc123" — a further change event carrying "def456" again must not refetch
+    // the tree, which it would if A's stale write had won.
+    statusGates = null;
+    const rs0 = calls("/api/retrievals?");
+    await act(async () => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
+    await waitFor(() => expect(calls("/api/retrievals?")).toBe(rs0 + 1));
+    expect(calls("/api/tree")).toBe(tree0 + 1);
   });
 
   test("a symbol row can show its blast radius in the panel", async () => {
