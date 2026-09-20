@@ -59,6 +59,11 @@ export function MapView(props: MapViewProps) {
   const hullRef = useRef<HTMLCanvasElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const graphRef = useRef<Graph | null>(null);
+  // In-memory fallback seed for `layoutGraph` when there is no (or no full) localStorage
+  // cache for the new payload's index version — e.g. right after a re-index, before that
+  // version has ever been saved. Without this, survivors would relayout from a circular
+  // seed and visibly jump on every version change (Task 3: survivors keep their position).
+  const lastPositions = useRef<Positions | null>(null);
   const hovered = useRef<string | null>(null);
   // The real Sigma constructor renders synchronously — it calls `nodeReducer`/`edgeReducer`
   // for every item in the graph before `new Sigma(...)` returns — so a reducer must never
@@ -93,10 +98,14 @@ export function MapView(props: MapViewProps) {
     const cached = loadLayout(payload.index_version);
     // A cache that predates a file being added/removed no longer covers every node; a
     // partial cache is still a useful seed (existing files keep their position), but the
-    // result must be saved back so the cache covers the full graph going forward.
+    // result must be saved back so the cache covers the full graph going forward. When
+    // there is no (full) cache at all — e.g. right after a re-index, before this index
+    // version has ever been saved — fall back to the in-memory seed from whatever was
+    // last laid out, so survivors don't visibly jump to a fresh circular layout.
     const coversAll = !!cached && graph.nodes().every((n) => Object.prototype.hasOwnProperty.call(cached, n));
-    const positions = coversAll ? (cached as Positions) : layoutGraph(graph, cached ?? undefined);
+    const positions = coversAll ? (cached as Positions) : layoutGraph(graph, cached ?? lastPositions.current ?? undefined);
     if (!coversAll) saveLayout(payload.index_version, positions);
+    lastPositions.current = positions;
     applyPositions(graph, positions);
     graphRef.current = graph;
     const pal = readPalette(el);

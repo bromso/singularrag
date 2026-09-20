@@ -183,6 +183,38 @@ describe("MapView", () => {
     expect(s2.camera.state).toMatchObject({ x: 0.3, y: 0.7, ratio: 2 });
   });
 
+  test("survivors keep their exact position across an index-version change even with no cache for the new version", async () => {
+    const p = props();
+    const { rerender } = render(<MapView {...p} />);
+    await act(async () => {});
+    const s1 = Fake.instances[0];
+    const v1Positions: Record<string, { x: number; y: number }> = {};
+    for (const n of ["src/a.ts", "src/b.ts", "src/c.ts"]) {
+      const a = s1.graph.getNodeAttributes(n);
+      v1Positions[n] = { x: a.x, y: a.y };
+    }
+    // A new index version whose layout cache was never saved (distinct from v9, and never
+    // written to localStorage) — the only continuity available is the in-memory seed from
+    // the still-mounted instance's own layout, not the (empty) cache.
+    const v2: GraphPayload = {
+      index_version: "v11",
+      nodes: [...payload.nodes, { path: "src/d.ts", symbols: 1, lang: null }],
+      edges: payload.edges,
+    };
+    expect(localStorage.getItem("singularrag.layout.v11")).toBeNull();
+    rerender(<MapView {...p} payload={v2} />);
+    await act(async () => {});
+    expect(Fake.instances).toHaveLength(2);
+    const s2 = Fake.instances[1];
+    for (const n of ["src/a.ts", "src/b.ts", "src/c.ts"]) {
+      const a = s2.graph.getNodeAttributes(n);
+      expect({ x: a.x, y: a.y }).toEqual(v1Positions[n]);
+    }
+    const d = s2.graph.getNodeAttributes("src/d.ts");
+    expect(Number.isFinite(d.x)).toBe(true);
+    expect(Number.isFinite(d.y)).toBe(true);
+  });
+
   test("the hull canvas is sized for devicePixelRatio and scaled back down with a transform", async () => {
     const originalDpr = window.devicePixelRatio;
     (window as any).devicePixelRatio = 2;
