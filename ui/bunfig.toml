@@ -2,4 +2,4 @@
 plugins = ["bun-plugin-tailwind"]
 
 [test]
-preload = ["./happydom.ts"]
+preload = ["./happydom.ts", "./sigma-mock.ts"]

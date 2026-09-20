@@ -1,4 +1,5 @@
 import type { ItemStatus } from "./status";
+import type { FileRow } from "./join";
 
 export type Palette = { served: string; cut: string; untouched: string; focus: string; edge: string; edgeDim: string; label: string; background: string };
 export type NodeCtx = { status: ItemStatus | null; focused: boolean; blastDepth: number | null; blastActive: boolean; symbols: number; hovered: boolean; zoomRatio: number };
@@ -38,6 +39,13 @@ export function edgeStyle(ctx: EdgeCtx, pal: Palette): { color: string; size: nu
   if (ctx.blastActive) return { color: ctx.touchesBlast ? pal.edge : pal.edgeDim, size: ctx.touchesBlast ? 1.5 : 0.5, hidden: !ctx.touchesBlast };
   return ctx.touchesFocused ? { color: pal.edge, size: 1.5, hidden: false } : { color: pal.edgeDim, size: 0.5, hidden: false };
 }
+
+export function fileStatusOf(row: FileRow, hasRetrieval: boolean): ItemStatus | null {
+  if (!hasRetrieval) return null;
+  return row.served > 0 ? "served" : row.cut > 0 ? "cut" : "untouched";
+}
+
+export const satelliteKey = (path: string, name: string, line: number) => `sym:${path}::${name}::${line}`;
 
 export function readPalette(el: HTMLElement): Palette {
   const cs = getComputedStyle(el);
