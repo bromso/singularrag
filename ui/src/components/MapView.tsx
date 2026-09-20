@@ -31,6 +31,13 @@ export function MapView(props: MapViewProps) {
   const graphRef = useRef<Graph | null>(null);
   const lastPositions = useRef<Positions | null>(null);
   const hovered = useRef<string | null>(null);
+  // The real Sigma constructor renders synchronously — it calls `nodeReducer`/`edgeReducer`
+  // for every item in the graph before `new Sigma(...)` returns — so a reducer must never
+  // reach back into the `sigma` closure variable while construction is still in flight (it
+  // is in its temporal dead zone and throws). The camera zoom ratio is the only thing the
+  // reducers read off `sigma` itself, so it is mirrored into this ref instead: seeded right
+  // after construction, then kept current from the camera's own "updated" event.
+  const ratioRef = useRef(1);
   const [palette, setPalette] = useState<Palette | null>(null);
   const latest = useLatest(props);
 
@@ -69,7 +76,7 @@ export function MapView(props: MapViewProps) {
       nodeReducer: (node, data) => {
         const p = latest.current;
         const d = latestDerived.current;
-        const ratio = sigma.getCamera().getState().ratio;
+        const ratio = ratioRef.current;
         const sat = data.symbolOf as string | undefined;
         if (sat) {
           const s = nodeStyle(data.symbolName as string, { status: (data.symbolStatus as never) ?? null, focused: p.focusedPath === sat && p.focusedSymbol === data.symbolName, blastDepth: null, blastActive: false, symbols: 0, hovered: false, zoomRatio: ratio }, pal);
@@ -95,6 +102,18 @@ export function MapView(props: MapViewProps) {
         const s = edgeStyle({ touchesFocused, blastActive: d.blastDepth !== null, touchesBlast }, pal);
         return { ...data, color: s.color, size: data.satellite ? 0.5 : s.size, hidden: s.hidden && !data.satellite };
       },
+    });
+    // Now that construction has finished (`sigma` is out of its temporal dead zone), seed
+    // the ratio ref from the real camera and keep it current. A refresh is only scheduled
+    // when the ratio crosses the 0.5 labelling threshold used by `nodeStyle`, not on every
+    // pan/zoom tick.
+    const camera = sigma.getCamera();
+    ratioRef.current = camera.getState().ratio;
+    camera.on("updated", (state) => {
+      const wasBelow = ratioRef.current < 0.5;
+      const isBelow = state.ratio < 0.5;
+      ratioRef.current = state.ratio;
+      if (wasBelow !== isBelow) sigma.refresh();
     });
     sigma.on("clickNode", ({ node }) => {
       const a = graph.getNodeAttributes(node);

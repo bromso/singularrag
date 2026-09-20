@@ -10,6 +10,7 @@ import { summaryLabel } from "@/lib/mapSummary";
 import { DetailPanel } from "@/components/DetailPanel";
 import { FreshnessBadge, freshnessText } from "@/components/FreshnessBadge";
 import { LiveRegion } from "@/components/LiveRegion";
+import { MapErrorBoundary } from "@/components/MapErrorBoundary";
 import { MapView } from "@/components/MapView";
 import { RepoTree, type TreeRow } from "@/components/RepoTree";
 import { RetrievalsRail } from "@/components/RetrievalsRail";
@@ -205,10 +206,12 @@ export function App() {
         {view === "tree" ? (
           <RepoTree rows={rows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
         ) : (
-          <MapView payload={graph} rows={rows} hasRetrieval={detail !== null}
-            focusedPath={focused?.path ?? null} focusedSymbol={focused?.kind === "symbol" ? focused.symbol.symbol.name : null}
-            expandedPath={expandedPath} blast={blast} boundaries={map.boundary} ariaLabel={mapLabel}
-            onSelectNode={onSelectNode} onToggleExpand={toggleExpand} onSwitchToTable={switchToTable} onLayoutReady={onLayoutReady} />
+          <MapErrorBoundary onSwitchToTable={switchToTable}>
+            <MapView payload={graph} rows={rows} hasRetrieval={detail !== null}
+              focusedPath={focused?.path ?? null} focusedSymbol={focused?.kind === "symbol" ? focused.symbol.symbol.name : null}
+              expandedPath={expandedPath} blast={blast} boundaries={map.boundary} ariaLabel={mapLabel}
+              onSelectNode={onSelectNode} onToggleExpand={toggleExpand} onSwitchToTable={switchToTable} onLayoutReady={onLayoutReady} />
+          </MapErrorBoundary>
         )}
       </main>
       <DetailPanel row={focused} map={map}
