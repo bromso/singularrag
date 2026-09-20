@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_smoke_stream_parses_to_a_result_with_an_answer() {
+    fn recorded_smoke_stream_used_both_singularrag_tools_without_denials() {
         let p = parse_stream(&fixture("smoke.jsonl"));
         assert_eq!(p.bad_lines, 0);
         let r = p.result.expect("result");
@@ -254,7 +254,8 @@ mod tests {
         assert!(p.model.is_some());
         assert_eq!(p.mcp_servers[0].status, "connected");
         assert_eq!(p.tool_calls.get("mcp__singularrag__repo_map"), Some(&1));
-        assert_eq!(p.permission_denials.len(), 2);
+        assert_eq!(p.tool_calls.get("mcp__singularrag__find_symbol"), Some(&1));
+        assert!(p.permission_denials.is_empty());
     }
 
     #[test]

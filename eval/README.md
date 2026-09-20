@@ -63,4 +63,22 @@ nothing in `src/` references.
 
 Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.
 
-Smoke run: re-recorded after the permission fix; see below.
+Smoke run 2026-09-20 (one question, one repeat, two conditions; the run directory was outside the repo):
+
+# Tier-two run smoke
+
+commit 098e11912ab244c5c33931de007f04dc8e3c2929 · claude 2.1.261 (Claude Code) · singularrag singularrag 0.1.0 · models: claude-opus-5[1m]
+tokens = input + output + cache creation + cache read
+
+| condition | sessions | failed | mean recall | mean tokens | median tokens | mean tool calls | mean wall s | total cost |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| alone | 1 | 0 | 0.50 | 108254 | 108254 | 9.0 | 24.4 | $0.24 |
+| singularrag | 1 | 0 | 0.50 | 63849 | 63849 | 6.0 | 22.1 | $0.22 |
+
+| question | alone | singularrag |
+|---|---:|---:|
+| L1 | 0.50 | 0.50 |
+
+**singularrag earns its place** against alone.
+
+The first smoke attempt ran without `--allowedTools` and both singularrag tool calls were denied by permission, which is why the harness now allows the condition's MCP servers and aborts a condition on any denial.
