@@ -23,6 +23,11 @@ describe("RepoTree", () => {
     await user.keyboard("{ArrowRight}");
     expect(within(grid).getAllByRole("row").length).toBe(3);
     expect(within(grid).getByText("f")).toBeTruthy();
+    // Spec §6/§12 Q1: react-aria-components renders exactly one gridcell per row, so
+    // the keyboard model has no cell-to-cell navigation.
+    for (const row of within(grid).getAllByRole("row")) {
+      expect(within(row).getAllByRole("gridcell").length).toBe(1);
+    }
     await user.keyboard("{ArrowDown}");
     await user.keyboard("{ArrowRight}");
     await user.keyboard("{Enter}");

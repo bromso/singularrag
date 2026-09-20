@@ -10,7 +10,9 @@ Status: v0, engine and MCP server. The map UI (`singularrag serve`) is next.
 cargo install --path crates/singularrag
 ```
 
-Requires a Rust toolchain (1.85+). The binary is self-contained; the index lives in `.singularrag/index.db` inside each repo (add it to `.gitignore`; `map.toml` next to it is meant to be committed).
+The UI is embedded in the binary at compile time, so build it first or the install fails: `cd ui && bun install && bun run build`.
+
+Requires a Rust toolchain (1.85+) and Bun. The binary is self-contained; the index lives in `.singularrag/index.db` inside each repo (add it to `.gitignore`; `map.toml` next to it is meant to be committed).
 
 ## Connect an agent
 

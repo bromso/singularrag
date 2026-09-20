@@ -29,13 +29,15 @@ All under `/api`, JSON, token-guarded (§5). Timestamps are Unix milliseconds.
 | `GET /api/retrievals/{id}` | the retrieval plus `items: [{ rank, symbol_id, path, name, line_start, score, served: bool, reasons: Reasons }]` with `reasons_json` parsed |
 | `GET /api/tree` | `[{ path, lang, skipped_reason, symbols: [{ id, name, kind, line_start, line_end, signature }] }]`, sorted by path; the client joins a selected retrieval's items onto symbol rows by `(path, name, line_start)` |
 | `GET /api/skipped` | `[{ path, reason }]` |
-| `GET /api/map` | the `MapConfig` as JSON |
-| `PUT /api/map` | body: `MapConfig` JSON; validates and writes `.singularrag/map.toml` atomically; returns the saved config |
+| `GET /api/map` | the `MapConfig` as JSON, plus `version` |
+| `PUT /api/map` | body: `MapConfig` JSON, optionally with `expected_version`; validates and writes `.singularrag/map.toml` atomically; returns the saved config with its new `version` |
 | `GET /api/events?token=<hex>` | SSE: `change { max_retrieval_id }`, `freshness { <status snapshot> }` |
 
 `session_label` is derived server-side from the key: `mcp:<client>:…` → the client slug title-cased with `-` → space (`claude-code` → "Claude Code"); `cli-<pid>` → "CLI"; `serve` → "UI"; anything else → the raw key.
 
 **`PUT /api/map` validation.** Every `path` in `pin`, `exclude`, `note`, `boundary.paths` must be repo-relative: not absolute, no `..` segment, no leading `./`, forward slashes. `deny.extra_patterns` may only be a superset of the current file's extras (the built-ins are never in the file). Invalid → 422 with the offending field. Valid → serialise with `toml::to_string_pretty`, prepend the header comment `# Managed by singularrag serve. Hand edits are kept; comments are not.`, write to `map.toml.tmp` in the same directory, `rename` over `map.toml`. The Engine in the actor reloads the config on its next refresh (plan 1's mtime check).
+
+**Compare-and-swap** (amended 2026-09-20). `version` is `map.toml`'s mtime in milliseconds, 0 when the file does not exist. When a `PUT` carries `expected_version` and it differs from the file's current version, the write is refused with 409 `{ error, field: "expected_version", current: <config + version> }` and nothing is written; the client reloads from `current` and the user redoes the edit. Without `expected_version` the write proceeds unconditionally. The watcher therefore does not filter `.singularrag/map.toml` (it still filters everything else under `.singularrag/`), so a hand edit refreshes and the page refetches.
 
 ## 4. UI
 
@@ -71,7 +73,7 @@ All under `/api`, JSON, token-guarded (§5). Timestamps are Unix milliseconds.
 
 ## 6. Accessibility (parent §11, WCAG 2.2 AA)
 
-- The treegrid is the canonical view. It uses react-aria-components' tree primitives with the APG treegrid keyboard model: Up/Down move between rows; Right on a collapsed row expands it, Right on an expanded row moves to its first cell, Right on a cell moves to the next cell; Left mirrors that (collapse, or move back a cell, or return to the row); Enter activates the focused row or cell; Home/End jump to the first/last row; Ctrl+Home/End to the first/last cell. Type-ahead is the filter box. Every row action (pin, exclude, note) is reachable from the keyboard through a row action button that opens the panel actions.
+- The treegrid is the canonical view. It uses react-aria-components' tree primitives. Keyboard model (amended 2026-09-20; see §12 Q1): Up/Down move between rows; Right on a collapsed row expands it; Right on an expanded row moves focus into the row's controls (chevron, then the row action button); Left mirrors (back to the row, then collapse); Enter activates the focused row or control; Home/End jump to the first/last row. Rows are single-cell (react-aria-components renders one gridcell per row), so there is no cell-to-cell navigation. Type-ahead is the filter box. Every row action (pin, exclude, note) is reachable from the keyboard through a row action button that opens the panel actions.
 - A polite `aria-live` region announces each new retrieval ("New retrieval from Claude Code: repo_map, 42 served, 25 cut, fresh") and each freshness change.
 - Status never by colour alone (§4). Contrast ≥ 4.5:1 in both themes. Focus always visible; no keyboard traps; interactive targets ≥ 24 px.
 - Nothing animates in 3a and the badge does not pulse, so reduced motion is honoured by default.
@@ -108,7 +110,7 @@ The Sigma.js map and boundaries (3b); Playwright; multi-repo; remote access, HTT
 
 ## 12. Open questions
 
-1. Which react-aria-components export supplies the treegrid role in the current release (`Tree` with row cells vs a `TreeGrid` primitive); the plan verifies against the installed version.
+1. ~~Which react-aria-components export supplies the treegrid role in the current release (`Tree` with row cells vs a `TreeGrid` primitive); the plan verifies against the installed version.~~ **Answered 2026-09-20:** `Tree`/`TreeItem`/`TreeItemContent` (react-aria-components 1.21). `Tree` renders `role="treegrid"`; there is no `TreeGrid` primitive, and each `TreeItem` renders exactly one `role="gridcell"`, so rows are single-cell. §6's keyboard paragraph was amended to the model that follows from that.
 2. Whether to adopt `toml_edit` in 3b so comments survive.
 3. Whether `/api/tree` needs pagination on repos far larger than hono (2k symbols, a few hundred KB today).
 4. Whether the MCP process's drain budget should be reduced while `serve` is running, to shorten the watcher's `lock_timeout` stretches (plan-2 handoff).
