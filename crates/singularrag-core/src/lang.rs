@@ -99,10 +99,49 @@ thread_local! {
     static CONTEXT: RefCell<TagsContext> = RefCell::new(TagsContext::new());
 }
 
+/// True when `hay[i..]` opens a Rust *char literal* at byte `i` (`hay.as_bytes()[i]` must
+/// be `'`): either `'` + one character that is not `'`/`\` + closing `'`, or `'` + a
+/// backslash escape (`\n`, `\'`, `\"`, `\\`, `\0`, `\r`, `\t`, `\xNN`, `\u{...}`) + closing
+/// `'`. A lifetime (`'a`, `'static`, ...) has no closing `'` nearby and returns false.
+fn is_char_literal_at(hay: &str, i: usize) -> bool {
+    let mut chars = hay[i..].chars();
+    debug_assert_eq!(chars.next(), Some('\''));
+    match chars.next() {
+        Some('\\') => match chars.next() {
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                hex.len() == 2
+                    && hex.chars().all(|c| c.is_ascii_hexdigit())
+                    && chars.next() == Some('\'')
+            }
+            Some('u') => {
+                if chars.next() != Some('{') {
+                    return false;
+                }
+                let mut saw_digit = false;
+                loop {
+                    match chars.next() {
+                        Some(c) if c.is_ascii_hexdigit() => saw_digit = true,
+                        Some('}') if saw_digit => break,
+                        _ => return false,
+                    }
+                }
+                chars.next() == Some('\'')
+            }
+            Some(_) => chars.next() == Some('\''),
+            None => false,
+        },
+        Some(c) if c != '\'' => chars.next() == Some('\''),
+        _ => false,
+    }
+}
+
 /// Byte offset inside `hay` where the signature stops: the first body opener, comment
 /// opener or string literal that is not nested inside `(...)`/`[...]`. `=>` is kept
 /// (it is part of an arrow signature); `{`, `//`, `/*`, quotes and — for Rust — `;`
-/// and `where` are dropped along with everything after them.
+/// and `where` are dropped along with everything after them. For Rust, a `'` only cuts
+/// when it opens a char literal (`'x'`, `'\n'`, ...); a lifetime (`'a`, `'static`) is
+/// skipped instead, so `<'a>`, `&'a str` and `Cow<'static, str>` survive intact.
 fn signature_cut(hay: &str, lang: Language) -> Option<usize> {
     let b = hay.as_bytes();
     let rust = matches!(lang, Language::Rust);
@@ -112,6 +151,11 @@ fn signature_cut(hay: &str, lang: Language) -> Option<usize> {
             b'(' | b'[' => depth += 1,
             b')' | b']' => depth -= 1,
             b'/' if i + 1 < b.len() && (b[i + 1] == b'/' || b[i + 1] == b'*') => return Some(i),
+            b'\'' if rust => {
+                if is_char_literal_at(hay, i) {
+                    return Some(i);
+                }
+            }
             b'\'' | b'"' | b'`' => return Some(i),
             b'{' if depth <= 0 => return Some(i),
             b'=' if !rust && depth <= 0 && b.get(i + 1) == Some(&b'>') => return Some(i + 2),
@@ -370,6 +414,52 @@ export const Badge = (props: { n: number }) => <span>{props.n}</span>;
         let refs = names(&tags, false);
         assert!(refs.iter().any(|(n, _)| n == "helper"));
         assert!(refs.iter().any(|(n, _)| n == "len"));
+    }
+
+    #[test]
+    fn rust_lifetimes_do_not_truncate_signatures() {
+        let src = "pub fn borrow_name<'a>(input: &'a str) -> &'a str { input }\npub fn cowify(x: &str) -> std::borrow::Cow<'static, str> { x.into() }\n";
+        let tags = extract_tags(Language::Rust, src).unwrap();
+        let sig = |n: &str| {
+            tags.iter()
+                .find(|t| t.name == n && t.is_definition)
+                .unwrap_or_else(|| panic!("no definition {n} in {tags:?}"))
+                .signature
+                .clone()
+        };
+        assert_eq!(
+            sig("borrow_name"),
+            "pub fn borrow_name<'a>(input: &'a str) -> &'a str"
+        );
+        assert_eq!(
+            sig("cowify"),
+            "pub fn cowify(x: &str) -> std::borrow::Cow<'static, str>"
+        );
+    }
+
+    #[test]
+    fn rust_char_literals_still_cut() {
+        // `const` items are not captured as definitions by the bundled Rust
+        // `tags.scm` (only functions/methods/types/traits/modules/macros are), so —
+        // as with the trait-method `;` case above — the char-literal cut rule is
+        // checked directly against `signature_cut` rather than through a `const` tag.
+        assert_eq!(signature_cut(": char = 'x';", Language::Rust), Some(9));
+        assert_eq!(signature_cut(": char = '\\n';", Language::Rust), Some(9));
+        assert_eq!(signature_cut(r"'\''", Language::Rust), Some(0));
+
+        // `f`'s body opener `{` still cuts before the literal is even reached.
+        let src = "pub fn f(c: char) -> bool { c == '\\n' }\n";
+        let tags = extract_tags(Language::Rust, src).unwrap();
+        let f = tags
+            .iter()
+            .find(|t| t.name == "f" && t.is_definition)
+            .unwrap_or_else(|| panic!("no definition f in {tags:?}"));
+        assert_eq!(f.signature, "pub fn f(c: char) -> bool");
+    }
+
+    #[test]
+    fn typescript_quote_cut_is_unaffected() {
+        assert_eq!(signature_cut("= 'hi';", Language::TypeScript), Some(2));
     }
 
     #[test]
