@@ -229,4 +229,16 @@ mod tests {
         assert!(p.result.is_none());
         assert_eq!(p.lines, 0);
     }
+
+    #[test]
+    fn recorded_smoke_stream_parses_to_a_result_with_an_answer() {
+        let p = parse_stream(&fixture("smoke.jsonl"));
+        assert_eq!(p.bad_lines, 0);
+        let r = p.result.expect("result");
+        assert_eq!(r.subtype, "success");
+        assert!(r.structured_output.is_some());
+        assert!(p.model.is_some());
+        assert_eq!(p.mcp_servers[0].status, "connected");
+        assert_eq!(p.tool_calls.get("mcp__singularrag__repo_map"), Some(&1));
+    }
 }
