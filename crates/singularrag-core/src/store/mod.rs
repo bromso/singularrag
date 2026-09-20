@@ -9,6 +9,7 @@ use crate::Result;
 pub use schema::SCHEMA_VERSION;
 
 /// One SQLite connection to a repo's `.singularrag/index.db`.
+#[derive(Debug)]
 pub struct Store {
     conn: Connection,
 }
@@ -29,6 +30,31 @@ impl Store {
 
     pub fn open_in_memory() -> Result<Store> {
         Self::init(Connection::open_in_memory()?)
+    }
+
+    /// A second connection for readers (the UI). Read-only at the SQLite level, no DDL,
+    /// no meta write; the writer side owns schema rebuilds, so a version mismatch is an
+    /// error here rather than a rebuild.
+    pub fn open_read_only(path: &Path) -> Result<Store> {
+        use rusqlite::OpenFlags;
+        if !path.exists() {
+            return Err(crate::Error::Config(format!(
+                "no index at {}; run `singularrag index`",
+                path.display()
+            )));
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.pragma_update(None, "busy_timeout", 1000)?;
+        let found = stored_version(&conn)?.unwrap_or(0);
+        if found != SCHEMA_VERSION {
+            return Err(crate::Error::Config(format!(
+                "index schema is v{found}, this build needs v{SCHEMA_VERSION}; run `singularrag index`"
+            )));
+        }
+        Ok(Store { conn })
     }
 
     fn init(conn: Connection) -> Result<Store> {
@@ -245,5 +271,50 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "missing table {t}");
         }
+    }
+
+    #[test]
+    fn read_only_opens_an_existing_index_and_cannot_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".singularrag/index.db");
+        let writer = Store::open(&path).unwrap();
+        writer.set_meta("git_head", "abc").unwrap();
+        let ro = Store::open_read_only(&path).unwrap();
+        assert_eq!(ro.get_meta("git_head").unwrap().as_deref(), Some("abc"));
+        assert!(ro.data_version().unwrap() >= 0);
+        let err = ro
+            .conn()
+            .execute("INSERT INTO meta(key, value) VALUES ('x', 'y')", [])
+            .unwrap_err();
+        assert!(err.to_string().contains("readonly"), "{err}");
+    }
+
+    #[test]
+    fn read_only_refuses_a_missing_file_and_a_wrong_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let err = Store::open_read_only(&path).unwrap_err();
+        assert!(err.to_string().contains("no index at"), "{err}");
+        let writer = Store::open(&path).unwrap();
+        writer.set_meta("schema_version", "1").unwrap();
+        drop(writer);
+        let err = Store::open_read_only(&path).unwrap_err();
+        assert!(err.to_string().contains("schema is v1"), "{err}");
+    }
+
+    #[test]
+    fn read_only_sees_commits_from_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let writer = Store::open(&path).unwrap();
+        let ro = Store::open_read_only(&path).unwrap();
+        let v1 = ro.data_version().unwrap();
+        writer.set_meta("k", "v").unwrap();
+        let v2 = ro.data_version().unwrap();
+        assert_ne!(
+            v1, v2,
+            "data_version must change when another connection commits"
+        );
+        assert_eq!(ro.get_meta("k").unwrap().as_deref(), Some("v"));
     }
 }
