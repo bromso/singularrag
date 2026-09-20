@@ -5,7 +5,7 @@ export class ApiError extends Error {
 }
 
 export function tokenFromFragment(): string {
-  const m = /(?:^#|&)token=([0-9a-f]+)/.exec(window.location.hash);
+  const m = /(?:^#|&)token=([0-9a-fA-F]+)/i.exec(window.location.hash);
   return m?.[1] ?? "";
 }
 
