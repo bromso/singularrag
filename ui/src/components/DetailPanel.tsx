@@ -44,7 +44,10 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLo
           so a screen-reader user lands on what they just opened (I10). */}
       <h2 id="detail-heading" tabIndex={-1} className="font-mono text-sm font-semibold">{symbol ? `${row.path} :: ${symbol}` : row.path}</h2>
       {item ? (
-        <ul className="list-disc pl-5 text-sm">{reasonsToSentences(item.reasons, item.rank, item.score).map((s) => <li key={s}>{s}</li>)}</ul>
+        <>
+          <ul className="list-disc pl-5 text-sm">{reasonsToSentences(item.reasons, item.rank, item.score).map((s) => <li key={s}>{s}</li>)}</ul>
+          {row.kind === "symbol" && row.symbol.moved && <p className="text-sm text-muted-foreground">Moved since this retrieval (was line {item.line_start})</p>}
+        </>
       ) : (
         <p className="text-sm text-muted-foreground">{row.kind === "symbol" ? "Not part of the selected retrieval." : `${row.file.served} served · ${row.file.cut} cut`}</p>
       )}

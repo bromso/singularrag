@@ -33,6 +33,10 @@ let changeHandler: ((e: { data: string }) => void) | null = null;
 let graphNodesOverride: { path: string; symbols: number; lang: string | null }[] | null = null;
 // Extra `items` appended to the `/api/retrievals/7` response.
 let extraRetrievalItems: unknown[] = [];
+// The `/api/retrievals/7` response's own item(s), reset in `beforeEach` to the
+// single default item; a test can override it (e.g. to force a tier-3 "moved"
+// join) without disturbing the other tests.
+let detailItems: unknown[] = [];
 
 beforeEach(() => {
   // The Tree/Map choice persists in localStorage (Task 6); clear it so one test's
@@ -48,6 +52,7 @@ beforeEach(() => {
   changeHandler = null;
   graphNodesOverride = null;
   extraRetrievalItems = [];
+  detailItems = [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }];
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
@@ -66,7 +71,7 @@ beforeEach(() => {
     }
     if (url.endsWith("/api/graph")) return json({ index_version: "abc123", nodes: graphNodesOverride ?? tree.map((f) => ({ path: f.path, symbols: f.symbols.length, lang: f.lang })), edges: [] });
     if (url.includes("/api/retrievals?")) return json(retrievalList);
-    if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }, ...extraRetrievalItems] });
+    if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [...detailItems, ...extraRetrievalItems] });
     if (url.endsWith("/api/tree")) return json(tree);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
     // GET /api/map returns a fresh object (new identity) each call, reflecting
@@ -113,6 +118,18 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: /Skipped files/ }));
     expect(await screen.findByText(".env")).toBeTruthy();
     expect(screen.getByText("denylisted")).toBeTruthy();
+  });
+  test("a symbol served at a line the tree no longer has it at shows as moved in the panel", async () => {
+    const user = userEvent.setup();
+    detailItems = [{ rank: 1, symbol_id: 999, path: "src/auth/session.ts", name: "createSession", line_start: 9, score: 0.1, served: true, reasons: r }];
+    render(<App />);
+    const rail = await screen.findByRole("region", { name: "Retrievals" });
+    await user.click(within(rail).getByRole("button", { name: /repo_map.*session/ }));
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await waitFor(() => expect(within(grid).getByText("createSession")).toBeTruthy());
+    await user.click(within(grid).getByText("createSession"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    expect(await within(panel).findByText("Moved since this retrieval (was line 9)")).toBeTruthy();
   });
   test("announces a summary at load and only new retrievals after it", async () => {
     render(<App />);
