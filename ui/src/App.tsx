@@ -43,7 +43,7 @@ export function App() {
   const [view, setView] = useState<View>(loadView);
   const changeView = (v: View) => { setView(v); saveView(v); };
   const [graph, setGraph] = useState<GraphPayload | null>(null);
-  const graphRef = useRef<string | null>(null);
+  const indexRef = useRef<string | null>(null);
   const announcedLayouts = useRef(new Set<string>());
   const onLayoutReady = useCallback((v: string) => {
     if (!announcedLayouts.current.has(v)) { announcedLayouts.current.add(v); announce("Map layout ready"); }
@@ -69,12 +69,13 @@ export function App() {
     // announces one summary instead of reading out up to ten past retrievals (I5).
     let knownMax: number | null = null;
     const load = async () => {
-      const [s, rs, t, sk, m] = await Promise.all([api.status(), api.retrievals(), api.tree(), api.skipped(), api.map()]);
-      setStatus(s); setRetrievals(rs); setTree(t); setSkipped(sk); applyMapDoc(m);
-      if (!graphRef.current || graphRef.current !== s.index_version) {
-        const g = await api.graph();
-        graphRef.current = g.index_version;
-        setGraph(g);
+      const [s, rs, sk, m] = await Promise.all([api.status(), api.retrievals(), api.skipped(), api.map()]);
+      setStatus(s); setRetrievals(rs); setSkipped(sk); applyMapDoc(m);
+      // The tree and the graph are functions of the index: refetch them only when it changed.
+      if (indexRef.current !== s.index_version) {
+        const [t, g] = await Promise.all([api.tree(), api.graph()]);
+        indexRef.current = s.index_version;
+        setTree(t); setGraph(g);
       }
       const seen = knownMax;
       if (seen === null) {
@@ -189,7 +190,6 @@ export function App() {
         // set can add or remove files from it, so the map must be refetched to match.
         if (excludeKey(doc.exclude) !== prevExcludeKey) {
           const g = await api.graph();
-          graphRef.current = g.index_version;
           setGraph(g);
         }
       } catch (e: unknown) {

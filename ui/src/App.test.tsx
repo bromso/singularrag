@@ -37,6 +37,11 @@ let extraRetrievalItems: unknown[] = [];
 // single default item; a test can override it (e.g. to force a tier-3 "moved"
 // join) without disturbing the other tests.
 let detailItems: unknown[] = [];
+// What `GET /api/status` answers as `index_version`; a test can change this before
+// firing a change event to simulate the index having moved on.
+let statusVersion = "abc123";
+// Counts fetch calls whose URL contains `frag`.
+const calls = (frag: string) => (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).includes(frag)).length;
 
 beforeEach(() => {
   // The Tree/Map choice persists in localStorage (Task 6); clear it so one test's
@@ -53,6 +58,7 @@ beforeEach(() => {
   graphNodesOverride = null;
   extraRetrievalItems = [];
   detailItems = [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }];
+  statusVersion = "abc123";
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
@@ -64,7 +70,7 @@ beforeEach(() => {
     const url = String(input);
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
     if (init?.headers && (init.headers as Record<string, string>).Authorization !== "Bearer deadbeef") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
-    if (url.endsWith("/api/status")) return json(status);
+    if (url.endsWith("/api/status")) return json({ ...status, index_version: statusVersion });
     if (url.includes("/api/blast?")) {
       if (blastGate) await blastGate;
       return json({ root: { path: "src/auth/session.ts", symbol: "createSession" }, files: [{ path: "src/http/middleware.ts", depth: 1, via: "createSession" }], truncated: null });
@@ -322,6 +328,26 @@ describe("App", () => {
       const graphCallsAfter = (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).endsWith("/api/graph")).length;
       expect(graphCallsAfter).toBeGreaterThan(graphCallsBefore);
     });
+  });
+
+  test("a change event with the same index version refetches retrievals and the map but not the tree or graph", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const tree0 = calls("/api/tree"), graph0 = calls("/api/graph"), rs0 = calls("/api/retrievals?");
+    await act(async () => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
+    await waitFor(() => expect(calls("/api/retrievals?")).toBe(rs0 + 1));
+    expect(calls("/api/tree")).toBe(tree0);
+    expect(calls("/api/graph")).toBe(graph0);
+  });
+
+  test("a change event with a new index version refetches the tree and the graph", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const tree0 = calls("/api/tree"), graph0 = calls("/api/graph");
+    statusVersion = "def456";
+    await act(async () => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
+    await waitFor(() => expect(calls("/api/tree")).toBe(tree0 + 1));
+    expect(calls("/api/graph")).toBe(graph0 + 1);
   });
 
   test("a symbol row can show its blast radius in the panel", async () => {
