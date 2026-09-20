@@ -2,6 +2,8 @@
 //! reads, SSE for liveness, an embedded React app for the page.
 
 pub mod auth;
+pub mod queries;
+pub mod routes;
 pub mod state;
 
 use std::path::PathBuf;
@@ -23,6 +25,12 @@ pub fn router(state: AppState) -> Router {
             "/health",
             get(|| async { Json(serde_json::json!({ "ok": true })) }),
         )
+        .route("/status", get(routes::status))
+        .route("/retrievals", get(routes::retrievals))
+        .route("/retrievals/{id}", get(routes::retrieval))
+        .route("/tree", get(routes::tree))
+        .route("/skipped", get(routes::skipped))
+        .route("/map", get(routes::get_map).put(routes::put_map))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

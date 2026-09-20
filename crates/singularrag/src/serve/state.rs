@@ -48,18 +48,10 @@ pub enum ServerEvent {
 
 #[derive(Clone)]
 pub struct AppState {
-    /// Not yet read by any route (Tasks 5–8 add the routes that serve the repo and the
-    /// embedded assets from it).
-    #[allow(dead_code)]
     pub root: PathBuf,
     pub port: u16,
     pub token: Arc<str>,
-    /// Not yet read by any route (Task 5+ adds the `/api` routes that query it).
-    #[allow(dead_code)]
     pub read: Arc<Mutex<Store>>,
-    /// Not yet read or written by any route or task (the watcher in a later task writes
-    /// it, the SSE/freshness routes read it).
-    #[allow(dead_code)]
     pub freshness: Arc<RwLock<Freshness>>,
     /// Not yet sent to or subscribed to (the watcher sends, the SSE route subscribes).
     #[allow(dead_code)]
