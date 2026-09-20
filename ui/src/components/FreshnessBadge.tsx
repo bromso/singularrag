@@ -1,0 +1,23 @@
+import type { Status } from "@/api/types";
+
+export function freshnessText(s: Status | null): string {
+  if (!s) return "loading";
+  if (s.foreign_indexing) return "another process indexing";
+  if (s.drain.last.remaining > 0 && !s.lock_timeout && s.stale_count > 0) return `indexing, ${s.stale_count} stale`;
+  if (s.stale_count > 0) return `${s.stale_count} stale`;
+  return "fresh";
+}
+function age(ms: number | null): string {
+  if (!ms) return "";
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+}
+export function FreshnessBadge({ status }: { status: Status | null }) {
+  return (
+    <span role="status" aria-label="Index freshness" className="rounded border px-2 py-1 text-sm">
+      <span className="font-medium">{freshnessText(status)}</span>
+      {status?.git_head && <span className="ml-2 font-mono text-xs">{status.git_head.slice(0, 7)}</span>}
+      <span className="ml-2 text-xs text-muted-foreground">{age(status?.indexed_at_ms ?? null)}</span>
+    </span>
+  );
+}
