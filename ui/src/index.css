@@ -1,6 +1,10 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:is(.dark *));
+/* The palette below switches on the media query and there is no theme toggle (spec §4),
+   so the `dark:` variant must follow the same signal. With shadcn's default
+   `&:is(.dark *)` — and nothing ever setting `.dark` — every `dark:` utility was inert
+   and the status colours fell under 4.5:1 in dark mode (I3). */
+@custom-variant dark (@media (prefers-color-scheme: dark));
 
 :root {
   --background: oklch(1 0 0);

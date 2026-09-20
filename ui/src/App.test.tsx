@@ -201,10 +201,14 @@ describe("App", () => {
     expect(saved.pin).toEqual([{ path: "src/util/log.ts" }]);
     expect(saved.exclude).toEqual([{ path: "src/auth/session.ts" }]);
   });
-  test("the skipped sheet has no animation classes (spec §6: nothing animates in 3a)", async () => {
+  test("the skipped sheet and the note field have no animation classes (spec §6: nothing animates in 3a)", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByRole("treegrid", { name: "Repository" });
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await user.click(within(grid).getByText("src/auth/session.ts"));
+    const note = screen.getByLabelText("Note");
+    expect(note.className).not.toContain("transition-");
+    expect(note.className).not.toContain("duration-");
     await user.click(screen.getByRole("button", { name: /Skipped files/ }));
     await screen.findByText(".env");
     const content = document.querySelector('[data-slot="sheet-content"]');
