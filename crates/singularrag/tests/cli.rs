@@ -141,3 +141,17 @@ fn mcp_exits_cleanly_when_stdin_closes() {
         .assert()
         .success();
 }
+
+#[test]
+fn readme_mcp_json_snippet_is_valid_and_points_at_the_mcp_subcommand() {
+    let readme =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
+    let start = readme.find("```json").expect("json snippet") + "```json".len();
+    let end = readme[start..].find("```").unwrap() + start;
+    let v: serde_json::Value = serde_json::from_str(readme[start..end].trim()).unwrap();
+    assert_eq!(v["mcpServers"]["singularrag"]["command"], "singularrag");
+    assert_eq!(
+        v["mcpServers"]["singularrag"]["args"],
+        serde_json::json!(["mcp"])
+    );
+}
