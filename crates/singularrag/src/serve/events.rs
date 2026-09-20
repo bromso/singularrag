@@ -35,27 +35,25 @@ pub async fn sse(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Eve
 
 pub fn spawn_poller(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_max: Option<i64> = None;
-        let db_path = state.root.join(singularrag_core::engine::DB_FILE);
+        let mut last: Option<i64> = None;
         loop {
             tokio::time::sleep(POLL_EVERY).await;
-            // Open a fresh read-only connection to guarantee visibility of commits from other
-            // connections. Track max_retrieval_id to detect changes, as it reliably reflects
-            // committed data in this WAL configuration.
-            let Ok(fresh_store) = singularrag_core::store::Store::open_read_only(&db_path) else {
-                continue;
-            };
-            let Ok(max) = queries::max_retrieval_id(&fresh_store) else {
-                continue;
-            };
-            if let Some(last) = last_max {
-                if max != last {
-                    let _ = state.events.send(ServerEvent::Change {
-                        max_retrieval_id: max,
-                    });
+            let snapshot = {
+                let Ok(store) = state.read.lock() else {
+                    continue;
+                };
+                match (store.data_version(), queries::max_retrieval_id(&store)) {
+                    (Ok(v), Ok(max)) => Some((v, max)),
+                    _ => None,
                 }
+            };
+            let Some((v, max)) = snapshot else { continue };
+            if last.is_some_and(|l| l != v) {
+                let _ = state.events.send(ServerEvent::Change {
+                    max_retrieval_id: max,
+                });
             }
-            last_max = Some(max);
+            last = Some(v);
         }
     })
 }
@@ -98,12 +96,56 @@ mod tests {
         })
         .await
         .unwrap();
+        // repo_map runs a refresh before recording the retrieval, so the first commit is an index
+        // write, and the retrieval row arrives in a later commit. Loop until we get the event
+        // with max_retrieval_id=1.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                panic!("timeout waiting for max_retrieval_id=1");
+            }
+            let ev = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("event within 3 s")
+                .unwrap();
+            match ev {
+                ServerEvent::Change { max_retrieval_id } => {
+                    if max_retrieval_id == 1 {
+                        break;
+                    }
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn poller_broadcasts_change_for_a_write_that_adds_no_retrieval() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        singularrag_core::store::Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1).unwrap();
+        let mut rx = state.events.subscribe();
+        let _poller = spawn_poller(state.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let db_path = dir.path().join(".singularrag/index.db");
+        tokio::task::spawn_blocking(move || {
+            let store = singularrag_core::store::Store::open(&db_path).unwrap();
+            store.set_meta("git_head", "deadbeef").unwrap();
+        })
+        .await
+        .unwrap();
         let ev = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
             .await
             .expect("event within 3 s")
             .unwrap();
         match ev {
-            ServerEvent::Change { max_retrieval_id } => assert_eq!(max_retrieval_id, 1),
+            ServerEvent::Change {
+                max_retrieval_id: _,
+            } => {
+                // Event received; max_retrieval_id value doesn't matter for this test
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
