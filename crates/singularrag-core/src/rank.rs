@@ -303,9 +303,10 @@ pub fn rank_symbols(
                 score += fr / *fts_in_file.get(&fi).unwrap_or(&1) as f64;
             }
             let path = &g.nodes[fi].path;
-            let note_hit =
-                note_symbols.contains(&(path.clone(), s.name.clone())) || note_files.contains(path);
-            if note_symbols.contains(&(path.clone(), s.name.clone())) {
+            let has_symbol_note = !note_symbols.is_empty()
+                && note_symbols.contains(&(path.clone(), s.name.clone()));
+            let note_hit = note_files.contains(path);
+            if has_symbol_note {
                 score += fr;
             }
             let mut referenced_by: Vec<RefBy> = ref_by
