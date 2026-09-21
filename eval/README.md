@@ -145,3 +145,23 @@ What the records said on a second look, and what the next run tests:
 - The grader was strict. 15 to 21% of answers were `Class.method`, `Node/search` or `#name`; scored as declared names, alone is 0.485, singularrag 0.564, serena 0.461. Same order, slightly wider gap. The grader now reduces qualified names (the committed summary above is the strict one).
 
 So the second run changes what the agent is told, not how much: file headers name who references the file, test and benchmark rows are gone, and the tool description says to answer from the map and read only to confirm. The rerun is `alone` and `singularrag` only, same config and model; Serena's numbers stand.
+
+### Round 2 run 2026-09-21 (12 questions × alone/singularrag × 3 repeats = 72 sessions)
+
+Summary: `runs/20260921T083419Z-round2/summary.md`. Same model, Claude Code and commit as run 1; singularrag at main 5339a26 (header references, tests never served, answer-from-the-map description, declared-name grader). Both runs are graded with the new grader from here on; run 1's re-scored means are alone 0.485, singularrag 0.564.
+
+| condition | sessions | failed | mean recall | mean tokens | mean tool calls | total cost |
+|---|---:|---:|---:|---:|---:|---:|
+| alone | 36 | 0 | 0.52 | 87134 | 10.7 | $8.12 |
+| singularrag | 36 | 0 | 0.60 | 92695 | 8.6 | $8.79 |
+
+**Verdict: singularrag does not earn its place**, closer than run 1: tokens +6.4% (was +19.6%), tool calls −19.8% (was −8.3%), against −25% needed on either. Recall is up on both sides, mostly the grader, and the gap is unchanged at 0.08 (run 1 re-scored 0.485 → 0.564, here 0.52 → 0.60); singularrag beats or ties alone on 10 of 12 questions again, the two losses being B2 and P3 by one symbol each.
+
+What changed in the sessions, run 1 → round 2, singularrag condition:
+
+- **The agent reads less.** Reads 155 → 124 (alone: 154 → 154), Grep 111 → 104, Glob 7 → 8, turns 11.6 → 10.7. By category, reads per session on locate went 3.7 → 2.1 and on blast 4.7 → 3.2; trace and placement are flat. Locate sessions now take 6.6 tool calls against alone's 8.6.
+- **The map got bigger.** The description's "up to 8192 for trace and blast-radius questions" was taken up: budgets chosen were 2048 ×10, 3000 ×8, 3072 ×2, 4096 ×14, 6000 and 6144 once each (run 1 topped out at 4096). Mean map result 13.5k characters (run 1: 12.2k), max 24.7k. Still exactly one map call per session.
+- **The token gap moved from cache reads to the map itself.** Cache-read input per session is 75.9k against alone's 72.5k (run 1: 84.3k against 70.5k); cache-creation is 14.3k against 11.9k. Fewer turns re-read a larger context; the two nearly cancel.
+- **The map still holds more than the agent keeps.** Per session the map served 0.83 of the gold (run 1: 0.76); the agent's answer kept 0.60; 44 of 126 served gold symbols were dropped, the same count as run 1. B1 is still gold granularity (six `match` methods against the router classes both conditions answer with).
+
+Where the rule stands: the tool-call axis needs 8.0 per session and sits at 8.6, one call every other session. The token axis needs 65.4k and sits at 92.7k; with cached input at parity, that requires roughly three fewer turns per session, which means answering locate and trace questions from the map with no confirming read at all.
