@@ -56,17 +56,24 @@ name = "singularrag"
 "#,
     )
     .unwrap();
-    let rec = |cond: &str, recall: f64, tokens: u64| {
+    // The verdict is paired over question × repeat and needs at least two pairs.
+    let rec = |cond: &str, repeat: u32, recall: f64, tokens: u64, calls: u64| {
         format!(
-            r#"{{"question":"L1","condition":"{cond}","repeat":1,"model":"m","recall":{recall},"precision":1.0,"hit":[],"miss":[],"answer":[],"tool_calls":{{"Grep":2}},"tokens":{{"input":{tokens},"output":0,"cache_creation":0,"cache_read":0}},"cost_usd":0.1,"turns":2,"duration_ms":1000,"failed":false,"reason":null}}"#
+            r#"{{"question":"L1","condition":"{cond}","repeat":{repeat},"model":"m","recall":{recall},"precision":1.0,"hit":[],"miss":[],"answer":[],"tool_calls":{{"Grep":{calls}}},"tokens":{{"input":{tokens},"output":0,"cache_creation":0,"cache_read":0}},"cost_usd":0.1,"turns":2,"duration_ms":1000,"failed":false,"reason":null}}"#
         )
     };
-    std::fs::write(run.join("alone/L1-1.json"), rec("alone", 0.5, 1000)).unwrap();
-    std::fs::write(
-        run.join("singularrag/L1-1.json"),
-        rec("singularrag", 0.5, 500),
-    )
-    .unwrap();
+    for i in 1..=2 {
+        std::fs::write(
+            run.join(format!("alone/L1-{i}.json")),
+            rec("alone", i, 0.5, 1000, 4),
+        )
+        .unwrap();
+        std::fs::write(
+            run.join(format!("singularrag/L1-{i}.json")),
+            rec("singularrag", i, 1.0, 1000, 2),
+        )
+        .unwrap();
+    }
     Command::cargo_bin("singularrag-bench")
         .unwrap()
         .args(["score", run.to_str().unwrap()])

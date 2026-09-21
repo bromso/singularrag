@@ -131,7 +131,7 @@ The record: `question`, `condition`, `repeat`, `model`, `recall`, `precision`, `
 1. Header: run directory, commit, claude version, singularrag version, the models seen, and the sentence "tokens = input + output + cache creation + cache read".
 2. One row per condition: sessions, failed, mean recall, mean and median tokens, mean tool calls, mean wall seconds, total cost.
 3. One row per question and condition with mean recall over repeats, so a regression on one question is visible.
-4. For each non-baseline condition, the §12 verdict. Correctness holds when the condition's mean recall is at least the baseline's minus 0.02. Efficiency holds when the condition's mean tokens or mean tool calls is at least 25% below the baseline's. Both hold: "earns its place". Otherwise the line names the failed test and the margin.
+4. For each non-baseline condition, the §12 verdict, paired over question × repeat (a session missing on either side drops the pair; fewer than two pairs is "no verdict"). Correctness holds when the 95% interval of the recall difference lies above 0. Efficiency holds when the interval of the tool-call difference lies below 0 and the mean token difference is at most 10% of the baseline's mean. Both hold: "earns its place". Otherwise the line names the failed test and its interval; the three measurements are printed under the verdict either way. *Amended 2026-09-21: was mean recall at least the baseline's minus 0.02 and tokens or tool calls 25% below; see the v0 spec §12 for why.*
 
 The same text prints to stdout. `singularrag-bench score <run-dir>` rewrites `summary.md` from the records on disk, so a change to the verdict rules never needs a rerun.
 
