@@ -236,8 +236,8 @@ impl Engine {
             req.query.as_deref(),
             &req.focus_files,
         )?;
-        let served = map::fit(&ranked, budget);
-        let body = map::render(&ranked, served);
+        let served = map::fit(&ranked, budget, &self.config.note);
+        let body = map::render(&ranked, served, &self.config.note);
         let cut_recorded = (ranked.len() - served).min(CUT_RECORDED);
         let (version, head) = self.index_meta()?;
 
@@ -325,7 +325,7 @@ impl Engine {
         let text = format!(
             "{}\n{}",
             map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
-            crate::find::render_find(hits)
+            crate::find::render_find(hits, &self.config.note)
         );
         Ok(FindResponse {
             retrieval_id,
