@@ -24,15 +24,50 @@ pub fn render(items: &[ScoredSymbol], n: usize) -> String {
     }
     let mut out = String::new();
     for path in order {
-        out.push_str(path);
-        out.push_str(":\n");
         let mut rows: Vec<&ScoredSymbol> = top.iter().filter(|s| s.path == path).collect();
         rows.sort_by_key(|s| s.line_start);
+        out.push_str(path);
+        out.push(':');
+        out.push_str(&referenced_by(path, &rows));
+        out.push('\n');
         for s in rows {
             out.push_str(&format!("{:>5}  {}\n", s.line_start, s.signature));
         }
     }
     out
+}
+
+/// How many referencing files a group header names before `+N`.
+const REFS_SHOWN: usize = 2;
+
+/// `  ← a.ts, b.ts +2` on a file's header: the other files that reference any served
+/// symbol of this file, strongest first, so a blast or trace question can be answered
+/// from the map and `find_symbol` gives a symbol's own list. The suffix sits on the
+/// header, not the rows: on hono a per-row suffix cost a budget a third of its
+/// symbols, a per-file one costs a few. References from the file itself say nothing
+/// about blast radius and are left out. Empty when nothing else references the file.
+fn referenced_by(path: &str, rows: &[&ScoredSymbol]) -> String {
+    let mut by_file: Vec<(&str, i64)> = Vec::new();
+    for r in rows.iter().flat_map(|s| s.reasons.referenced_by.iter()) {
+        if r.path == path {
+            continue;
+        }
+        match by_file.iter_mut().find(|(p, _)| *p == r.path) {
+            Some(entry) => entry.1 += r.count,
+            None => by_file.push((&r.path, r.count)),
+        }
+    }
+    if by_file.is_empty() {
+        return String::new();
+    }
+    by_file.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let shown: Vec<&str> = by_file.iter().take(REFS_SHOWN).map(|(p, _)| *p).collect();
+    let more = by_file.len().saturating_sub(REFS_SHOWN);
+    if more > 0 {
+        format!("  ← {} +{more}", shown.join(", "))
+    } else {
+        format!("  ← {}", shown.join(", "))
+    }
 }
 
 /// Largest `n` such that `render(items, n)` fits the budget. Binary search, as in Aider.
@@ -113,6 +148,39 @@ mod tests {
         assert_eq!(
             text,
             "src/b.ts:\n    3  export function three()\n   20  export function two()\nsrc/a.ts:\n    5  export function five()\n"
+        );
+    }
+
+    #[test]
+    fn render_names_the_files_that_reference_a_symbol() {
+        use crate::rank::RefBy;
+        let rb = |pairs: &[(&str, i64)]| {
+            pairs
+                .iter()
+                .map(|(p, c)| RefBy {
+                    path: p.to_string(),
+                    count: *c,
+                })
+                .collect::<Vec<_>>()
+        };
+        // src/a.ts: b.ts references it 9 + 1 times across two symbols, d.ts 2, e.ts 1;
+        // its own references and a symbol nobody references add nothing.
+        let mut five = sym("src/a.ts", 5, "export function five()", 0.9);
+        five.reasons.referenced_by = rb(&[("src/d.ts", 2), ("src/b.ts", 1)]);
+        let mut nine = sym("src/a.ts", 9, "export class Nine", 0.8);
+        nine.reasons.referenced_by = rb(&[("src/b.ts", 9), ("src/a.ts", 4), ("src/e.ts", 1)]);
+        let mut only_self = sym("src/a.ts", 12, "export const twelve = 12", 0.7);
+        only_self.reasons.referenced_by = rb(&[("src/a.ts", 2)]);
+        let none = sym("src/z.ts", 1, "export const z = 1", 0.6);
+        let text = render(&[five, nine, only_self, none], 4);
+        assert_eq!(
+            text,
+            "src/a.ts:  ← src/b.ts, src/d.ts +1\n\
+             \x20   5  export function five()\n\
+             \x20   9  export class Nine\n\
+             \x20  12  export const twelve = 12\n\
+             src/z.ts:\n\
+             \x20   1  export const z = 1\n"
         );
     }
 

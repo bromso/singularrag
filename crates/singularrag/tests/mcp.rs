@@ -9,7 +9,7 @@ use singularrag_core::fixture::write_ts_mini;
 use singularrag_core::store::Store;
 use tokio::process::Command;
 
-const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the symbols most relevant to a task. Call this before reading files. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, max 8192. Returns paths, line numbers and signatures only, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
+const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the symbols most relevant to a task, each with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Rows are `line  signature  ← referencing files`, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
 const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module. `limit` defaults to 10, max 50.";
 
 #[derive(Clone)]
@@ -110,7 +110,9 @@ async fn repo_map_and_find_symbol_match_the_cli_and_record_provenance() {
     assert_ne!(map.is_error, Some(true));
     let map_text = text_of(&map);
     assert!(map_text.starts_with("# singularrag · index "), "{map_text}");
-    assert!(map_text.contains("src/auth/session.ts:\n"));
+    assert!(map_text
+        .lines()
+        .any(|l| l.starts_with("src/auth/session.ts:")));
     assert!(!map_text.contains("console.log"));
 
     let find = client

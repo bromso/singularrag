@@ -46,7 +46,7 @@ fn query_prints_header_map_and_footer() {
         .success()
         .stdout(
             predicate::str::starts_with("# singularrag · index ")
-                .and(predicate::str::contains("src/auth/session.ts:\n"))
+                .and(predicate::str::contains("\nsrc/auth/session.ts:"))
                 .and(predicate::str::contains("symbols shown")),
         );
 }

@@ -94,7 +94,7 @@ browser ◀──SSE/JSON──  singularrag serve  ◀── notify watcher ─
 
 1. File-level multigraph: each ref is an edge from referencing file to defining file, labelled by symbol name, weight 1/N for ambiguous names.
 2. Personalised PageRank (power iteration, ~40 lines, no graph crate). Personalisation boosts: files named in `focus_files` or the query; files with FTS5 hits for query terms; pinned files. Excluded files are removed before ranking.
-3. Distribute file rank to defined symbols by incoming edge weight; sort.
+3. Distribute file rank to defined symbols by incoming edge weight; sort. Symbols defined in test, spec and benchmark files (`*.test.*`, `*.spec.*`, and anything under `__tests__`, `__mocks__`, `test`, `tests`, `bench`, `benches`, `benchmarks`) are dropped here: their files stay in the graph as referrers, they are never served or recorded as candidates. *Amended 2026-09-21: on hono they were 43% of a 4096-token map's rows and none was ever an answer; excluding them from the graph as well lowered recall, because tests are the strongest referrers of the public API.*
 4. Greedy fill of `path:` groups with `line  signature` rows; binary search on item count to fit the token budget (approximate tokens = chars / 4; budget is soft and the header says so).
 5. Record reasons per item: `{score, file_rank, seeds: [...], referenced_by: [{path, count}], pinned, fts_hit}`. Rule: a ranking feature that cannot be expressed in this structure does not ship, because the map cannot draw it. *(Amended 2026-09-20: the field first called `pagerank` held the symbol's final score, not the PageRank value, so it is named `score` and the PageRank value it is derived from is `file_rank`.)*
 
@@ -128,7 +128,7 @@ or `· STALE: 4 files changed since index ·` in place of `fresh`.
 - Output:
 ```
 src/auth/session.ts:
-   12  export function createSession(user: User, ttl: number): Session
+   12  export function createSession(user: User, ttl: number): Session  ← src/http/middleware.ts, src/cli/login.ts
    48  export class SessionStore
 src/http/middleware.ts:
    20  export const requireSession: Middleware
@@ -136,6 +136,7 @@ src/http/middleware.ts:
 # 42 of 310 symbols shown · 268 more ranked below budget · 25 recorded · widen with a larger budget or a focus file
 ```
 - Never includes bodies, comments or string literals.
+- A row ends with `← ` and the files that reference the symbol, strongest first, at most three plus `+N` for the rest the ranker kept (it keeps five). The tool description tells the agent to answer locate, trace, blast-radius and placement questions from the map and to read a file only to confirm a detail the map does not show. *Amended 2026-09-21 after the first full tier-two run: the map served 0.76 of the gold but the agent read as many files as without it, and the re-read map was the whole token loss.*
 - *(Amended 2026-09-20: the footer states two different numbers — how many ranked symbols are below the budget line, and how many of those were recorded in `retrieval_items` (at most 25) — because the earlier one-number example read as if they were the same.)*
 
 ### `find_symbol`

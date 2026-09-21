@@ -423,7 +423,17 @@ mod tests {
         );
         assert!(resp.text.contains("· fresh ·"));
         assert!(!resp.lock_timeout);
-        assert!(resp.text.contains("src/auth/session.ts:\n"));
+        // The file header ends with who references the file (the middleware and the
+        // CLI in the fixture), so a blast question can be answered from the map.
+        let header = resp
+            .text
+            .lines()
+            .find(|l| l.starts_with("src/auth/session.ts:"))
+            .expect("session.ts header");
+        assert!(
+            header.contains(":  ← ") && header.contains("src/http/middleware.ts"),
+            "{header}"
+        );
         assert!(resp
             .text
             .contains("export function createSession(user: User, ttl: number): Session\n"));
@@ -569,6 +579,42 @@ mod tests {
             resp.total - resp.served,
             resp.cut_recorded
         )));
+    }
+
+    #[test]
+    fn test_files_reference_but_are_never_served() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        std::fs::write(
+            dir.path().join("src/auth/session.test.ts"),
+            "import { createSession } from './session';\n\
+             export function makeSession() { return createSession({ id: 1 }, 5); }\n\
+             export const fixture = createSession({ id: 2 }, 6);\n",
+        )
+        .unwrap();
+        let mut e = Engine::open(dir.path(), "test").unwrap();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("createSession".into()),
+                focus_files: vec![],
+                budget_tokens: 4096,
+            })
+            .unwrap();
+        assert!(
+            !resp
+                .text
+                .lines()
+                .any(|l| l.starts_with("src/auth/session.test.ts:")),
+            "{}",
+            resp.text
+        );
+        assert!(!resp.text.contains("makeSession"), "{}", resp.text);
+        let header = resp
+            .text
+            .lines()
+            .find(|l| l.starts_with("src/auth/session.ts:"))
+            .expect("session.ts header");
+        assert!(header.contains("src/auth/session.test.ts"), "{header}");
     }
 
     /// `map.toml` used to be read once at `Engine::open`, so a pin or exclude authored

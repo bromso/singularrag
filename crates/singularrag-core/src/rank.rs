@@ -119,6 +119,30 @@ fn fts_symbol_ids(store: &Store, terms: &[String]) -> Result<Vec<i64>> {
     Ok(ids)
 }
 
+/// Directories whose files are tests or benchmarks, whatever the language.
+const SUPPORT_DIRS: [&str; 7] = [
+    "__tests__",
+    "__mocks__",
+    "test",
+    "tests",
+    "bench",
+    "benches",
+    "benchmarks",
+];
+
+/// A test, spec or benchmark file: it ranks as a referrer but is never served as a map
+/// row, and `map.toml`'s `exclude` is still the way to drop a file from the graph.
+pub fn is_support_file(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    if file.contains(".test.") || file.contains(".spec.") {
+        return true;
+    }
+    path.split('/')
+        .rev()
+        .skip(1)
+        .any(|dir| SUPPORT_DIRS.contains(&dir))
+}
+
 pub fn rank_symbols(
     store: &Store,
     config: &MapConfig,
@@ -233,6 +257,10 @@ pub fn rank_symbols(
 
     let mut out: Vec<ScoredSymbol> = symbols
         .into_iter()
+        // Tests and benchmarks keep their edges (on hono they are the strongest referrers
+        // of the public API, and dropping them lowered recall) but are never candidates:
+        // they were 43% of the rows a 4096-token map served, none of them an answer.
+        .filter(|s| !is_support_file(&g.nodes[g.index_of[&s.file_id]].path))
         .map(|s| {
             let fi = g.index_of[&s.file_id];
             let key = (fi, s.name.clone());
@@ -482,6 +510,31 @@ mod tests {
             .position(|s| s.name == "attachSession")
             .unwrap();
         assert!(pos_log < pos_attach);
+    }
+
+    #[test]
+    fn support_files_are_tests_specs_and_benchmarks_in_any_language() {
+        for p in [
+            "src/hono.test.ts",
+            "src/jsx/dom/index.test.tsx",
+            "src/router.spec.js",
+            "src/__tests__/router.ts",
+            "test/helpers.ts",
+            "tests/serve.rs",
+            "benches/rank.rs",
+            "benchmarks/routers/src/tool.mts",
+        ] {
+            assert!(is_support_file(p), "{p}");
+        }
+        for p in [
+            "src/router.ts",
+            "src/testing.ts",
+            "src/contest/index.ts",
+            "src/bench-utils.ts",
+            "crates/singularrag/src/serve/routes.rs",
+        ] {
+            assert!(!is_support_file(p), "{p}");
+        }
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub struct EvalResult {
     pub id: String,
     pub category: String,
     pub recall: f64,
+    /// Approximate size of the served map text, so a budget's recall has its cost beside it.
+    pub tokens: usize,
     pub hit: Vec<String>,
     pub miss: Vec<String>,
 }
@@ -69,6 +71,7 @@ pub fn run(engine: &mut Engine, questions: &[Question], budget: usize) -> Result
             id: q.id.clone(),
             category: q.category.clone(),
             recall,
+            tokens: crate::tokens::approx_tokens(&resp.text),
             hit,
             miss,
         });
@@ -84,13 +87,14 @@ pub fn mean_recall(results: &[EvalResult]) -> f64 {
 }
 
 pub fn render_report(results: &[EvalResult]) -> String {
-    let mut out = String::from("id    category  recall  missed\n");
+    let mut out = String::from("id    category  recall  tokens  missed\n");
     for r in results {
         out.push_str(&format!(
-            "{:<5} {:<9} {:>5.2}  {}\n",
+            "{:<5} {:<9} {:>5.2}  {:>6}  {}\n",
             r.id,
             r.category,
             r.recall,
+            r.tokens,
             r.miss.join(", ")
         ));
     }
@@ -137,7 +141,16 @@ gold = ["src/http/middleware.ts::requireSession", "src/http/middleware.ts::attac
         assert!((results[0].recall - 1.0).abs() < 1e-9, "{:?}", results[0]);
         assert!((results[1].recall - 0.75).abs() < 1e-9, "{:?}", results[1]);
         assert_eq!(results[1].miss, vec!["src/nope.ts::missing"]);
+        assert!(
+            results[0].tokens > 0 && results[0].tokens <= 2048,
+            "{:?}",
+            results[0]
+        );
         let report = render_report(&results);
+        assert!(
+            report.starts_with("id    category  recall  tokens  missed\n"),
+            "{report}"
+        );
         assert!(report.contains("L1"));
         assert!(report.contains("mean recall"));
         assert!((mean_recall(&results) - 0.875).abs() < 1e-9);
