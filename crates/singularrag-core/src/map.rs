@@ -23,7 +23,7 @@ pub fn note_line(n: &Note) -> String {
 }
 
 /// Human note first, then the agent's, for one target.
-fn notes_for<'a>(
+pub fn notes_for<'a>(
     notes: &'a [Note],
     path: &str,
     symbol: Option<&str>,
