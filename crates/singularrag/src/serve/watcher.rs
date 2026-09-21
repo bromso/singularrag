@@ -22,12 +22,7 @@ fn broadcast_status(state: &AppState) {
         .read()
         .map(|g| g.clone())
         .unwrap_or_default();
-    let dto = {
-        let Ok(store) = state.read.lock() else {
-            return;
-        };
-        super::queries::status(&store, &f)
-    };
+    let dto = super::queries::status(&state.store(), &f);
     match dto {
         Ok(dto) => {
             let _ = state.events.send(ServerEvent::Freshness(dto));
@@ -162,6 +157,28 @@ mod tests {
         assert!(!interesting(root, &root.join(".singularrag/index.db-wal")));
         assert!(!interesting(root, &root.join(".singularrag/map.toml.tmp")));
         assert!(!interesting(root, &root.join(".git/HEAD")));
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_store_mutex_still_serves_status_and_freshness() {
+        let (_dir, state, _handle) = setup();
+        let poisoner = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.read.lock().unwrap();
+            panic!("poison the read store on purpose");
+        })
+        .join();
+        assert!(state.read.lock().is_err(), "the mutex should be poisoned");
+        let mut rx = state.events.subscribe();
+        broadcast_status(&state);
+        match rx.try_recv() {
+            Ok(ServerEvent::Freshness(dto)) => assert_eq!(dto.stale_count, 0),
+            other => panic!("expected a freshness event, got {other:?}"),
+        }
+        match crate::serve::routes::status(axum::extract::State(state)).await {
+            Ok(status) => assert_eq!(status.0.stale_count, 0),
+            Err(_) => panic!("status must answer after a poisoned lock"),
+        }
     }
 
     #[tokio::test]

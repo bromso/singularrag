@@ -49,4 +49,11 @@ impl AppState {
             events,
         })
     }
+
+    /// The read store, recovered if a panic elsewhere poisoned the mutex: the SQLite
+    /// connection is still usable, and refusing it would turn every route into a 500
+    /// and freeze the freshness badge until restart.
+    pub fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.read.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
