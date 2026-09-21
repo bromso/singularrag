@@ -82,3 +82,27 @@ tokens = input + output + cache creation + cache read
 **singularrag earns its place** against alone.
 
 The first smoke attempt ran without `--allowedTools` and both singularrag tool calls were denied by permission, which is why the harness now allows the condition's MCP servers and aborts a condition on any denial.
+
+Serena's warm-up (`serena project index`) prompts interactively when the checkout has no `.serena/project.yml`, so a fresh checkout needs a one-time `uvx --from git+https://github.com/oraios/serena serena project create --language typescript <checkout>` first (`create` refuses to run on an existing project, which is why it is not the warm-up).
+
+### Full run 2026-09-21 (12 questions × 3 conditions × 3 repeats = 108 sessions)
+
+Summary: `runs/20260921T065656Z-full/summary.md`. Model `claude-opus-5[1m]`, Claude Code 2.1.261, singularrag 0.1.0 at main 195d5fe.
+
+| condition | sessions | failed | mean recall | mean tokens | mean tool calls | total cost |
+|---|---:|---:|---:|---:|---:|---:|
+| alone | 36 | 0 | 0.46 | 85500 | 10.4 | $8.13 |
+| singularrag | 36 | 0 | 0.53 | 102299 | 9.6 | $9.45 |
+| serena | 36 | 1 | 0.41 | 129488 | 10.0 | $7.72 |
+
+**Verdict: singularrag does not earn its place.** Recall is up (0.53 vs 0.46, and it beats or ties the baseline on 10 of 12 questions), but tokens are up 19.6% and tool calls down only 8.3%; the rule needs 25% down on either. Serena fails on both axes and one Serena session (B1#3) hit the $0.50 budget cap.
+
+Where the tokens went, from the records:
+
+- The agent does not read less with the map. Reads are flat (155 with singularrag, 154 alone); the map replaced Grep (111 vs 176) and Glob (7 vs 45), which are the cheap calls. Trace, blast and placement questions want bodies, and a map of signatures does not remove that.
+- The map is large and paid on every later turn. `repo_map` was called 34 times with agent-chosen budgets of 2048 to 4096 tokens; the mean result is 12.2k characters (about 3k tokens), and each of the roughly ten turns that follow re-reads it as cache-read input. Mean cache-read input per session: 84k with singularrag against 71k alone. That gap is the whole token loss.
+- `find_symbol` (37 calls, mean 1.3k characters) is the cheap tool and is used as often as `repo_map`.
+
+Question-level: the largest gains are P1 (0.08 → 0.33), B3 (0.07 → 0.20), P2 and T1; the one loss is L1 (0.42 → 0.17), where all three singularrag sessions missed `src/hono-base.ts::Hono` and `src/router/reg-exp-router/router.ts::RegExpRouter`, and two of three missed `src/router.ts::match`; `Hono` and `match` are the same symbols tier one misses on L1.
+
+What this points at for the next ranking round: the map has to shrink, not grow. A default budget nearer 1024 than 4096, a header that steers the agent to `find_symbol` for follow-ups, and reasons that name the file to read would each cut the per-turn cost; the recall gain is real and does not need protecting.
