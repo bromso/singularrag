@@ -11,7 +11,7 @@ const files: TreeFile[] = [
     { id: 3, name: "h", kind: "function", line_start: 1, line_end: 2, signature: "export function h()" },
   ] },
 ];
-const r = { score: 0, file_rank: 0, seeds: [], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false };
+const r = { score: 0, file_rank: 0, seeds: [], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false, note_hit: false };
 const items: Item[] = [
   { rank: 1, symbol_id: 1, path: "src/a.ts", name: "f", line_start: 1, score: 0.5, served: true, reasons: r },
   { rank: 2, symbol_id: 2, path: "src/a.ts", name: "g", line_start: 5, score: 0.1, served: false, reasons: r },

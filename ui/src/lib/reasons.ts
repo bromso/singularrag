@@ -18,6 +18,7 @@ export function reasonsToSentences(r: Reasons, rank: number, score: number): str
   const q = r.seeds.find((s) => s.startsWith("query:"));
   if (r.query_ident_match && q) out.push(`Matched the query on ${q.slice("query:".length)}.`);
   else if (r.query_ident_match || r.fts_hit) out.push("Matched the query in the index.");
+  if (r.note_hit) out.push("Matches a note.");
   if (r.seeds.includes("focus")) out.push("You focused this file.");
   if (r.pinned || r.seeds.includes("pinned")) out.push("Pinned.");
   return out;

@@ -3,12 +3,13 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { BlastResult, MapConfig } from "@/api/types";
 import { reasonsToSentences } from "@/lib/reasons";
-import { boundariesOf, boundaryNames, isExcluded, isPinned, noteFor } from "@/lib/mapEdits";
+import { agentNoteFor, boundariesOf, boundaryNames, isExcluded, isPinned, noteFor } from "@/lib/mapEdits";
 import type { TreeRow } from "./RepoTree";
 
-export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLoading, onToggleBlast, expandedPath, onToggleExpand, onAddBoundary, onRemoveBoundary }: {
+export function DetailPanel({ row, map, onPin, onExclude, onNote, onRemoveAgentNote, blast, blastLoading, onToggleBlast, expandedPath, onToggleExpand, onAddBoundary, onRemoveBoundary }: {
   row: TreeRow | null; map: MapConfig;
   onPin: (path: string, symbol?: string) => void; onExclude: (path: string) => void; onNote: (path: string, symbol: string | undefined, text: string) => void;
+  onRemoveAgentNote: (path: string, symbol?: string) => void;
   blast: BlastResult | null; blastLoading: boolean; onToggleBlast: (path: string, symbol: string) => void;
   expandedPath: string | null; onToggleExpand: (path: string) => void;
   onAddBoundary: (name: string, path: string) => void; onRemoveBoundary: (name: string, path: string) => void;
@@ -17,6 +18,7 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLo
   const symbol = row?.kind === "symbol" ? row.symbol.symbol.name : undefined;
   const [text, setText] = useState("");
   const saved = row ? noteFor(map, row.path, symbol) : "";
+  const agentNote = row ? agentNoteFor(map, row.path, symbol) : undefined;
   // A draft the user hasn't blurred yet must survive a background refetch of `map`
   // (e.g. from an SSE "change" event triggered by another agent). `dirty` tracks
   // whether the textarea has unsaved edits; the effect below only overwrites
@@ -111,6 +113,18 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, blast, blastLo
           className="mt-1"
         />
       </label>
+      {agentNote && (
+        <div className="rounded border p-2 text-sm">
+          <p className="flex items-center gap-2">
+            <span className="rounded bg-muted px-1 text-xs font-medium">agent</span>
+            <time dateTime={agentNote.at} className="text-xs text-muted-foreground">{agentNote.at}</time>
+          </p>
+          <p className="mt-1">{agentNote.text}</p>
+          <Button type="button" variant="outline" size="sm" className="mt-2" aria-label="Delete the agent note" onClick={() => onRemoveAgentNote(row.path, symbol)}>
+            Delete
+          </Button>
+        </div>
+      )}
       {(isPinned(map, row.path, symbol) || isExcluded(map, row.path)) && (
         <p className="text-xs text-muted-foreground">{isPinned(map, row.path, symbol) ? "Pinned. " : ""}{isExcluded(map, row.path) ? "Excluded." : ""}</p>
       )}

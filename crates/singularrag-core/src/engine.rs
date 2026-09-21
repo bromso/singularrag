@@ -91,6 +91,24 @@ pub struct FindResponse {
     pub lock_timeout: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct AnnotateRequest {
+    pub path: String,
+    pub symbol: Option<String>,
+    /// Empty removes the agent's note on the target.
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnnotateResponse {
+    pub text: String,
+    pub removed: bool,
+    pub notes_on_file: usize,
+    pub stale_count: usize,
+    /// See `MapResponse::lock_timeout`.
+    pub lock_timeout: bool,
+}
+
 impl Engine {
     pub fn open(root: &Path, session_key: &str) -> Result<Engine> {
         let root = root.canonicalize().map_err(|e| {
@@ -218,8 +236,11 @@ impl Engine {
             req.query.as_deref(),
             &req.focus_files,
         )?;
-        let served = map::fit(&ranked, budget);
-        let body = map::render(&ranked, served);
+        let served = map::fit(&ranked, budget, &self.config.note);
+        // The budget is soft (the footer says so): a note-heavy top file at a tiny
+        // budget must not produce a map with no symbols.
+        let served = if ranked.is_empty() { 0 } else { served.max(1) };
+        let body = map::render(&ranked, served, &self.config.note);
         let cut_recorded = (ranked.len() - served).min(CUT_RECORDED);
         let (version, head) = self.index_meta()?;
 
@@ -307,12 +328,126 @@ impl Engine {
         let text = format!(
             "{}\n{}",
             map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
-            crate::find::render_find(hits)
+            crate::find::render_find(hits, &self.config.note)
         );
         Ok(FindResponse {
             retrieval_id,
             text,
             hits: served,
+            stale_count: stats.remaining,
+            lock_timeout: stats.lock_timeout,
+        })
+    }
+
+    /// Spec (annotate design §3): validate in order, then edit the agent's own note on
+    /// the target and write `map.toml`. No retrieval row: an annotation is not a
+    /// retrieval, and the file watcher turns the write into a change event.
+    pub fn annotate(&mut self, req: &AnnotateRequest) -> Result<AnnotateResponse> {
+        use crate::config::{normalise_note_text, Note, AGENT, NOTE_MAX_CHARS};
+        use rusqlite::OptionalExtension;
+        let stats = self.refresh(self.refresh_budget)?;
+        let bad =
+            |field: &str, message: String| crate::Error::Config(format!("{field}: {message}"));
+        crate::config::check_path("path", &req.path).map_err(|e| bad(&e.field, e.message))?;
+        let file_id: Option<i64> = self
+            .store
+            .conn()
+            .query_row(
+                "SELECT id FROM files WHERE path = ?1 AND skipped_reason IS NULL",
+                params![req.path],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(file_id) = file_id else {
+            return Err(bad("path", format!("{} is not an indexed file", req.path)));
+        };
+        if let Some(sym) = &req.symbol {
+            let defined: i64 = self.store.conn().query_row(
+                "SELECT count(*) FROM symbols WHERE file_id = ?1 AND name = ?2",
+                params![file_id, sym],
+                |r| r.get(0),
+            )?;
+            if defined == 0 {
+                return Err(bad(
+                    "symbol",
+                    format!("{sym} is not defined in {}", req.path),
+                ));
+            }
+        }
+        let text = normalise_note_text(&req.text);
+        if text.chars().count() > NOTE_MAX_CHARS {
+            return Err(bad(
+                "text",
+                format!("text is longer than {NOTE_MAX_CHARS} characters"),
+            ));
+        }
+        if let Some(kind) = crate::secrets::looks_secret(&text) {
+            return Err(bad(
+                "text",
+                format!("text looks like a secret ({kind}); notes are committed"),
+            ));
+        }
+        self.reload_config_if_changed()?;
+        let symbol = req.symbol.clone();
+        let mut config = self.config.clone();
+        let own_idx = config
+            .note
+            .iter()
+            .position(|n| n.is_agent() && n.path == req.path && n.symbol == symbol);
+        let had_own = own_idx.is_some();
+        let removed = text.is_empty();
+        if removed {
+            if let Some(idx) = own_idx {
+                config.note.remove(idx);
+            }
+        } else if let Some(idx) = own_idx {
+            // Overwrite in place so a replace stays a small diff instead of
+            // moving the note to the end of the array.
+            let n = &mut config.note[idx];
+            n.text = text;
+            n.session = Some(self.session_key.clone());
+            n.at = Some(crate::time::rfc3339_now());
+        } else {
+            config.note.push(Note {
+                path: req.path.clone(),
+                symbol: symbol.clone(),
+                text,
+                by: Some(AGENT.to_string()),
+                session: Some(self.session_key.clone()),
+                at: Some(crate::time::rfc3339_now()),
+            });
+        }
+        let target = match &symbol {
+            Some(s) => format!("{}::{s}", req.path),
+            None => req.path.clone(),
+        };
+        let notes_on_file = config.note.iter().filter(|n| n.path == req.path).count();
+        let line = if removed && had_own {
+            format!("removed your note on {target}")
+        } else if removed {
+            format!("no note of yours on {target}")
+        } else {
+            let plural = if notes_on_file == 1 { "" } else { "s" };
+            format!("noted {target} ({notes_on_file} note{plural} on this file)")
+        };
+        // Write when adding or replacing, and when a removal actually removed something;
+        // a no-op removal touches nothing.
+        if !removed || had_own {
+            config
+                .validate(&self.config.deny.extra_patterns)
+                .map_err(|e| bad(&e.field, e.message))?;
+            config.save_atomic(&self.root)?;
+            self.config = config;
+            self.config_mtime = map_toml_mtime(&self.root);
+        }
+        let (version, head) = self.index_meta()?;
+        Ok(AnnotateResponse {
+            text: format!(
+                "{}\n{line}\n",
+                map::freshness_header(&version, head.as_deref(), stats.remaining)
+            ),
+            removed,
+            notes_on_file,
             stale_count: stats.remaining,
             lock_timeout: stats.lock_timeout,
         })
@@ -469,6 +604,47 @@ mod tests {
             .query_row("SELECT tool FROM retrievals", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tool, "repo_map");
+    }
+
+    /// A note-heavy top file at a tiny budget must not produce a map with no symbols:
+    /// the budget is soft (the footer says so), so `fit` returning 0 would be a lie.
+    #[test]
+    fn a_map_always_serves_at_least_one_symbol_when_any_ranked() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        std::fs::create_dir_all(dir.path().join(".singularrag")).unwrap();
+        let human_note = "h".repeat(300);
+        std::fs::write(
+            dir.path().join(".singularrag/map.toml"),
+            format!("[[note]]\npath = \"src/auth/session.ts\"\ntext = \"{human_note}\"\n"),
+        )
+        .unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        let agent_note = "a".repeat(300);
+        e.annotate(&AnnotateRequest {
+            path: "src/auth/session.ts".into(),
+            symbol: None,
+            text: agent_note,
+        })
+        .unwrap();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("session".into()),
+                focus_files: vec![],
+                budget_tokens: 64,
+            })
+            .unwrap();
+        assert!(resp.served >= 1, "{}", resp.text);
+        // A row starts with spaces then a digit; a note line starts with spaces then
+        // "note". Skip the notes and confirm at least one row got through.
+        let has_row = resp.text.lines().any(|l| {
+            l.starts_with("    ")
+                && l.trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+        });
+        assert!(has_row, "{}", resp.text);
     }
 
     /// `symbols.id` is reused after a reindex (SQLite hands out `max(rowid)+1`), so a
@@ -770,5 +946,143 @@ mod tests {
             .unwrap();
         assert_eq!(second.stale_count, 0);
         assert!(second.text.contains("· fresh ·"));
+    }
+
+    fn annotate(
+        e: &mut Engine,
+        path: &str,
+        symbol: Option<&str>,
+        text: &str,
+    ) -> Result<AnnotateResponse> {
+        e.annotate(&AnnotateRequest {
+            path: path.into(),
+            symbol: symbol.map(str::to_string),
+            text: text.into(),
+        })
+    }
+
+    #[test]
+    fn annotate_adds_replaces_and_removes_the_agent_note_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        std::fs::create_dir_all(dir.path().join(".singularrag")).unwrap();
+        std::fs::write(
+            dir.path().join(".singularrag/map.toml"),
+            "# mine\n[[note]]\npath = \"src/auth/session.ts\"\nsymbol = \"createSession\"\ntext = \"human says\"\n",
+        )
+        .unwrap();
+        let mut e = Engine::open(dir.path(), "mcp:test:1:2").unwrap();
+        let r = annotate(
+            &mut e,
+            "src/auth/session.ts",
+            Some("createSession"),
+            " first\nnote ",
+        )
+        .unwrap();
+        assert!(r.text.starts_with("# singularrag · index "), "{}", r.text);
+        assert!(
+            r.text
+                .ends_with("noted src/auth/session.ts::createSession (2 notes on this file)\n"),
+            "{}",
+            r.text
+        );
+        assert!(!r.removed);
+        let on_disk = std::fs::read_to_string(dir.path().join(".singularrag/map.toml")).unwrap();
+        assert!(
+            on_disk.starts_with("# mine\n"),
+            "comments survive: {on_disk}"
+        );
+        assert!(on_disk.contains("text = \"human says\""), "{on_disk}");
+        assert!(
+            on_disk.contains("text = \"first note\"")
+                && on_disk.contains("by = \"agent\"")
+                && on_disk.contains("session = \"mcp:test:1:2\""),
+            "{on_disk}"
+        );
+        // replace
+        let r = annotate(
+            &mut e,
+            "src/auth/session.ts",
+            Some("createSession"),
+            "second",
+        )
+        .unwrap();
+        assert!(r.text.contains("(2 notes on this file)"), "{}", r.text);
+        let c = e.config();
+        assert_eq!(c.note.len(), 2);
+        // The replace overwrote the agent note in place; the human note at
+        // index 0 was there first, so the agent note stays at index 1.
+        assert!(c.note[1].is_agent() && c.note[1].text == "second");
+        assert_eq!(
+            c.note_on("src/auth/session.ts", Some("createSession"), true)
+                .unwrap()
+                .text,
+            "second"
+        );
+        assert_eq!(
+            c.note_on("src/auth/session.ts", Some("createSession"), false)
+                .unwrap()
+                .text,
+            "human says"
+        );
+        // remove
+        let r = annotate(&mut e, "src/auth/session.ts", Some("createSession"), "").unwrap();
+        assert!(r.removed);
+        assert!(
+            r.text
+                .ends_with("removed your note on src/auth/session.ts::createSession\n"),
+            "{}",
+            r.text
+        );
+        assert_eq!(e.config().note.len(), 1, "the human note stays");
+        // removing again is a no-op that says so
+        let r = annotate(&mut e, "src/auth/session.ts", Some("createSession"), "").unwrap();
+        assert!(
+            r.text
+                .ends_with("no note of yours on src/auth/session.ts::createSession\n"),
+            "{}",
+            r.text
+        );
+        // a file-level note
+        let r = annotate(&mut e, "src/cli/login.ts", None, "the CLI entry point").unwrap();
+        assert!(
+            r.text
+                .ends_with("noted src/cli/login.ts (1 note on this file)\n"),
+            "{}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn annotate_rejects_bad_targets_and_secret_like_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        let mut e = Engine::open(dir.path(), "mcp:test:1:2").unwrap();
+        let err = |r: Result<AnnotateResponse>| r.unwrap_err().to_string();
+        assert!(err(annotate(&mut e, "../x.ts", None, "t")).contains("path"));
+        assert!(err(annotate(&mut e, "src/nope.ts", None, "t")).contains("not an indexed file"));
+        assert!(
+            err(annotate(&mut e, "src/auth/session.ts", Some("nope"), "t"))
+                .contains("not defined in src/auth/session.ts")
+        );
+        assert!(err(annotate(
+            &mut e,
+            "src/auth/session.ts",
+            None,
+            &"x".repeat(301)
+        ))
+        .contains("300"));
+        // `AKIA` + 16 upper-case alphanumerics is the AWS pattern; the fixture in the
+        // brief has a trailing extra character that breaks the `\b` word boundary, so a
+        // private-key header (also matched by secrets.rs `rules()`) is used instead.
+        let e2 = err(annotate(
+            &mut e,
+            "src/auth/session.ts",
+            None,
+            "token -----BEGIN RSA PRIVATE KEY----- here",
+        ));
+        assert!(e2.contains("looks like a secret"), "{e2}");
+        assert!(e.config().note.is_empty(), "nothing was written");
+        assert!(!dir.path().join(".singularrag/map.toml").exists());
     }
 }

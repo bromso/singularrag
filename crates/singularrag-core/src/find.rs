@@ -115,7 +115,7 @@ pub fn find_symbol(
     Ok(hits)
 }
 
-pub fn render_find(hits: &[FindHit]) -> String {
+pub fn render_find(hits: &[FindHit], notes: &[crate::config::Note]) -> String {
     if hits.is_empty() {
         return "no symbols matched\n".to_string();
     }
@@ -148,6 +148,12 @@ pub fn render_find(hits: &[FindHit]) -> String {
                 "   referenced from {} files: {list}{more}{in_file}\n",
                 h.total_ref_files
             ));
+        }
+        for n in crate::map::notes_for(notes, &h.path, Some(&h.name)) {
+            out.push_str(&crate::map::note_line(n));
+        }
+        for n in crate::map::notes_for(notes, &h.path, None) {
+            out.push_str(&crate::map::note_line(n));
         }
     }
     out
@@ -206,9 +212,9 @@ mod tests {
             "new SessionStore() in its own file"
         );
         assert!(
-            render_find(&hits[..1]).contains("   referenced from 0 files, 1 in this file\n"),
+            render_find(&hits[..1], &[]).contains("   referenced from 0 files, 1 in this file\n"),
             "{}",
-            render_find(&hits[..1])
+            render_find(&hits[..1], &[])
         );
     }
 
@@ -233,9 +239,85 @@ mod tests {
     fn render_format() {
         let (_dir, e) = engine();
         let hits = find_symbol(e.store(), &MapConfig::default(), "createSession", None, 1).unwrap();
-        let text = render_find(&hits);
+        let text = render_find(&hits, &[]);
         assert!(text.starts_with("src/auth/session.ts:3  function  export function createSession(user: User, ttl: number): Session\n   referenced from 2 files: src/http/middleware.ts (2), src/cli/login.ts (1)\n"), "{text}");
-        assert_eq!(render_find(&[]), "no symbols matched\n");
+        assert_eq!(render_find(&[], &[]), "no symbols matched\n");
+    }
+
+    #[test]
+    fn render_find_prints_the_symbol_note_then_the_file_note() {
+        let hit = FindHit {
+            symbol_id: 1,
+            path: "src/a.ts".into(),
+            line: 3,
+            kind: "function".into(),
+            name: "f".into(),
+            signature: "export function f()".into(),
+            referenced_from: vec![],
+            total_ref_files: 0,
+            in_file_refs: 0,
+        };
+        let notes = vec![
+            crate::config::Note {
+                path: "src/a.ts".into(),
+                symbol: None,
+                text: "file".into(),
+                by: None,
+                session: None,
+                at: None,
+            },
+            crate::config::Note {
+                path: "src/a.ts".into(),
+                symbol: Some("f".into()),
+                text: "sym".into(),
+                by: Some("agent".into()),
+                session: Some("s".into()),
+                at: Some("t".into()),
+            },
+        ];
+        assert_eq!(
+            render_find(&[hit], &notes),
+            "src/a.ts:3  function  export function f()\n   referenced from 0 files\n        note (agent): sym\n        note: file\n"
+        );
+    }
+
+    /// The agent note is listed first in `notes`, but the human note must still print
+    /// first — same ordering as the map's `notes_for`.
+    #[test]
+    fn render_find_orders_a_symbols_notes_human_before_agent_regardless_of_toml_order() {
+        let hit = FindHit {
+            symbol_id: 1,
+            path: "src/a.ts".into(),
+            line: 3,
+            kind: "function".into(),
+            name: "f".into(),
+            signature: "export function f()".into(),
+            referenced_from: vec![],
+            total_ref_files: 0,
+            in_file_refs: 0,
+        };
+        let notes = vec![
+            crate::config::Note {
+                path: "src/a.ts".into(),
+                symbol: Some("f".into()),
+                text: "agent note".into(),
+                by: Some("agent".into()),
+                session: Some("s".into()),
+                at: Some("t".into()),
+            },
+            crate::config::Note {
+                path: "src/a.ts".into(),
+                symbol: Some("f".into()),
+                text: "human note".into(),
+                by: None,
+                session: None,
+                at: None,
+            },
+        ];
+        assert_eq!(
+            render_find(&[hit], &notes),
+            "src/a.ts:3  function  export function f()\n   referenced from 0 files\n        note: human note\n        note (agent): agent note\n"
+        );
     }
 
     #[test]

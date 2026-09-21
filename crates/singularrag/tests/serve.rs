@@ -530,3 +530,36 @@ async fn put_map_rejects_duplicate_boundary_names() {
     let e: serde_json::Value = r.json().await.unwrap();
     assert_eq!(e["field"], "boundary[1].name");
 }
+
+#[tokio::test]
+async fn put_map_round_trips_agent_notes_and_rejects_a_second_one() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let s = spawn(dir.path());
+    let put = |body: serde_json::Value| {
+        let url = format!("{}/api/map", s.url);
+        let token = s.token.clone();
+        async move {
+            client()
+                .put(url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let agent = serde_json::json!({ "path": "src/auth/session.ts", "text": "agent note", "by": "agent", "session": "mcp:x:1:2", "at": "2026-09-21T09:14:02Z" });
+    let human = serde_json::json!({ "path": "src/auth/session.ts", "text": "human note" });
+    let body = |notes: Vec<serde_json::Value>| serde_json::json!({ "pin": [], "exclude": [], "note": notes, "boundary": [], "deny": { "extra_patterns": [] } });
+    let r = put(body(vec![human.clone(), agent.clone()])).await;
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let doc: serde_json::Value = get(&s, "/map").await.json().await.unwrap();
+    assert_eq!(doc["note"][1]["by"], "agent");
+    assert_eq!(doc["note"][1]["session"], "mcp:x:1:2");
+    assert!(doc["note"][0].get("by").is_none(), "{doc}");
+    let r = put(body(vec![human, agent.clone(), agent])).await;
+    assert_eq!(r.status(), 422);
+    let e: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(e["field"], "note[2].path");
+}

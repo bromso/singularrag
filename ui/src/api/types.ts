@@ -1,7 +1,7 @@
 export type Reasons = {
   score: number; file_rank: number; seeds: string[];
   referenced_by: { path: string; count: number }[];
-  pinned: boolean; fts_hit: boolean; query_ident_match: boolean;
+  pinned: boolean; fts_hit: boolean; query_ident_match: boolean; note_hit: boolean;
 };
 export type Item = { rank: number; symbol_id: number; path: string; name: string; line_start: number; score: number; served: boolean; reasons: Reasons };
 export type RetrievalSummary = {
@@ -14,7 +14,7 @@ export type TreeSymbol = { id: number; name: string; kind: string; line_start: n
 export type TreeFile = { path: string; lang: string | null; skipped_reason: string | null; symbols: TreeSymbol[] };
 export type SkippedFile = { path: string; reason: string };
 export type Target = { path: string; symbol?: string };
-export type Note = { path: string; symbol?: string; text: string };
+export type Note = { path: string; symbol?: string; text: string; by?: "agent"; session?: string; at?: string };
 export type Boundary = { name: string; paths: string[] };
 export type MapConfig = { pin: Target[]; exclude: Target[]; note: Note[]; boundary: Boundary[]; deny: { extra_patterns: string[] } };
 /** `MapConfig` plus `map.toml`'s mtime in ms (0 when absent): the compare-and-swap token. */
