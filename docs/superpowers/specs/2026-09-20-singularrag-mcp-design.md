@@ -25,7 +25,7 @@ Expose the plan-1 `Engine` to Claude Code, Codex CLI and Copilot CLI as a stdio 
 Two tools via rmcp's `#[tool_router]`, inputs as `Parameters<T>` with `schemars` derives, output one text content block containing the engine's text verbatim.
 
 ### `repo_map`
-- Description (agent-facing): "Token-budgeted map of the symbols most relevant to a task. Call this before reading files. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, max 8192. Returns paths, line numbers and signatures only, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment."
+- Description (agent-facing): "Token-budgeted map of the symbols most relevant to a task, each with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Rows are `line  signature  ← referencing files`, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment."
 - Input: `query: Option<String>`, `focus_files: Option<Vec<String>>`, `budget_tokens: Option<u32>`. Missing values take `MapRequest::default()`. Out-of-range budgets are clamped by the engine, never rejected.
 
 ### `find_symbol`

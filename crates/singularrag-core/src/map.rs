@@ -29,10 +29,38 @@ pub fn render(items: &[ScoredSymbol], n: usize) -> String {
         let mut rows: Vec<&ScoredSymbol> = top.iter().filter(|s| s.path == path).collect();
         rows.sort_by_key(|s| s.line_start);
         for s in rows {
-            out.push_str(&format!("{:>5}  {}\n", s.line_start, s.signature));
+            out.push_str(&format!(
+                "{:>5}  {}{}\n",
+                s.line_start,
+                s.signature,
+                referenced_by(&s.reasons.referenced_by)
+            ));
         }
     }
     out
+}
+
+/// How many referencing files a row names; the ranker keeps at most five per symbol.
+const REFS_SHOWN: usize = 3;
+
+/// `  ← a.ts, b.ts, c.ts +2`: who references the symbol, strongest first, so a blast or
+/// trace question can be answered from the map. Empty when nothing references it.
+fn referenced_by(refs: &[crate::rank::RefBy]) -> String {
+    if refs.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = refs
+        .iter()
+        .take(REFS_SHOWN)
+        .map(|r| r.path.as_str())
+        .collect();
+    let more = refs.len().saturating_sub(REFS_SHOWN);
+    let tail = if more > 0 {
+        format!(" +{more}")
+    } else {
+        String::new()
+    };
+    format!("  ← {}{tail}", shown.join(", "))
 }
 
 /// Largest `n` such that `render(items, n)` fits the budget. Binary search, as in Aider.
@@ -113,6 +141,39 @@ mod tests {
         assert_eq!(
             text,
             "src/b.ts:\n    3  export function three()\n   20  export function two()\nsrc/a.ts:\n    5  export function five()\n"
+        );
+    }
+
+    #[test]
+    fn render_names_the_files_that_reference_a_symbol() {
+        use crate::rank::RefBy;
+        let rb = |pairs: &[(&str, i64)]| {
+            pairs
+                .iter()
+                .map(|(p, c)| RefBy {
+                    path: p.to_string(),
+                    count: *c,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut two = sym("src/a.ts", 5, "export function five()", 0.9);
+        two.reasons.referenced_by = rb(&[("src/http/middleware.ts", 3), ("src/cli/login.ts", 1)]);
+        let mut many = sym("src/a.ts", 9, "export class Nine", 0.8);
+        many.reasons.referenced_by = rb(&[
+            ("src/b.ts", 9),
+            ("src/c.ts", 4),
+            ("src/d.ts", 2),
+            ("src/e.ts", 1),
+            ("src/f.ts", 1),
+        ]);
+        let none = sym("src/a.ts", 12, "export const twelve = 12", 0.7);
+        let text = render(&[two, many, none], 3);
+        assert_eq!(
+            text,
+            "src/a.ts:\n\
+             \x20   5  export function five()  ← src/http/middleware.ts, src/cli/login.ts\n\
+             \x20   9  export class Nine  ← src/b.ts, src/c.ts, src/d.ts +2\n\
+             \x20  12  export const twelve = 12\n"
         );
     }
 

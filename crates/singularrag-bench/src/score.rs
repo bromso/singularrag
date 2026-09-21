@@ -36,8 +36,10 @@ impl Record {
     }
 }
 
-/// Trim, strip a leading `./`, drop entries without `::`, drop repeats (a repeated
-/// symbol would count twice against precision), keep the first `answer_max`.
+/// Trim, strip a leading `./`, drop entries without `::`, reduce a qualified name to the
+/// declared one (`Router.match`, `Node/search` and `#dispatch` all score as the gold's
+/// `match`, `search`, `dispatch`), drop repeats (a repeated symbol would count twice
+/// against precision), keep the first `answer_max`.
 pub fn normalise(symbols: &[String], answer_max: usize) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     symbols
@@ -45,10 +47,16 @@ pub fn normalise(symbols: &[String], answer_max: usize) -> Vec<String> {
         .map(|s| s.trim())
         .map(|s| s.strip_prefix("./").unwrap_or(s))
         .filter(|s| s.contains("::"))
-        .filter(|s| seen.insert(s.to_string()))
-        .map(str::to_string)
+        .map(declared_name)
+        .filter(|s| seen.insert(s.clone()))
         .take(answer_max)
         .collect()
+}
+
+fn declared_name(sym: &str) -> String {
+    let (path, name) = sym.split_once("::").expect("filtered above");
+    let last = name.rsplit(['.', '/']).next().unwrap_or(name);
+    format!("{path}::{}", last.trim_start_matches('#'))
 }
 
 fn answer_of(parsed: &Parsed, answer_max: usize) -> Option<Vec<String>> {
@@ -166,6 +174,27 @@ mod tests {
             2,
         );
         assert_eq!(out, s(&["src/a.ts::A", "src/b.ts::B"]));
+    }
+
+    #[test]
+    fn normalise_reduces_qualified_names_to_the_declared_name() {
+        let out = normalise(
+            &s(&[
+                "src/router.ts::Router.match",
+                "src/router/trie-router/node.ts::Node/search",
+                "src/hono-base.ts::#dispatch",
+                "src/router.ts::match",
+            ]),
+            10,
+        );
+        assert_eq!(
+            out,
+            s(&[
+                "src/router.ts::match",
+                "src/router/trie-router/node.ts::search",
+                "src/hono-base.ts::dispatch",
+            ])
+        );
     }
 
     #[test]

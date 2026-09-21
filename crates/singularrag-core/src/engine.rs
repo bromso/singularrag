@@ -424,9 +424,17 @@ mod tests {
         assert!(resp.text.contains("· fresh ·"));
         assert!(!resp.lock_timeout);
         assert!(resp.text.contains("src/auth/session.ts:\n"));
-        assert!(resp
+        // The row ends with who references the symbol (the middleware and the CLI in
+        // the fixture), so a blast question can be answered from the map.
+        let row = resp
             .text
-            .contains("export function createSession(user: User, ttl: number): Session\n"));
+            .lines()
+            .find(|l| l.contains("export function createSession(user: User, ttl: number): Session"))
+            .expect("createSession row");
+        assert!(
+            row.contains("Session  ← ") && row.contains("src/http/middleware.ts"),
+            "{row}"
+        );
         assert!(resp.text.ends_with(&format!(
             "{}\n",
             crate::map::footer(resp.served, resp.total, resp.cut_recorded)
