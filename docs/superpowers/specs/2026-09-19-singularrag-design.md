@@ -207,6 +207,8 @@ Exact wording and gold sets are fixed in `eval/questions.toml` before the first 
 
 *Amended 2026-09-20 by plan 4 (`docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md`): placement questions are scored by gold recall in tier two as well, not by the 0 to 2 rubric; their gold sets exist and tier one already scores them that way. "Correctness not worse" is mean recall at least the baseline's minus 0.02; "tokens" is input + output + cache creation + cache read.*
 
+*Amended 2026-09-21 after two full runs (`eval/README.md`): the rule is now paired over question × repeat, condition minus baseline, with two-sided 95% intervals. Correctness: the recall interval lies above 0. Efficiency: the tool-call interval lies below 0 and mean tokens exceed the baseline's by at most 10%. Why: the −25% bar measured whether the agent stops reading files, and no map tool did that, Serena included; what the tool is for is recall the agent lacks at no material context cost, and three repeats are noisy enough (per-session tokens ranged 27k to 150k) that point thresholds pass or fail on luck. Under the new rule run 1 fails all three tests and round 2 passes all three, which is the check that the rule was not fitted to the last run.*
+
 ## 13. Stack decisions
 
 | Leaning from brief | Decision | Why |

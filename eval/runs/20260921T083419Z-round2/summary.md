@@ -23,4 +23,9 @@ tokens = input + output + cache creation + cache read
 | P2 | 0.75 | 0.92 |
 | P3 | 0.75 | 0.67 |
 
-singularrag does not earn its place: efficiency: tokens 92695 vs 87134 (+6.4%), tool calls 8.6 vs 10.7 (-19.8%); need -25% on either
+**singularrag earns its place** against alone.
+- recall +0.08 [+0.02, +0.14] over 36 pairs
+- tool calls -2.1 [-3.3, -0.9]
+- tokens +5561 (+6.4%) [-6.7%, +19.5%]
+
+(Under the rule in force when the run was made, tokens or tool calls 25% below the baseline: "does not earn its place: tokens +6.4%, tool calls -19.8%". Re-scored 2026-09-21 under the amended §12 rule.)

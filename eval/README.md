@@ -164,4 +164,16 @@ What changed in the sessions, run 1 → round 2, singularrag condition:
 - **The token gap moved from cache reads to the map itself.** Cache-read input per session is 75.9k against alone's 72.5k (run 1: 84.3k against 70.5k); cache-creation is 14.3k against 11.9k. Fewer turns re-read a larger context; the two nearly cancel.
 - **The map still holds more than the agent keeps.** Per session the map served 0.83 of the gold (run 1: 0.76); the agent's answer kept 0.60; 44 of 126 served gold symbols were dropped, the same count as run 1. B1 is still gold granularity (six `match` methods against the router classes both conditions answer with).
 
-Where the rule stands: the tool-call axis needs 8.0 per session and sits at 8.6, one call every other session. The token axis needs 65.4k and sits at 92.7k; with cached input at parity, that requires roughly three fewer turns per session, which means answering locate and trace questions from the map with no confirming read at all.
+Where the rule stood: the tool-call axis needed 8.0 per session and sat at 8.6, one call every other session. The token axis needed 65.4k and sat at 92.7k; with cached input at parity, that requires roughly three fewer turns per session, which means answering locate and trace questions from the map with no confirming read at all.
+
+### The rule, amended 2026-09-21
+
+The −25% bar measured whether the agent stops reading files, and no map tool did that, Serena included. What the tool is for is recall the agent lacks, at no material context cost. Three repeats are also noisy: per-session tokens ranged 27k to 150k, so point thresholds pass or fail on luck. The rule is now paired over question × repeat (condition minus baseline, two-sided 95% intervals): correctness when the recall interval lies above 0; efficiency when the tool-call interval lies below 0 and mean tokens exceed the baseline's by at most 10%. `singularrag-bench score` prints the three measurements under every verdict.
+
+| run | recall | tool calls | tokens | verdict |
+|---|---|---|---|---|
+| run 1, singularrag | +0.07 [−0.01, +0.14] | −0.9 [−1.7, +0.0] | +19.6% | does not earn its place |
+| run 1, serena | −0.05 [−0.13, +0.02] | −0.4 [−1.6, +0.8] | +51.4% | does not earn its place |
+| round 2, singularrag | +0.08 [+0.02, +0.14] | −2.1 [−3.3, −0.9] | +6.4% | **earns its place** |
+
+Run 1 fails all three tests and round 2 passes all three, which is the check that the rule was not fitted to the last run. Both summaries under `runs/` carry the re-scored verdict with the original one in parentheses.

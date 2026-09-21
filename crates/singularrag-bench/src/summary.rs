@@ -10,8 +10,14 @@ use serde::{Deserialize, Serialize};
 use crate::config::RunConfig;
 use crate::score::Record;
 
-pub const RECALL_TOLERANCE: f64 = 0.02;
-pub const EFFICIENCY_FACTOR: f64 = 0.75;
+/// Spec §12 (amended 2026-09-21): the condition's mean tokens may exceed the baseline's
+/// by at most this share; the other two tests are paired intervals.
+pub const TOKEN_TOLERANCE: f64 = 0.10;
+/// Two-sided 95% normal interval. The design is 12 questions × 3 repeats = 36 pairs,
+/// enough for the normal approximation; a handful of pairs gives a wide interval and
+/// an honest "no" rather than a false "yes".
+const Z: f64 = 1.96;
+pub const MIN_PAIRS: usize = 2;
 const EPS: f64 = 1e-9;
 
 #[derive(Debug, Clone)]
@@ -63,10 +69,51 @@ pub fn stats(name: &str, records: &[Record]) -> ConditionStats {
     }
 }
 
+/// A paired difference (condition minus baseline) with its 95% interval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Paired {
+    pub n: usize,
+    pub mean: f64,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+/// `pairs` are `(baseline, condition)` values for the same question and repeat.
+pub fn paired(pairs: &[(f64, f64)]) -> Option<Paired> {
+    let n = pairs.len();
+    if n < MIN_PAIRS {
+        return None;
+    }
+    let d: Vec<f64> = pairs.iter().map(|(b, c)| c - b).collect();
+    let mean = d.iter().sum::<f64>() / n as f64;
+    let var = d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+    let se = (var / n as f64).sqrt();
+    Some(Paired {
+        n,
+        mean,
+        lo: mean - Z * se,
+        hi: mean + Z * se,
+    })
+}
+
+/// Baseline and condition records matched on question and repeat; a session missing on
+/// either side drops the pair. A failed session keeps its recorded recall (0) and cost.
+fn pairs(base: &[Record], cond: &[Record], f: impl Fn(&Record) -> f64) -> Vec<(f64, f64)> {
+    base.iter()
+        .filter_map(|b| {
+            cond.iter()
+                .find(|c| c.question == b.question && c.repeat == b.repeat)
+                .map(|c| (f(b), f(c)))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Verdict {
     pub correctness: std::result::Result<(), String>,
     pub efficiency: std::result::Result<(), String>,
+    /// The three measurements, shown under the verdict line whichever way it went.
+    pub lines: Vec<String>,
 }
 
 impl Verdict {
@@ -75,39 +122,73 @@ impl Verdict {
     }
 }
 
-fn pct(cond: f64, base: f64) -> f64 {
-    if base == 0.0 {
-        0.0
+/// Spec §12: correctness when the paired recall interval lies above zero; efficiency
+/// when the paired tool-call interval lies below zero and mean tokens exceed the
+/// baseline's by at most `TOKEN_TOLERANCE`. `Err` names why no verdict is possible.
+pub fn verdict(base: &[Record], cond: &[Record]) -> std::result::Result<Verdict, String> {
+    let recall = paired(&pairs(base, cond, |r| r.recall));
+    let calls = paired(&pairs(base, cond, |r| r.tool_call_total() as f64));
+    let tokens = paired(&pairs(base, cond, |r| r.tokens.total() as f64));
+    let (Some(recall), Some(calls), Some(tokens)) = (recall, calls, tokens) else {
+        return Err(format!("fewer than {MIN_PAIRS} paired sessions"));
+    };
+    let base_tokens = mean(base.iter().map(|r| r.tokens.total() as f64), base.len());
+    let token_pct = |x: f64| {
+        if base_tokens == 0.0 {
+            0.0
+        } else {
+            x / base_tokens * 100.0
+        }
+    };
+    let lines = vec![
+        format!(
+            "recall {:+.2} [{:+.2}, {:+.2}] over {} pairs",
+            recall.mean, recall.lo, recall.hi, recall.n
+        ),
+        format!(
+            "tool calls {:+.1} [{:+.1}, {:+.1}]",
+            calls.mean, calls.lo, calls.hi
+        ),
+        format!(
+            "tokens {:+.0} ({:+.1}%) [{:+.1}%, {:+.1}%]",
+            tokens.mean,
+            token_pct(tokens.mean),
+            token_pct(tokens.lo),
+            token_pct(tokens.hi)
+        ),
+    ];
+    let correctness = if recall.lo > EPS {
+        Ok(())
     } else {
-        (cond - base) / base * 100.0
+        Err(format!(
+            "recall {:+.2} [{:+.2}, {:+.2}]; the interval must lie above 0",
+            recall.mean, recall.lo, recall.hi
+        ))
+    };
+    let mut why = Vec::new();
+    if calls.hi >= -EPS {
+        why.push(format!(
+            "tool calls {:+.1} [{:+.1}, {:+.1}]; the interval must lie below 0",
+            calls.mean, calls.lo, calls.hi
+        ));
     }
-}
-
-pub fn verdict(base: &ConditionStats, cond: &ConditionStats) -> Verdict {
-    let floor = base.mean_recall - RECALL_TOLERANCE;
-    let correctness = if cond.mean_recall + EPS >= floor {
+    if tokens.mean > TOKEN_TOLERANCE * base_tokens + EPS {
+        why.push(format!(
+            "tokens {:+.1}%; at most {:+.0}%",
+            token_pct(tokens.mean),
+            TOKEN_TOLERANCE * 100.0
+        ));
+    }
+    let efficiency = if why.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "recall {:.2} vs {:.2} (need >= {:.2})",
-            cond.mean_recall, base.mean_recall, floor
-        ))
+        Err(why.join(", "))
     };
-    let tokens_ok = cond.mean_tokens <= EFFICIENCY_FACTOR * base.mean_tokens + EPS;
-    let calls_ok = cond.mean_tool_calls <= EFFICIENCY_FACTOR * base.mean_tool_calls + EPS;
-    let efficiency = if tokens_ok || calls_ok {
-        Ok(())
-    } else {
-        Err(format!(
-            "tokens {:.0} vs {:.0} ({:+.1}%), tool calls {:.1} vs {:.1} ({:+.1}%); need -25% on either",
-            cond.mean_tokens, base.mean_tokens, pct(cond.mean_tokens, base.mean_tokens),
-            cond.mean_tool_calls, base.mean_tool_calls, pct(cond.mean_tool_calls, base.mean_tool_calls)
-        ))
-    };
-    Verdict {
+    Ok(Verdict {
         correctness,
         efficiency,
-    }
+        lines,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -242,34 +323,55 @@ pub fn render(
                     "No verdict: baseline condition {baseline} has no records."
                 );
             }
-            Some(base) => {
+            Some(_) => {
+                let base_records: &[Record] = conditions
+                    .iter()
+                    .find(|(n, _)| n == baseline)
+                    .map(|(_, rs)| rs.as_slice())
+                    .unwrap_or(&[]);
                 for s in all.iter().filter(|s| s.name != baseline) {
                     if let Some(reason) = meta.aborted.get(&s.name) {
                         let _ = writeln!(out, "{}: no verdict (aborted: {reason})", s.name);
-                    } else if s.sessions == 0 {
+                        continue;
+                    }
+                    if s.sessions == 0 {
                         let _ = writeln!(out, "{}: no verdict (no records)", s.name);
-                    } else {
-                        let v = verdict(base, s);
-                        if v.earns() {
-                            let _ = writeln!(
-                                out,
-                                "**{} earns its place** against {}.",
-                                s.name, baseline
-                            );
-                        } else {
-                            let mut parts = Vec::new();
-                            if let Err(e) = &v.correctness {
-                                parts.push(format!("correctness: {e}"));
+                        continue;
+                    }
+                    let records: &[Record] = conditions
+                        .iter()
+                        .find(|(n, _)| *n == s.name)
+                        .map(|(_, rs)| rs.as_slice())
+                        .unwrap_or(&[]);
+                    match verdict(base_records, records) {
+                        Err(e) => {
+                            let _ = writeln!(out, "{}: no verdict ({e})", s.name);
+                        }
+                        Ok(v) => {
+                            if v.earns() {
+                                let _ = writeln!(
+                                    out,
+                                    "**{} earns its place** against {}.",
+                                    s.name, baseline
+                                );
+                            } else {
+                                let mut parts = Vec::new();
+                                if let Err(e) = &v.correctness {
+                                    parts.push(format!("correctness: {e}"));
+                                }
+                                if let Err(e) = &v.efficiency {
+                                    parts.push(format!("efficiency: {e}"));
+                                }
+                                let _ = writeln!(
+                                    out,
+                                    "{} does not earn its place: {}",
+                                    s.name,
+                                    parts.join("; ")
+                                );
                             }
-                            if let Err(e) = &v.efficiency {
-                                parts.push(format!("efficiency: {e}"));
+                            for l in &v.lines {
+                                let _ = writeln!(out, "- {l}");
                             }
-                            let _ = writeln!(
-                                out,
-                                "{} does not earn its place: {}",
-                                s.name,
-                                parts.join("; ")
-                            );
                         }
                     }
                 }
@@ -404,39 +506,115 @@ mod tests {
         assert_eq!(s.median_tokens, 0.0);
     }
 
-    fn st(recall: f64, tokens: f64, calls: f64) -> ConditionStats {
-        ConditionStats {
-            name: "c".into(),
-            sessions: 1,
-            failed: 0,
-            mean_recall: recall,
-            mean_tokens: tokens,
-            median_tokens: tokens,
-            mean_tool_calls: calls,
-            mean_wall_s: 1.0,
-            total_cost: 0.1,
-        }
+    fn recr(q: &str, repeat: u32, cond: &str, recall: f64, tokens: u64, calls: u64) -> Record {
+        let mut r = rec(q, cond, recall, tokens, calls, false);
+        r.repeat = repeat;
+        r
+    }
+
+    /// Four pairs of the same question: baseline (0.5, 1000 tokens, 10 calls) against
+    /// the given condition values, one per repeat.
+    fn four(cond: &[(f64, u64, u64)]) -> (Vec<Record>, Vec<Record>) {
+        let base = (1..=4)
+            .map(|i| recr("L1", i, "alone", 0.5, 1000, 10))
+            .collect();
+        let cond = cond
+            .iter()
+            .enumerate()
+            .map(|(i, (r, t, c))| recr("L1", i as u32 + 1, "x", *r, *t, *c))
+            .collect();
+        (base, cond)
     }
 
     #[test]
-    fn verdict_boundaries_pass_and_just_beyond_fail() {
-        let base = st(0.60, 1000.0, 10.0);
+    fn paired_interval_matches_a_hand_computation() {
+        // differences -2, -3, -1, -2: mean -2, sample variance 2/3, se 0.4082
+        let p = paired(&[(10.0, 8.0), (10.0, 7.0), (10.0, 9.0), (10.0, 8.0)]).unwrap();
+        assert_eq!(p.n, 4);
+        assert!((p.mean + 2.0).abs() < 1e-9);
+        assert!((p.lo + 2.8).abs() < 1e-3, "{p:?}");
+        assert!((p.hi + 1.2).abs() < 1e-3, "{p:?}");
+        assert!(paired(&[(1.0, 2.0)]).is_none(), "one pair has no interval");
+        assert!(paired(&[]).is_none());
+    }
+
+    #[test]
+    fn verdict_needs_recall_up_calls_down_and_tokens_near_parity() {
+        // Constant improvements: zero variance, the intervals are points.
+        let (b, c) = four(&[
+            (0.7, 1050, 8),
+            (0.7, 1050, 8),
+            (0.7, 1050, 8),
+            (0.7, 1050, 8),
+        ]);
+        let v = verdict(&b, &c).unwrap();
+        assert!(v.earns(), "{v:?}");
+        assert_eq!(v.lines[0], "recall +0.20 [+0.20, +0.20] over 4 pairs");
+        assert_eq!(v.lines[1], "tool calls -2.0 [-2.0, -2.0]");
+        assert_eq!(v.lines[2], "tokens +50 (+5.0%) [+5.0%, +5.0%]");
+
+        // Recall up on average but not beyond noise: +0.5, +0.5, -0.4, +0.2.
+        let (b, c) = four(&[
+            (1.0, 1000, 8),
+            (1.0, 1000, 8),
+            (0.1, 1000, 8),
+            (0.7, 1000, 8),
+        ]);
+        let v = verdict(&b, &c).unwrap();
+        assert!(v.correctness.is_err() && v.efficiency.is_ok(), "{v:?}");
+        assert!(v
+            .correctness
+            .unwrap_err()
+            .ends_with("the interval must lie above 0"));
+
+        // Tokens over the tolerance: +11%.
+        let (b, c) = four(&[
+            (0.7, 1110, 8),
+            (0.7, 1110, 8),
+            (0.7, 1110, 8),
+            (0.7, 1110, 8),
+        ]);
+        let v = verdict(&b, &c).unwrap();
+        assert_eq!(v.efficiency.unwrap_err(), "tokens +11.0%; at most +10%");
+
+        // Tool calls down on average but not beyond noise: -6, -6, +4, -1.
+        let (b, c) = four(&[
+            (0.7, 1000, 4),
+            (0.7, 1000, 4),
+            (0.7, 1000, 14),
+            (0.7, 1000, 9),
+        ]);
+        let v = verdict(&b, &c).unwrap();
+        assert!(v
+            .efficiency
+            .unwrap_err()
+            .ends_with("the interval must lie below 0"));
+
+        // Both efficiency reasons are named.
+        let (b, c) = four(&[
+            (0.7, 1200, 4),
+            (0.7, 1200, 4),
+            (0.7, 1200, 14),
+            (0.7, 1200, 9),
+        ]);
+        let e = verdict(&b, &c).unwrap().efficiency.unwrap_err();
         assert!(
-            verdict(&base, &st(0.58, 750.0, 10.0)).earns(),
-            "recall at -0.02 and tokens at -25% pass"
+            e.contains("tool calls") && e.contains("tokens +20.0%"),
+            "{e}"
         );
-        assert!(
-            verdict(&base, &st(0.58, 1000.0, 7.5)).earns(),
-            "tool calls at -25% pass"
-        );
-        let v = verdict(&base, &st(0.579, 750.0, 10.0));
-        assert!(v.correctness.is_err() && v.efficiency.is_ok() && !v.earns());
-        let v = verdict(&base, &st(0.60, 751.0, 7.6));
-        assert!(v.correctness.is_ok() && v.efficiency.is_err() && !v.earns());
-        assert_eq!(
-            v.efficiency.unwrap_err(),
-            "tokens 751 vs 1000 (-24.9%), tool calls 7.6 vs 10.0 (-24.0%); need -25% on either"
-        );
+    }
+
+    #[test]
+    fn verdict_needs_two_paired_sessions() {
+        let b = vec![recr("L1", 1, "alone", 0.5, 1000, 10)];
+        let c = vec![recr("L1", 1, "x", 1.0, 500, 4)];
+        assert_eq!(verdict(&b, &c).unwrap_err(), "fewer than 2 paired sessions");
+        // A repeat the condition never ran is not a pair.
+        let b2 = vec![
+            recr("L1", 1, "alone", 0.5, 1000, 10),
+            recr("L1", 2, "alone", 0.5, 1000, 10),
+        ];
+        assert!(verdict(&b2, &c).is_err());
     }
 
     #[test]
@@ -448,28 +626,43 @@ mod tests {
             singularrag_version: Some("singularrag 0.1.0".into()),
             aborted: BTreeMap::new(),
         };
+        // Two questions × two repeats. The failed singularrag session scores 0 against
+        // a baseline 0, a zero difference that narrows the recall interval but keeps it
+        // above 0.
+        let mut failed = rec("L2", "singularrag", 0.0, 500, 4, true);
+        failed.repeat = 2;
         let conds = vec![
             (
                 "alone".to_string(),
                 vec![
-                    rec("L1", "alone", 0.5, 1000, 10, false),
-                    rec("L2", "alone", 0.5, 1000, 10, false),
+                    recr("L1", 1, "alone", 0.5, 1000, 10),
+                    recr("L1", 2, "alone", 0.5, 1000, 10),
+                    recr("L2", 1, "alone", 0.5, 1000, 10),
+                    recr("L2", 2, "alone", 0.0, 1000, 10),
                 ],
             ),
             (
                 "singularrag".to_string(),
                 vec![
-                    rec("L1", "singularrag", 1.0, 500, 4, false),
-                    rec("L2", "singularrag", 0.0, 500, 4, true),
+                    recr("L1", 1, "singularrag", 1.0, 500, 4),
+                    recr("L1", 2, "singularrag", 1.0, 500, 4),
+                    recr("L2", 1, "singularrag", 1.0, 500, 4),
+                    failed,
                 ],
             ),
         ];
         let md = render(&meta, "alone", &conds, &["L1".into(), "L2".into()]);
         assert!(md.contains("tokens = input + output + cache creation + cache read"));
-        assert!(md.contains("| alone | 2 | 0 | 0.50 |"), "{md}");
-        assert!(md.contains("| singularrag | 2 | 1 | 0.50 |"), "{md}");
+        assert!(md.contains("| alone | 4 | 0 | 0.38 |"), "{md}");
+        assert!(md.contains("| singularrag | 4 | 1 | 0.75 |"), "{md}");
         assert!(md.contains("| L1 | 0.50 | 1.00 |"), "{md}");
         assert!(md.contains("**singularrag earns its place**"), "{md}");
+        assert!(
+            md.contains("- recall +0.38 [+0.13, +0.62] over 4 pairs"),
+            "{md}"
+        );
+        assert!(md.contains("- tool calls -6.0 [-6.0, -6.0]"), "{md}");
+        assert!(md.contains("- tokens -500 (-50.0%)"), "{md}");
         assert!(md.contains("models: m"), "{md}");
         assert!(md.contains("· singularrag 0.1.0 ·"), "{md}");
         assert!(!md.contains("singularrag singularrag"), "{md}");
