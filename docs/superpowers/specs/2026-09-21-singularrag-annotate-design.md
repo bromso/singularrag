@@ -62,7 +62,7 @@ src/router.ts:  ← src/hono-base.ts, src/router/smart-router/router.ts +3
 
 ## 5. The UI
 
-The detail panel shows the agent note under the human's own note textarea, with an "agent" badge, the time, and a delete button; editing an agent note turns it into a human note (`by` cleared) via the existing `PUT /api/map`. The treegrid's existing note marker covers both kinds. `PUT /api/map` accepts the new keys and enforces §2's limits with the same 422 shape as the other fields. The map view is unchanged.
+The detail panel shows the agent note under the human's own note textarea, with an "agent" badge, the time, and a delete button. It is not edited in place: a human who wants to keep its words puts them in their own note, so the one-human-one-agent rule of §2 cannot be broken from the panel. Delete goes through the existing `PUT /api/map`. The treegrid's existing note marker covers both kinds. `PUT /api/map` accepts the new keys and enforces §2's limits with the same 422 shape as the other fields. The map view is unchanged.
 
 ## 6. Two writers
 
