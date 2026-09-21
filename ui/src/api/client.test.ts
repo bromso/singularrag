@@ -12,7 +12,6 @@ const mockStatus: Status = {
   foreign_indexing: false,
   indexing: false,
   files: { indexed: 10, skipped: 2 },
-  drain: { chunks: 5, last: { scanned: 100, indexed: 95, unchanged: 5, skipped: 0, removed: 0, remaining: 0, lock_timeout: false } },
 };
 
 describe("tokenFromFragment", () => {

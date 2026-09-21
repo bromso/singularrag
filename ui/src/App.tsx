@@ -43,7 +43,16 @@ export function App() {
   const [view, setView] = useState<View>(loadView);
   const changeView = (v: View) => { setView(v); saveView(v); };
   const [graph, setGraph] = useState<GraphPayload | null>(null);
-  const graphRef = useRef<string | null>(null);
+  const indexRef = useRef<string | null>(null);
+  // SSE "change" events are not coalesced, so two `load()` calls can overlap.
+  // Without a guard, whichever resolves last wins even if it started first,
+  // pinning `indexRef`/tree/graph to a stale version. `loadGen` orders loads by
+  // when they *started*, not when they resolve — the same pattern `toggleBlast`
+  // uses with `blastReq` — so a superseded load applies nothing at all.
+  const loadGen = useRef(0);
+  // De-dupes freshness announcements: the watcher broadcasts a full status on every SSE
+  // event, so an unchanged text (e.g. two "indexing" events in a row) must not repeat.
+  const lastFreshnessRef = useRef<string | null>(null);
   const announcedLayouts = useRef(new Set<string>());
   const onLayoutReady = useCallback((v: string) => {
     if (!announcedLayouts.current.has(v)) { announcedLayouts.current.add(v); announce("Map layout ready"); }
@@ -69,12 +78,19 @@ export function App() {
     // announces one summary instead of reading out up to ten past retrievals (I5).
     let knownMax: number | null = null;
     const load = async () => {
-      const [s, rs, t, sk, m] = await Promise.all([api.status(), api.retrievals(), api.tree(), api.skipped(), api.map()]);
-      setStatus(s); setRetrievals(rs); setTree(t); setSkipped(sk); applyMapDoc(m);
-      if (!graphRef.current || graphRef.current !== s.index_version) {
-        const g = await api.graph();
-        graphRef.current = g.index_version;
-        setGraph(g);
+      const gen = ++loadGen.current;
+      const [s, rs, sk, m] = await Promise.all([api.status(), api.retrievals(), api.skipped(), api.map()]);
+      if (gen !== loadGen.current) return;
+      setStatus(s); setRetrievals(rs); setSkipped(sk); applyMapDoc(m);
+      // Seed the de-dup ref with what the badge already shows, so the first live SSE
+      // freshness event that repeats it does not announce the same text twice.
+      lastFreshnessRef.current = `Index ${freshnessText(s)}`;
+      // The tree and the graph are functions of the index: refetch them only when it changed.
+      if (indexRef.current !== s.index_version) {
+        const [t, g] = await Promise.all([api.tree(), api.graph()]);
+        if (gen !== loadGen.current) return;
+        indexRef.current = s.index_version;
+        setTree(t); setGraph(g);
       }
       const seen = knownMax;
       if (seen === null) {
@@ -89,7 +105,11 @@ export function App() {
     load().catch((e: unknown) => toastError(e));
     return subscribe(
       () => { load().catch(() => {}); },
-      (s) => { setStatus(s); announce(`Index ${freshnessText(s)}`); },
+      (s) => {
+        setStatus(s);
+        const text = `Index ${freshnessText(s)}`;
+        if (text !== lastFreshnessRef.current) { lastFreshnessRef.current = text; announce(text); }
+      },
     );
   }, [announce, applyMapDoc]);
 
@@ -189,7 +209,6 @@ export function App() {
         // set can add or remove files from it, so the map must be refetched to match.
         if (excludeKey(doc.exclude) !== prevExcludeKey) {
           const g = await api.graph();
-          graphRef.current = g.index_version;
           setGraph(g);
         }
       } catch (e: unknown) {

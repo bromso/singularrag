@@ -6,15 +6,15 @@ use serde::Serialize;
 use singularrag_core::store::Store;
 use singularrag_core::Result;
 
-use super::state::{DrainStatsJson, Freshness};
+use super::state::Freshness;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FileCounts {
     pub indexed: i64,
     pub skipped: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct StatusDto {
     pub index_version: String,
     pub git_head: Option<String>,
@@ -24,7 +24,6 @@ pub struct StatusDto {
     pub foreign_indexing: bool,
     pub indexing: bool,
     pub files: FileCounts,
-    pub drain: DrainStatsJson,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,7 +166,6 @@ pub fn status(store: &Store, f: &Freshness) -> Result<StatusDto> {
         foreign_indexing: f.foreign_indexing,
         indexing: f.indexing,
         files: FileCounts { indexed, skipped },
-        drain: f.drain.clone(),
     })
 }
 

@@ -90,11 +90,33 @@ pub async fn skipped(
 /// `MapConfig` plus the token a client must hand back to write: `map.toml`'s mtime in
 /// milliseconds, 0 when the file does not exist. Kept here rather than in core so
 /// `MapConfig` stays the on-disk shape (spec §3).
-#[derive(Serialize)]
+///
+/// Deliberately not `#[serde(flatten)]` over `MapConfig`: that struct's list fields skip
+/// serialization when empty (needed so `save_atomic`'s `toml_edit` pretty-printer doesn't choke
+/// on an empty array of tables — see the comment on `MapConfig`), which would leak into this
+/// JSON response as a missing `pin`/`exclude`/`note`/`boundary` key instead of `[]`. The HTTP
+/// shape and the on-disk shape have different constraints, so they get independent `Serialize`
+/// impls even though the data is the same.
 pub struct MapDoc {
-    #[serde(flatten)]
     pub config: MapConfig,
     pub version: i64,
+}
+
+impl Serialize for MapDoc {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(6))?;
+        map.serialize_entry("pin", &self.config.pin)?;
+        map.serialize_entry("exclude", &self.config.exclude)?;
+        map.serialize_entry("note", &self.config.note)?;
+        map.serialize_entry("boundary", &self.config.boundary)?;
+        map.serialize_entry("deny", &self.config.deny)?;
+        map.serialize_entry("version", &self.version)?;
+        map.end()
+    }
 }
 
 /// A `PUT /api/map` body: the config, plus an optional `expected_version` that turns the

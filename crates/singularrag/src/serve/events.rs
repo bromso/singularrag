@@ -61,7 +61,8 @@ pub fn spawn_poller(state: AppState) -> tokio::task::JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serve::state::{Freshness, ServerEvent};
+    use crate::serve::queries::StatusDto;
+    use crate::serve::state::ServerEvent;
     use singularrag_core::engine::{Engine, MapRequest};
     use singularrag_core::fixture::write_ts_mini;
 
@@ -72,12 +73,15 @@ mod tests {
         });
         let s = format!("{e:?}");
         assert!(s.contains("change"), "{s}");
-        let e = to_sse_event(&ServerEvent::Freshness(Freshness {
+        let e = to_sse_event(&ServerEvent::Freshness(StatusDto {
             stale_count: 2,
+            git_head: Some("abc".into()),
             ..Default::default()
         }));
         let s = format!("{e:?}");
         assert!(s.contains("freshness"), "{s}");
+        assert!(s.contains("git_head"), "{s}");
+        assert!(s.contains("abc"), "{s}");
     }
 
     #[tokio::test]

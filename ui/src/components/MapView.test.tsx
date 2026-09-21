@@ -12,7 +12,7 @@ const payload: GraphPayload = {
   nodes: [{ path: "src/a.ts", symbols: 2, lang: "typescript" }, { path: "src/b.ts", symbols: 1, lang: null }, { path: "src/c.ts", symbols: 5, lang: null }],
   edges: [{ src: 1, dst: 0, weight: 1, names: 1 }],
 };
-const sym = (name: string, line: number, status: "served" | "cut" | "untouched") => ({ key: `k${line}`, symbol: { id: line, name, kind: "function", line_start: line, line_end: line, signature: name }, status, item: null });
+const sym = (name: string, line: number, status: "served" | "cut" | "untouched") => ({ key: `k${line}`, symbol: { id: line, name, kind: "function", line_start: line, line_end: line, signature: name }, status, item: null, moved: false });
 const rows: FileRow[] = [
   { path: "src/a.ts", lang: "typescript", served: 1, cut: 0, expandedByDefault: true, symbols: [sym("x", 1, "served"), sym("y", 2, "untouched")] },
   { path: "src/b.ts", lang: null, served: 0, cut: 1, expandedByDefault: true, symbols: [sym("z", 3, "cut")] },

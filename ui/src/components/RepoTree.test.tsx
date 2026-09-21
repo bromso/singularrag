@@ -49,11 +49,14 @@ describe("RepoTree", () => {
     const items: Item[] = [
       { rank: 1, symbol_id: 2, path: "src/b.ts", name: "h", line_start: 1, score: 0.5, served: true, reasons },
     ];
-    render(<RepoTree rows={joinRetrieval(files, items)} filter="" seedKey={0} onFocusRow={() => {}} onAction={() => {}} />);
+    const joined = joinRetrieval(files, items);
+    joined[0].symbols[0].moved = true;
+    render(<RepoTree rows={joined} filter="" seedKey={0} onFocusRow={() => {}} onAction={() => {}} />);
     const grid = screen.getByRole("treegrid", { name: "Repository" });
     const rows = within(grid).getAllByRole("row");
     expect(within(rows[0]).getByText("src/b.ts")).toBeTruthy();
     expect(within(grid).getByText("Referenced from x.ts (2).")).toBeTruthy();
+    expect(within(rows[1]).getByText("moved")).toBeTruthy();
   });
   test("filter narrows by path or symbol name", () => {
     render(<RepoTree rows={joinRetrieval(files, null)} filter="h" seedKey={0} onFocusRow={() => {}} onAction={() => {}} />);

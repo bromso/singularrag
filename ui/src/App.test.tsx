@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { App } from "./App";
 
-const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false, files: { indexed: 4, skipped: 1 }, drain: { chunks: 0, last: { scanned: 5, indexed: 4, unchanged: 0, skipped: 1, removed: 0, remaining: 0, lock_timeout: false } } };
+const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false, files: { indexed: 4, skipped: 1 } };
 const r = { score: 0.1, file_rank: 0.1, seeds: ["query:session"], referenced_by: [{ path: "src/http/middleware.ts", count: 2 }], pinned: false, fts_hit: true, query_ident_match: true };
 const retrieval = { id: 7, session_key: "mcp:claude-code:1:2", session_label: "Claude Code", tool: "repo_map", query: "session", focus_files: [], budget: 1024, limit_n: null, index_version: "abc123", git_head: "9b1e0d4f", stale_count: 0, created_at_ms: Date.now(), served: 1, cut: 0 };
 const tree = [{ path: "src/auth/session.ts", lang: "typescript", skipped_reason: null, symbols: [{ id: 1, name: "createSession", kind: "function", line_start: 3, line_end: 6, signature: "export function createSession(user: User, ttl: number): Session" }] }];
@@ -27,12 +27,30 @@ let blastGate: Promise<void> | null = null;
 // live SSE "change" event (another agent's retrieval) without a real
 // EventSource, by invoking the captured listener directly.
 let changeHandler: ((e: { data: string }) => void) | null = null;
+// Same idea, for the `subscribe()` module's "freshness" listener — lets a test
+// simulate a live SSE "freshness" event without a real EventSource.
+let freshnessHandler: ((e: { data: string }) => void) | null = null;
 // When set, `/api/graph` answers with these nodes instead of mirroring `tree` — lets a
 // test simulate a file excluded from the map (present in the tree/retrieval, absent
 // from the graph) without a second permanent fixture file.
 let graphNodesOverride: { path: string; symbols: number; lang: string | null }[] | null = null;
 // Extra `items` appended to the `/api/retrievals/7` response.
 let extraRetrievalItems: unknown[] = [];
+// The `/api/retrievals/7` response's own item(s), reset in `beforeEach` to the
+// single default item; a test can override it (e.g. to force a tier-3 "moved"
+// join) without disturbing the other tests.
+let detailItems: unknown[] = [];
+// What `GET /api/status` answers as `index_version`; a test can change this before
+// firing a change event to simulate the index having moved on.
+let statusVersion = "abc123";
+// When non-null, each `GET /api/status` call captures its response body immediately
+// (reflecting `statusVersion` at call time, like a real server would) but blocks
+// on a fresh gate before returning it, and pushes that gate's resolver here — so a
+// test can fire two overlapping loads and then choose which one's status resolves
+// first, independent of call order.
+let statusGates: (() => void)[] | null = null;
+// Counts fetch calls whose URL contains `frag`.
+const calls = (frag: string) => (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).includes(frag)).length;
 
 beforeEach(() => {
   // The Tree/Map choice persists in localStorage (Task 6); clear it so one test's
@@ -46,11 +64,16 @@ beforeEach(() => {
   blastGate = null;
   retrievalList = [retrieval];
   changeHandler = null;
+  freshnessHandler = null;
   graphNodesOverride = null;
   extraRetrievalItems = [];
+  detailItems = [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }];
+  statusVersion = "abc123";
+  statusGates = null;
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
+      if (type === "freshness") freshnessHandler = cb;
     }
     close() {}
   };
@@ -59,14 +82,18 @@ beforeEach(() => {
     const url = String(input);
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
     if (init?.headers && (init.headers as Record<string, string>).Authorization !== "Bearer deadbeef") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
-    if (url.endsWith("/api/status")) return json(status);
+    if (url.endsWith("/api/status")) {
+      const body = { ...status, index_version: statusVersion };
+      if (statusGates) await new Promise<void>((resolve) => { statusGates!.push(resolve); });
+      return json(body);
+    }
     if (url.includes("/api/blast?")) {
       if (blastGate) await blastGate;
       return json({ root: { path: "src/auth/session.ts", symbol: "createSession" }, files: [{ path: "src/http/middleware.ts", depth: 1, via: "createSession" }], truncated: null });
     }
     if (url.endsWith("/api/graph")) return json({ index_version: "abc123", nodes: graphNodesOverride ?? tree.map((f) => ({ path: f.path, symbols: f.symbols.length, lang: f.lang })), edges: [] });
     if (url.includes("/api/retrievals?")) return json(retrievalList);
-    if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }, ...extraRetrievalItems] });
+    if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [...detailItems, ...extraRetrievalItems] });
     if (url.endsWith("/api/tree")) return json(tree);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
     // GET /api/map returns a fresh object (new identity) each call, reflecting
@@ -114,6 +141,18 @@ describe("App", () => {
     expect(await screen.findByText(".env")).toBeTruthy();
     expect(screen.getByText("denylisted")).toBeTruthy();
   });
+  test("a symbol served at a line the tree no longer has it at shows as moved in the panel", async () => {
+    const user = userEvent.setup();
+    detailItems = [{ rank: 1, symbol_id: 999, path: "src/auth/session.ts", name: "createSession", line_start: 9, score: 0.1, served: true, reasons: r }];
+    render(<App />);
+    const rail = await screen.findByRole("region", { name: "Retrievals" });
+    await user.click(within(rail).getByRole("button", { name: /repo_map.*session/ }));
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await waitFor(() => expect(within(grid).getByText("createSession")).toBeTruthy());
+    await user.click(within(grid).getByText("createSession"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    expect(await within(panel).findByText("Moved since this retrieval (was line 9)")).toBeTruthy();
+  });
   test("announces a summary at load and only new retrievals after it", async () => {
     render(<App />);
     const live = await screen.findByRole("log", { name: "Announcements" });
@@ -127,6 +166,27 @@ describe("App", () => {
     expect(changeHandler).not.toBeNull();
     changeHandler?.({ data: JSON.stringify({ max_retrieval_id: 8 }) });
     await waitFor(() => expect(live.textContent).toContain("New retrieval from Codex: find_symbol, 2 served, 1 cut, fresh"));
+  });
+  test("identical freshness payloads announce once; a change announces again", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const log = () => screen.getByRole("log", { name: "Announcements" }).textContent ?? "";
+    const payload = { ...status, indexing: true };
+    await act(async () => { freshnessHandler!({ data: JSON.stringify(payload) }); });
+    await act(async () => { freshnessHandler!({ data: JSON.stringify(payload) }); });
+    expect(log().split("Index indexing").length - 1).toBe(1);
+    await act(async () => { freshnessHandler!({ data: JSON.stringify({ ...status, indexing: false }) }); });
+    expect(log()).toContain("Index fresh");
+    expect(screen.getByLabelText("Index freshness").textContent).toContain("9b1e0d4");
+  });
+  test("the first freshness event does not re-announce what the initial load already showed", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const log = () => screen.getByRole("log", { name: "Announcements" }).textContent ?? "";
+    await act(async () => { freshnessHandler!({ data: JSON.stringify(status) }); });
+    expect(log()).not.toContain("Index fresh");
+    await act(async () => { freshnessHandler!({ data: JSON.stringify({ ...status, indexing: true }) }); });
+    expect(log()).toContain("Index indexing");
   });
   test("a_row_action_button_moves_focus_to_the_detail_panel", async () => {
     const user = userEvent.setup();
@@ -305,6 +365,71 @@ describe("App", () => {
       const graphCallsAfter = (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).endsWith("/api/graph")).length;
       expect(graphCallsAfter).toBeGreaterThan(graphCallsBefore);
     });
+  });
+
+  test("a change event with the same index version refetches retrievals and the map but not the tree or graph", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const tree0 = calls("/api/tree"), graph0 = calls("/api/graph"), rs0 = calls("/api/retrievals?");
+    await act(async () => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
+    await waitFor(() => expect(calls("/api/retrievals?")).toBe(rs0 + 1));
+    expect(calls("/api/tree")).toBe(tree0);
+    expect(calls("/api/graph")).toBe(graph0);
+  });
+
+  test("a change event with a new index version refetches the tree and the graph", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const tree0 = calls("/api/tree"), graph0 = calls("/api/graph");
+    statusVersion = "def456";
+    await act(async () => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
+    await waitFor(() => expect(calls("/api/tree")).toBe(tree0 + 1));
+    expect(calls("/api/graph")).toBe(graph0 + 1);
+  });
+
+  test("a superseded load applies nothing, even if it resolves after the load that superseded it", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    const tree0 = calls("/api/tree");
+
+    statusGates = [];
+    // Load A starts (older generation) and blocks on its /api/status call.
+    changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) });
+    await waitFor(() => expect(statusGates!.length).toBe(1));
+
+    // Load B starts (newer generation, newer index version) and also blocks.
+    statusVersion = "def456";
+    changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) });
+    await waitFor(() => expect(statusGates!.length).toBe(2));
+
+    // Release B's gate and let it run to completion (including its tree/graph
+    // refetch and its `indexRef` write) before releasing A — so A (started first)
+    // resolves LAST, the exact ordering that pinned `indexRef`/tree/graph to a
+    // stale version before the generation-counter fix.
+    const [resolveA, resolveB] = statusGates!;
+    await act(async () => { resolveB(); });
+    await waitFor(() => expect(calls("/api/tree")).toBe(tree0 + 1));
+    await act(async () => { resolveA(); });
+    // Give A's now-unblocked chain (Promise.all resolution, the indexRef check,
+    // and — in the pre-fix code — a second tree/graph fetch) every remaining tick
+    // it needs to finish; `waitFor`'s retrying poll (not a fixed flush count)
+    // makes the assertion below deterministic either way.
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+
+    // Only B's tree/graph refetch should have landed: A's late-arriving (superseded)
+    // load must not have refetched the tree a second time (the old bug: whichever
+    // load resolved last re-fetched and overwrote `indexRef` back to its own stale
+    // version, "abc123", causing a second, redundant tree fetch here).
+    expect(calls("/api/tree")).toBe(tree0 + 1);
+
+    // `indexRef` must have settled on B's version ("def456"), not A's stale
+    // "abc123" — a further change event carrying "def456" again must not refetch
+    // the tree, which it would if A's stale write had won.
+    statusGates = null;
+    const rs0 = calls("/api/retrievals?");
+    await act(async () => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
+    await waitFor(() => expect(calls("/api/retrievals?")).toBe(rs0 + 1));
+    expect(calls("/api/tree")).toBe(tree0 + 1);
   });
 
   test("a symbol row can show its blast radius in the panel", async () => {

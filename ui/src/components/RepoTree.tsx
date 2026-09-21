@@ -53,6 +53,7 @@ function SymbolRowView({ file, symbol, isFocused, onFocusRow, onAction }: {
       <span className="font-mono text-sm">{symbol.symbol.name}</span>
       <span className="text-xs text-muted-foreground">{symbol.symbol.kind} · line {symbol.symbol.line_start}</span>
       <StatusMark status={symbol.status} />
+      {symbol.moved && <span className="text-xs text-muted-foreground">moved</span>}
       {symbol.item && <span className="text-xs tabular-nums">{symbol.item.score.toFixed(2)}</span>}
       {symbol.item && <span className="truncate text-xs text-muted-foreground">{reason}</span>}
       <span className="truncate text-xs text-muted-foreground" title={symbol.symbol.signature}>{symbol.symbol.signature}</span>
