@@ -36,13 +36,16 @@ impl Record {
     }
 }
 
-/// Trim, strip a leading `./`, drop entries without `::`, keep the first `answer_max`.
+/// Trim, strip a leading `./`, drop entries without `::`, drop repeats (a repeated
+/// symbol would count twice against precision), keep the first `answer_max`.
 pub fn normalise(symbols: &[String], answer_max: usize) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     symbols
         .iter()
         .map(|s| s.trim())
         .map(|s| s.strip_prefix("./").unwrap_or(s))
         .filter(|s| s.contains("::"))
+        .filter(|s| seen.insert(s.to_string()))
         .map(str::to_string)
         .take(answer_max)
         .collect()
@@ -163,6 +166,15 @@ mod tests {
             2,
         );
         assert_eq!(out, s(&["src/a.ts::A", "src/b.ts::B"]));
+    }
+
+    #[test]
+    fn normalise_dedupes_before_the_cap() {
+        let out = normalise(
+            &s(&["src/a.ts::A", "./src/a.ts::A", "src/b.ts::B", "src/c.ts::C"]),
+            3,
+        );
+        assert_eq!(out, s(&["src/a.ts::A", "src/b.ts::B", "src/c.ts::C"]));
     }
 
     #[test]
