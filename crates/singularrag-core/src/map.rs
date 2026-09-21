@@ -84,12 +84,9 @@ pub fn fit(items: &[ScoredSymbol], budget: usize) -> usize {
     lo
 }
 
-pub fn header(
-    index_version: &str,
-    git_head: Option<&str>,
-    stale: usize,
-    retrieval_id: i64,
-) -> String {
+/// `# singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh`: the first line of every tool
+/// response, with or without a retrieval id.
+pub fn freshness_header(index_version: &str, git_head: Option<&str>, stale: usize) -> String {
     let idx: String = index_version.chars().take(6).collect();
     let head = match git_head {
         Some(h) if !h.is_empty() => h.chars().take(7).collect::<String>(),
@@ -100,7 +97,19 @@ pub fn header(
     } else {
         format!("STALE: {stale} files changed since index")
     };
-    format!("# singularrag · index {idx} · HEAD {head} · {fresh} · retrieval r_{retrieval_id:06}")
+    format!("# singularrag · index {idx} · HEAD {head} · {fresh}")
+}
+
+pub fn header(
+    index_version: &str,
+    git_head: Option<&str>,
+    stale: usize,
+    retrieval_id: i64,
+) -> String {
+    format!(
+        "{} · retrieval r_{retrieval_id:06}",
+        freshness_header(index_version, git_head, stale)
+    )
 }
 
 /// `recorded` is how many of the cut candidates were written to `retrieval_items`
@@ -207,6 +216,10 @@ mod tests {
         assert_eq!(
             header("7f3a2c9d1e0b", None, 4, 7),
             "# singularrag · index 7f3a2c · HEAD none · STALE: 4 files changed since index · retrieval r_000007"
+        );
+        assert_eq!(
+            freshness_header("7f3a2c9d1e0b", Some("9b1e0d4f5a6b7c8d"), 0),
+            "# singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh"
         );
         assert_eq!(
             footer(42, 310, 25),
