@@ -95,15 +95,16 @@ Three tools. `repo_map` returns something like:
 
 ```
 # singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh · retrieval r_000123
-src/auth/session.ts:
-    3  export function createSession(user: User, ttl: number): Session  ← src/http/middleware.ts, src/cli/login.ts
-    7  export class SessionStore  ← src/http/middleware.ts
-src/http/middleware.ts:
-    2  export function requireSession(token: string): Session  ← src/http/routes.ts
+src/auth/session.ts:  ← src/http/middleware.ts, src/cli/login.ts
+    3  export function createSession(user: User, ttl: number): Session
+    7  export class SessionStore
+src/http/middleware.ts:  ← src/http/routes.ts
+        note (agent): Wraps every request; the token check lives here.
+    2  export function requireSession(token: string): Session
 # 42 of 310 symbols shown · 268 more ranked below budget · 25 recorded · widen with a larger budget or a focus file
 ```
 
-Each row ends with the files that reference the symbol, strongest first, so locate, trace, blast-radius and placement questions can be answered from the map without opening files. `find_symbol` looks a name up and lists which files reference it. Neither tool ever returns function bodies, comments or string literals.
+Each file header ends with the files that reference it, strongest first, and a note (yours or the agent's) sits under the header or under its symbol's row, so locate, trace, blast-radius and placement questions can be answered from the map without opening files. `find_symbol` looks a name up and lists which files reference it. Neither tool ever returns function bodies, comments or string literals.
 
 `annotate` lets the agent leave a one-paragraph note on a file or symbol; it lands in `map.toml`, shows in the next map with an `(agent)` tag, and the developer can delete it from the page.
 

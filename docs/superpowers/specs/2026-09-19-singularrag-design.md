@@ -127,8 +127,8 @@ or `· STALE: 4 files changed since index ·` in place of `fresh`.
 - Inputs: `query` (string, optional: identifiers or natural language), `focus_files` (string[], optional, repo-relative), `budget_tokens` (int, default 1024, max 8192).
 - Output:
 ```
-src/auth/session.ts:
-   12  export function createSession(user: User, ttl: number): Session  ← src/http/middleware.ts, src/cli/login.ts
+src/auth/session.ts:  ← src/http/middleware.ts, src/cli/login.ts
+   12  export function createSession(user: User, ttl: number): Session
    48  export class SessionStore
 src/http/middleware.ts:
    20  export const requireSession: Middleware
@@ -136,7 +136,7 @@ src/http/middleware.ts:
 # 42 of 310 symbols shown · 268 more ranked below budget · 25 recorded · widen with a larger budget or a focus file
 ```
 - Never includes bodies, comments or string literals.
-- A row ends with `← ` and the files that reference the symbol, strongest first, at most three plus `+N` for the rest the ranker kept (it keeps five). The tool description tells the agent to answer locate, trace, blast-radius and placement questions from the map and to read a file only to confirm a detail the map does not show. *Amended 2026-09-21 after the first full tier-two run: the map served 0.76 of the gold but the agent read as many files as without it, and the re-read map was the whole token loss.*
+- A file header ends with `← ` and the files that reference any served symbol of the file, strongest two plus `+N`; rows are `line  signature`. The tool description tells the agent to answer locate, trace, blast-radius and placement questions from the map and to read a file only to confirm a detail the map does not show. *Amended 2026-09-21 after the first full tier-two run: the map served 0.76 of the gold but the agent read as many files as without it, and the re-read map was the whole token loss.*
 - *(Amended 2026-09-20: the footer states two different numbers — how many ranked symbols are below the budget line, and how many of those were recorded in `retrieval_items` (at most 25) — because the earlier one-number example read as if they were the same.)*
 
 ### `find_symbol`
