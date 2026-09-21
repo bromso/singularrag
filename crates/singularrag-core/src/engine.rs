@@ -387,13 +387,24 @@ impl Engine {
         self.reload_config_if_changed()?;
         let symbol = req.symbol.clone();
         let mut config = self.config.clone();
-        let before = config.note.len();
-        config
+        let own_idx = config
             .note
-            .retain(|n| !(n.is_agent() && n.path == req.path && n.symbol == symbol));
-        let had_own = config.note.len() < before;
+            .iter()
+            .position(|n| n.is_agent() && n.path == req.path && n.symbol == symbol);
+        let had_own = own_idx.is_some();
         let removed = text.is_empty();
-        if !removed {
+        if removed {
+            if let Some(idx) = own_idx {
+                config.note.remove(idx);
+            }
+        } else if let Some(idx) = own_idx {
+            // Overwrite in place so a replace stays a small diff instead of
+            // moving the note to the end of the array.
+            let n = &mut config.note[idx];
+            n.text = text;
+            n.session = Some(self.session_key.clone());
+            n.at = Some(crate::time::rfc3339_now());
+        } else {
             config.note.push(Note {
                 path: req.path.clone(),
                 symbol: symbol.clone(),
@@ -955,6 +966,9 @@ mod tests {
         assert!(r.text.contains("(2 notes on this file)"), "{}", r.text);
         let c = e.config();
         assert_eq!(c.note.len(), 2);
+        // The replace overwrote the agent note in place; the human note at
+        // index 0 was there first, so the agent note stays at index 1.
+        assert!(c.note[1].is_agent() && c.note[1].text == "second");
         assert_eq!(
             c.note_on("src/auth/session.ts", Some("createSession"), true)
                 .unwrap()
