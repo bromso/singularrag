@@ -237,6 +237,9 @@ impl Engine {
             &req.focus_files,
         )?;
         let served = map::fit(&ranked, budget, &self.config.note);
+        // The budget is soft (the footer says so): a note-heavy top file at a tiny
+        // budget must not produce a map with no symbols.
+        let served = if ranked.is_empty() { 0 } else { served.max(1) };
         let body = map::render(&ranked, served, &self.config.note);
         let cut_recorded = (ranked.len() - served).min(CUT_RECORDED);
         let (version, head) = self.index_meta()?;
@@ -601,6 +604,47 @@ mod tests {
             .query_row("SELECT tool FROM retrievals", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tool, "repo_map");
+    }
+
+    /// A note-heavy top file at a tiny budget must not produce a map with no symbols:
+    /// the budget is soft (the footer says so), so `fit` returning 0 would be a lie.
+    #[test]
+    fn a_map_always_serves_at_least_one_symbol_when_any_ranked() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        std::fs::create_dir_all(dir.path().join(".singularrag")).unwrap();
+        let human_note = "h".repeat(300);
+        std::fs::write(
+            dir.path().join(".singularrag/map.toml"),
+            format!("[[note]]\npath = \"src/auth/session.ts\"\ntext = \"{human_note}\"\n"),
+        )
+        .unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        let agent_note = "a".repeat(300);
+        e.annotate(&AnnotateRequest {
+            path: "src/auth/session.ts".into(),
+            symbol: None,
+            text: agent_note,
+        })
+        .unwrap();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("session".into()),
+                focus_files: vec![],
+                budget_tokens: 64,
+            })
+            .unwrap();
+        assert!(resp.served >= 1, "{}", resp.text);
+        // A row starts with spaces then a digit; a note line starts with spaces then
+        // "note". Skip the notes and confirm at least one row got through.
+        let has_row = resp.text.lines().any(|l| {
+            l.starts_with("    ")
+                && l.trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+        });
+        assert!(has_row, "{}", resp.text);
     }
 
     /// `symbols.id` is reused after a reindex (SQLite hands out `max(rowid)+1`), so a
