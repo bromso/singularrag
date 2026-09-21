@@ -180,6 +180,37 @@ fn path_prints_the_chain_and_changed_needs_git() {
 }
 
 #[test]
+fn hook_read_reads_stdin_and_prints_a_decision() {
+    let dir = fixture();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["--repo", dir.path().to_str().unwrap(), "index"])
+        .assert()
+        .success();
+    let session = format!("cli-{}", std::process::id());
+    let input = format!(
+        r#"{{"session_id":"{session}","cwd":"{}","tool_name":"Read","tool_input":{{"file_path":"{}"}}}}"#,
+        dir.path().display(),
+        dir.path().join("src/auth/session.ts").display()
+    );
+    let mut cmd = Command::cargo_bin("singularrag").unwrap();
+    cmd.args(["--repo", dir.path().to_str().unwrap(), "hook", "read"])
+        .write_stdin(input.clone());
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"permissionDecision\":\"deny\""));
+    let mut again = Command::cargo_bin("singularrag").unwrap();
+    again
+        .args(["--repo", dir.path().to_str().unwrap(), "hook", "read"])
+        .write_stdin(input);
+    again
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"permissionDecision\":\"allow\""));
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("singularrag-hook").join(&session));
+}
+
+#[test]
 fn readme_mcp_json_snippet_is_valid_and_points_at_the_mcp_subcommand() {
     let readme =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();

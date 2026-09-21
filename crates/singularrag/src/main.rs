@@ -8,6 +8,7 @@ use singularrag_core::engine::{ChangedRequest, Engine, FindRequest, MapRequest, 
 use singularrag_core::map::DEFAULT_BUDGET;
 
 mod actor;
+mod hook;
 mod mcp;
 mod serve;
 
@@ -82,6 +83,11 @@ enum Cmd {
         #[arg(long)]
         no_open: bool,
     },
+    /// Claude Code PreToolUse hook (installed by `init`): reads the hook JSON on stdin
+    Hook {
+        #[arg(value_enum)]
+        event: hook::HookEvent,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -94,6 +100,12 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Cmd::Hook { event } = cli.cmd {
+        let mut input = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+        println!("{}", hook::run(event, cli.repo.clone(), &input));
+        return Ok(());
+    }
     let root = cli.repo.unwrap_or(std::env::current_dir()?);
     // `mcp` returns before the `Engine::open` below, and must: the Engine is `!Sync` and
     // belongs to the actor thread, which opens it lazily at the first job with a session
@@ -172,6 +184,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Mcp { .. } => unreachable!("handled above before Engine::open"),
         Cmd::Serve { .. } => unreachable!("handled above before Engine::open"),
+        Cmd::Hook { .. } => unreachable!("handled above before Engine::open"),
     }
     Ok(())
 }
