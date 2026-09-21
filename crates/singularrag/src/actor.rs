@@ -9,7 +9,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use singularrag_core::engine::{
-    AnnotateRequest, AnnotateResponse, Engine, FindRequest, FindResponse, MapRequest, MapResponse,
+    AnnotateRequest, AnnotateResponse, ChangedRequest, ChangedResponse, Engine, FindRequest,
+    FindResponse, MapRequest, MapResponse, TraceRequest, TraceResponse,
 };
 use singularrag_core::index::IndexStats;
 use tokio::sync::oneshot;
@@ -36,6 +37,8 @@ pub enum Job {
     Map(MapRequest, oneshot::Sender<Reply<MapResponse>>),
     Find(FindRequest, oneshot::Sender<Reply<FindResponse>>),
     Annotate(AnnotateRequest, oneshot::Sender<Reply<AnnotateResponse>>),
+    Trace(TraceRequest, oneshot::Sender<Reply<TraceResponse>>),
+    Changed(ChangedRequest, oneshot::Sender<Reply<ChangedResponse>>),
     /// One budgeted refresh with no retrieval recorded and no drain armed: the file
     /// watcher's job, not a tool response. Constructed by `serve::watcher` through
     /// `EngineHandle::refresh`, and exercised directly by the actor's unit tests.
@@ -91,6 +94,14 @@ impl EngineHandle {
 
     pub async fn annotate(&self, req: AnnotateRequest) -> Reply<AnnotateResponse> {
         self.ask(|tx| Job::Annotate(req, tx)).await
+    }
+
+    pub async fn trace_path(&self, req: TraceRequest) -> Reply<TraceResponse> {
+        self.ask(|tx| Job::Trace(req, tx)).await
+    }
+
+    pub async fn changed(&self, req: ChangedRequest) -> Reply<ChangedResponse> {
+        self.ask(|tx| Job::Changed(req, tx)).await
     }
 
     // One budgeted refresh with no retrieval recorded. The watcher's job; see the
@@ -228,6 +239,24 @@ impl Actor {
                 let out = self
                     .engine()
                     .and_then(|e| e.annotate(&req).map_err(|e| e.to_string()));
+                if let Ok(r) = &out {
+                    self.note(r.stale_count, r.lock_timeout);
+                }
+                let _ = reply.send(out);
+            }
+            Job::Trace(req, reply) => {
+                let out = self
+                    .engine()
+                    .and_then(|e| e.trace_path(&req).map_err(|e| e.to_string()));
+                if let Ok(r) = &out {
+                    self.note(r.stale_count, r.lock_timeout);
+                }
+                let _ = reply.send(out);
+            }
+            Job::Changed(req, reply) => {
+                let out = self
+                    .engine()
+                    .and_then(|e| e.changed(&req).map_err(|e| e.to_string()));
                 if let Ok(r) = &out {
                     self.note(r.stale_count, r.lock_timeout);
                 }

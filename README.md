@@ -91,7 +91,7 @@ Results land in `eval/runs/<timestamp>-<label>/` with one record and raw stream 
 
 ## What the agent sees
 
-Three tools. `repo_map` returns something like:
+Five tools. `repo_map` returns something like:
 
 ```
 # singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh · retrieval r_000123
@@ -107,6 +107,8 @@ src/http/middleware.ts:  ← src/http/routes.ts
 Each file header ends with the files that reference it, strongest first, and a note (yours or the agent's) sits under the header or under its symbol's row, so locate, trace, blast-radius and placement questions can be answered from the map without opening files. `find_symbol` looks a name up and lists which files reference it. Neither tool ever returns function bodies, comments or string literals.
 
 `annotate` lets the agent leave a one-paragraph note on a file or symbol; it lands in `map.toml`, shows in the next map with an `(agent)` tag, and the developer can delete it from the page.
+
+`trace_path` answers how two symbols connect; `changed` lists what your uncommitted (or branch) changes touch and who references each symbol. `singularrag init` installs a Claude Code hook that refuses the first file read of a session until the map has been consulted, once per session.
 
 ## CLI
 
