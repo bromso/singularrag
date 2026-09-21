@@ -303,7 +303,7 @@ impl MapConfig {
                     ))
                 }
             }
-            if n.is_agent() != (n.session.is_some() && n.at.is_some()) {
+            if n.session.is_some() != n.is_agent() || n.at.is_some() != n.is_agent() {
                 return Err(err(
                     "by",
                     format!("session and at are present exactly when by = \"{AGENT}\""),
@@ -773,6 +773,24 @@ extra_patterns = ["*.snap"]
         );
         assert_eq!(
             field("[[note]]\npath = \"src/a.ts\"\ntext = \"x\"\nsession = \"s\"\nat = \"t\"\n"),
+            "note[0].by"
+        );
+        // a human note with only one of session/at is still wrong, not just both
+        assert_eq!(
+            field("[[note]]\npath = \"src/a.ts\"\ntext = \"x\"\nsession = \"s\"\n"),
+            "note[0].by"
+        );
+        assert_eq!(
+            field("[[note]]\npath = \"src/a.ts\"\ntext = \"x\"\nat = \"t\"\n"),
+            "note[0].by"
+        );
+        // an agent note missing just one of session/at is also wrong
+        assert_eq!(
+            field("[[note]]\npath = \"src/a.ts\"\ntext = \"x\"\nby = \"agent\"\nsession = \"s\"\n"),
+            "note[0].by"
+        );
+        assert_eq!(
+            field("[[note]]\npath = \"src/a.ts\"\ntext = \"x\"\nby = \"agent\"\nat = \"t\"\n"),
             "note[0].by"
         );
         // one paragraph, at most 300 characters
