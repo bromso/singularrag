@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use singularrag_core::engine::{Engine, FindRequest, FindResponse, MapRequest, MapResponse};
+use singularrag_core::engine::{
+    AnnotateRequest, AnnotateResponse, Engine, FindRequest, FindResponse, MapRequest, MapResponse,
+};
 use singularrag_core::index::IndexStats;
 use tokio::sync::oneshot;
 
@@ -33,6 +35,7 @@ pub struct DrainStats {
 pub enum Job {
     Map(MapRequest, oneshot::Sender<Reply<MapResponse>>),
     Find(FindRequest, oneshot::Sender<Reply<FindResponse>>),
+    Annotate(AnnotateRequest, oneshot::Sender<Reply<AnnotateResponse>>),
     /// One budgeted refresh with no retrieval recorded and no drain armed: the file
     /// watcher's job, not a tool response. Constructed by `serve::watcher` through
     /// `EngineHandle::refresh`, and exercised directly by the actor's unit tests.
@@ -84,6 +87,10 @@ impl EngineHandle {
 
     pub async fn find(&self, req: FindRequest) -> Reply<FindResponse> {
         self.ask(|tx| Job::Find(req, tx)).await
+    }
+
+    pub async fn annotate(&self, req: AnnotateRequest) -> Reply<AnnotateResponse> {
+        self.ask(|tx| Job::Annotate(req, tx)).await
     }
 
     // One budgeted refresh with no retrieval recorded. The watcher's job; see the
@@ -212,6 +219,15 @@ impl Actor {
                 let out = self
                     .engine()
                     .and_then(|e| e.find_symbol(&req).map_err(|e| e.to_string()));
+                if let Ok(r) = &out {
+                    self.note(r.stale_count, r.lock_timeout);
+                }
+                let _ = reply.send(out);
+            }
+            Job::Annotate(req, reply) => {
+                let out = self
+                    .engine()
+                    .and_then(|e| e.annotate(&req).map_err(|e| e.to_string()));
                 if let Ok(r) = &out {
                     self.note(r.stale_count, r.lock_timeout);
                 }

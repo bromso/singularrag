@@ -91,7 +91,7 @@ Results land in `eval/runs/<timestamp>-<label>/` with one record and raw stream 
 
 ## What the agent sees
 
-Two tools. `repo_map` returns something like:
+Three tools. `repo_map` returns something like:
 
 ```
 # singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh · retrieval r_000123
@@ -104,6 +104,8 @@ src/http/middleware.ts:
 ```
 
 Each row ends with the files that reference the symbol, strongest first, so locate, trace, blast-radius and placement questions can be answered from the map without opening files. `find_symbol` looks a name up and lists which files reference it. Neither tool ever returns function bodies, comments or string literals.
+
+`annotate` lets the agent leave a one-paragraph note on a file or symbol; it lands in `map.toml`, shows in the next map with an `(agent)` tag, and the developer can delete it from the page.
 
 ## CLI
 

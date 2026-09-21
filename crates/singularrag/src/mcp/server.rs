@@ -1,4 +1,4 @@
-//! The rmcp handler: two tools, server info, and the session key from clientInfo.
+//! The rmcp handler: three tools, server info, and the session key from clientInfo.
 //! All engine work goes through the actor; handlers only await a reply.
 
 use std::sync::{Arc, Mutex};
@@ -11,11 +11,11 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
-use singularrag_core::engine::{FindRequest, MapRequest};
+use singularrag_core::engine::{AnnotateRequest, FindRequest, MapRequest};
 
 use crate::actor::EngineHandle;
 
-pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this repository. Call repo_map first with your task as the query, then read only the files it points at. Use find_symbol to locate a name. Both tools are read-only. A STALE header means files changed since indexing; the index catches up in the background.";
+pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this repository. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show. Use find_symbol to locate a name. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. repo_map and find_symbol are read-only; annotate writes only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background.";
 
 // Only read by the unit test below, which asserts the router's reported description
 // equals these constants (see the note on the `#[tool_router]` impl block); the macro
@@ -26,6 +26,9 @@ pub const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the symbols most r
 
 #[allow(dead_code)]
 pub const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module. `limit` defaults to 10, max 50.";
+
+#[allow(dead_code)]
+pub const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is repo-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs.";
 
 /// `clientInfo.name` → the `<client>` part of the session key. Lower-case; whitespace
 /// and colons become `-` so the key stays `mcp:<client>:<pid>:<start>`.
@@ -85,6 +88,26 @@ impl From<FindArgs> for FindRequest {
     }
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AnnotateArgs {
+    /// Repo-relative path of an indexed file.
+    pub path: String,
+    /// A symbol defined in that file; omit for a note on the file.
+    pub symbol: Option<String>,
+    /// One or two sentences; empty removes your note on the target.
+    pub text: String,
+}
+
+impl From<AnnotateArgs> for AnnotateRequest {
+    fn from(a: AnnotateArgs) -> Self {
+        AnnotateRequest {
+            path: a.path,
+            symbol: a.symbol.filter(|s| !s.trim().is_empty()),
+            text: a.text,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SingularragServer {
     handle: EngineHandle,
@@ -136,6 +159,17 @@ impl SingularragServer {
     ) -> Result<CallToolResult, ErrorData> {
         text_result(self.handle.find(args.into()).await.map(|r| r.text))
     }
+
+    #[tool(
+        name = "annotate",
+        description = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is repo-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs."
+    )]
+    async fn annotate(
+        &self,
+        Parameters(args): Parameters<AnnotateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        text_result(self.handle.annotate(args.into()).await.map(|r| r.text))
+    }
 }
 
 #[tool_handler(router = self.tool_router.clone())]
@@ -178,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_list_is_exactly_the_two_spec_tools() {
+    fn tool_list_is_exactly_the_three_spec_tools() {
         let router = SingularragServer::tool_router();
         let mut names: Vec<String> = router
             .list_all()
@@ -186,12 +220,23 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["find_symbol", "repo_map"]);
+        assert_eq!(names, vec!["annotate", "find_symbol", "repo_map"]);
         let tools = router.list_all();
         let map = tools.iter().find(|t| t.name == "repo_map").unwrap();
         assert_eq!(map.description.as_deref(), Some(REPO_MAP_DESCRIPTION));
         let find = tools.iter().find(|t| t.name == "find_symbol").unwrap();
         assert_eq!(find.description.as_deref(), Some(FIND_SYMBOL_DESCRIPTION));
+        let ann = tools.iter().find(|t| t.name == "annotate").unwrap();
+        assert_eq!(ann.description.as_deref(), Some(ANNOTATE_DESCRIPTION));
+        let schema = serde_json::to_value(&ann.input_schema).unwrap();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("path")
+                && props.contains_key("symbol")
+                && props.contains_key("text")
+        );
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "path") && required.iter().any(|r| r == "text"));
         let schema = serde_json::to_value(&map.input_schema).unwrap();
         let props = schema["properties"].as_object().unwrap();
         assert!(

@@ -11,6 +11,7 @@ use tokio::process::Command;
 
 const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the symbols most relevant to a task, each with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Rows are `line  signature  ← referencing files`, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
 const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module. `limit` defaults to 10, max 50.";
+const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is repo-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs.";
 
 #[derive(Clone)]
 struct TestClient;
@@ -83,14 +84,73 @@ async fn lists_exactly_the_two_tools_with_spec_descriptions() {
         .starts_with("singularrag gives you a ranked map"));
     let mut tools = client.list_all_tools().await.unwrap();
     tools.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0].name, "find_symbol");
+    assert_eq!(tools.len(), 3);
+    assert_eq!(tools[0].name, "annotate");
+    assert_eq!(tools[0].description.as_deref(), Some(ANNOTATE_DESCRIPTION));
+    assert_eq!(tools[1].name, "find_symbol");
     assert_eq!(
-        tools[0].description.as_deref(),
+        tools[1].description.as_deref(),
         Some(FIND_SYMBOL_DESCRIPTION)
     );
-    assert_eq!(tools[1].name, "repo_map");
-    assert_eq!(tools[1].description.as_deref(), Some(REPO_MAP_DESCRIPTION));
+    assert_eq!(tools[2].name, "repo_map");
+    assert_eq!(tools[2].description.as_deref(), Some(REPO_MAP_DESCRIPTION));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn annotate_writes_a_note_the_next_map_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    write_ts_mini(dir.path());
+    let client = connect(dir.path(), &[]).await;
+    let r = client
+        .call_tool(
+            CallToolRequestParams::new("annotate").with_arguments(object!({
+                "path": "src/auth/session.ts",
+                "symbol": "createSession",
+                "text": "Sessions are minted here; the CLI and the middleware both call it."
+            })),
+        )
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+    let t = text_of(&r);
+    assert!(
+        t.starts_with("# singularrag · index ")
+            && t.contains("noted src/auth/session.ts::createSession (1 note on this file)"),
+        "{t}"
+    );
+    let on_disk = std::fs::read_to_string(dir.path().join(".singularrag/map.toml")).unwrap();
+    assert!(
+        on_disk.contains("by = \"agent\"") && on_disk.contains("session = \"mcp:"),
+        "{on_disk}"
+    );
+
+    let map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map")
+                .with_arguments(object!({ "query": "minted", "budget_tokens": 1024 })),
+        )
+        .await
+        .unwrap();
+    let map_text = text_of(&map);
+    assert!(
+        map_text.contains("        note (agent): Sessions are minted here"),
+        "{map_text}"
+    );
+
+    let bad = client
+        .call_tool(
+            CallToolRequestParams::new("annotate")
+                .with_arguments(object!({ "path": "src/nope.ts", "text": "x" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad.is_error, Some(true));
+    assert!(
+        text_of(&bad).contains("not an indexed file"),
+        "{}",
+        text_of(&bad)
+    );
     client.cancel().await.unwrap();
 }
 

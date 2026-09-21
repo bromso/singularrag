@@ -36,7 +36,7 @@ Decision: singularrag is a separate repo with its own stack. Reasons: the job is
 - Embeddings, vector search, sqlite-vec, fastembed. Gated, see §7.
 - SCIP or LSP precise references. Gated, see §7.
 - Any LLM call. singularrag never talks to a model; the host agent is the model.
-- Write or exec tools. Read-only.
+- No exec tools. One write tool, `annotate`, bounded to notes in `map.toml`; nothing else outside the store is ever written. *Amended 2026-09-21 (annotate design).*
 - Multi-repo, team server, remote access, cloud sync.
 - Host-specific plugins. MCP config entry per host only.
 - Metrics (churn, complexity, coverage), ER or architecture diagrams, React Flow, bklit.
@@ -88,7 +88,7 @@ browser ◀──SSE/JSON──  singularrag serve  ◀── notify watcher ─
 | `indexer_lock` | pid, heartbeat_at | advisory; waiter serves stale after 500 ms |
 | `meta` | schema_version, git_head, indexed_at | |
 
-`map.toml` (authored, committed): `[[pin]]`, `[[exclude]]`, `[[note]]`, `[[boundary]]` entries keyed by path or `path::symbol`, plus `[deny] extra_patterns`. The UI edits this file; both processes reload it on change. Separating authored from derived data is what makes the map a reviewable team artefact.
+`map.toml` (authored, committed): `[[pin]]`, `[[exclude]]`, `[[note]]`, `[[boundary]]` entries keyed by path or `path::symbol`, plus `[deny] extra_patterns`. The UI edits this file; both processes reload it on change. Separating authored from derived data is what makes the map a reviewable team artefact. Notes carry `by`, `session` and `at`; the agent edits its own notes through `annotate`, the UI everything.
 
 ### Ranking (Aider's algorithm, cited)
 
@@ -147,7 +147,7 @@ src/auth/session.ts:12  function  createSession(user: User, ttl: number): Sessio
    referenced from 7 files: src/http/middleware.ts (3), src/cli/login.ts (2), …
 ```
 
-No other tools, resources or prompts in v0. Host config: one stdio MCP entry each for Claude Code, Codex CLI and Copilot CLI, documented in the README.
+A third tool, `annotate` (2026-09-21, `docs/superpowers/specs/2026-09-21-singularrag-annotate-design.md` §3), writes the agent's note on a file or symbol into `map.toml`. No other tools, resources or prompts. Host config: one stdio MCP entry each for Claude Code, Codex CLI and Copilot CLI, documented in the README.
 
 ## 10. UI (served by `singularrag serve`)
 
@@ -171,7 +171,7 @@ Not in v0: charts, arranged diagrams, multi-repo switcher, theming beyond shadcn
 5. The index file becomes a secret store.
 
 ### Controls (all required for v0)
-- Read-only: only retrieval rows and `map.toml` are ever written; no exec.
+- Only retrieval rows and `map.toml` are ever written, the latter by the UI and by the agent's own notes; no exec.
 - Repo root canonicalised at start; every indexed path must canonicalise under it; outside-pointing symlinks skipped with reason.
 - Built-in denylist, extendable in `map.toml`, never shrinkable: `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, `*.pfx`, `.npmrc`, `.netrc`, `*.tfstate`, `secrets/`, `credentials*`. `.gitignore` honoured on top.
 - Content scan before indexing: private-key headers, cloud key patterns, JWT shape, high-entropy tokens ≥ 32 chars; a hit skips the file with reason "secret-like content".
