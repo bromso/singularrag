@@ -58,7 +58,7 @@ src/router.ts:  ← src/hono-base.ts, src/router/smart-router/router.ts +3
 
 **`find_symbol`.** The same line after a hit's `referenced from` line, for the symbol's note and then the file's.
 
-**Ranking.** `rank_symbols` reads the config's notes. A query term (the same terms the FTS query uses) that appears in a note's text, case-insensitively and whole-word, makes the note's file a seed like an FTS hit, and its symbol (when the note names one) gets the same bonus a symbol-level FTS hit gets. `Reasons` gains `note_hit: bool`, and the detail panel renders it as "matches a note". No index change: notes live in the config and are read at rank time.
+**Ranking.** `rank_symbols` reads the config's notes. A query term (the same terms the FTS query uses) that appears in a note's text, case-insensitively and whole-word, makes the note's file a seed like an FTS hit, and its symbol (when the note names one) gets a bonus of the file's full rank, more than an FTS hit's share: a note is a deliberate pointer and a target carries at most one of each kind. `Reasons` gains `note_hit: bool`, and the detail panel renders it as "matches a note". No index change: notes live in the config and are read at rank time.
 
 ## 5. The UI
 
