@@ -39,7 +39,7 @@ Behaviour, in order:
 1. `path` passes the serve spec's path rules (not absolute, no `..`, no leading `./`, forward slashes) and names a file in the index that is not skipped. `symbol`, if given, is defined in that file. Otherwise an MCP error naming the field.
 2. `text` is normalised as in §2. If it is non-empty and `secrets::looks_secret` matches, the error is "text looks like a secret; notes are committed". A note is committed with the repo and the agent has read file bodies.
 3. The engine reloads `map.toml` if its mtime moved (the existing check), then: empty text removes the agent note on the target if there is one; otherwise it replaces the agent note on the target or appends one. A human note on the same target is never touched. `by`, `session` and `at` are set by the engine, not the caller.
-4. `MapConfig::save_atomic` writes the file (the toml_edit path from the serve cleanup, so comments and unknown keys survive).
+4. `MapConfig::save_atomic` writes the file (the toml_edit path from the serve cleanup, so top-level comments and keys the page does not own survive; a comment inside the `[[note]]` section is rewritten with it).
 5. The response is the freshness header line, then `noted src/router.ts::match (2 notes on this file)` or `removed your note on src/router.ts::match`.
 
 No retrieval row is recorded: an annotation is not a retrieval, and the file watcher already turns the write into a change event for the UI. The write is counted by the tier-two harness as a tool call like any other.
