@@ -371,7 +371,10 @@ mod tests {
             .await
             .unwrap();
         assert!(map.text.starts_with("# singularrag · index "));
-        assert!(map.text.contains("src/auth/session.ts:\n"));
+        assert!(map
+            .text
+            .lines()
+            .any(|l| l.starts_with("src/auth/session.ts:")));
         let find = handle
             .find(FindRequest {
                 name: "createSession".into(),

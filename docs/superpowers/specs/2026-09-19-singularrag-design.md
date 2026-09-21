@@ -94,7 +94,7 @@ browser ◀──SSE/JSON──  singularrag serve  ◀── notify watcher ─
 
 1. File-level multigraph: each ref is an edge from referencing file to defining file, labelled by symbol name, weight 1/N for ambiguous names.
 2. Personalised PageRank (power iteration, ~40 lines, no graph crate). Personalisation boosts: files named in `focus_files` or the query; files with FTS5 hits for query terms; pinned files. Excluded files are removed before ranking.
-3. Distribute file rank to defined symbols by incoming edge weight; sort.
+3. Distribute file rank to defined symbols by incoming edge weight; sort. Symbols defined in test, spec and benchmark files (`*.test.*`, `*.spec.*`, and anything under `__tests__`, `__mocks__`, `test`, `tests`, `bench`, `benches`, `benchmarks`) are dropped here: their files stay in the graph as referrers, they are never served or recorded as candidates. *Amended 2026-09-21: on hono they were 43% of a 4096-token map's rows and none was ever an answer; excluding them from the graph as well lowered recall, because tests are the strongest referrers of the public API.*
 4. Greedy fill of `path:` groups with `line  signature` rows; binary search on item count to fit the token budget (approximate tokens = chars / 4; budget is soft and the header says so).
 5. Record reasons per item: `{score, file_rank, seeds: [...], referenced_by: [{path, count}], pinned, fts_hit}`. Rule: a ranking feature that cannot be expressed in this structure does not ship, because the map cannot draw it. *(Amended 2026-09-20: the field first called `pagerank` held the symbol's final score, not the PageRank value, so it is named `score` and the PageRank value it is derived from is `file_rank`.)*
 

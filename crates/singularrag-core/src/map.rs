@@ -24,43 +24,50 @@ pub fn render(items: &[ScoredSymbol], n: usize) -> String {
     }
     let mut out = String::new();
     for path in order {
-        out.push_str(path);
-        out.push_str(":\n");
         let mut rows: Vec<&ScoredSymbol> = top.iter().filter(|s| s.path == path).collect();
         rows.sort_by_key(|s| s.line_start);
+        out.push_str(path);
+        out.push(':');
+        out.push_str(&referenced_by(path, &rows));
+        out.push('\n');
         for s in rows {
-            out.push_str(&format!(
-                "{:>5}  {}{}\n",
-                s.line_start,
-                s.signature,
-                referenced_by(&s.reasons.referenced_by)
-            ));
+            out.push_str(&format!("{:>5}  {}\n", s.line_start, s.signature));
         }
     }
     out
 }
 
-/// How many referencing files a row names; the ranker keeps at most five per symbol.
-const REFS_SHOWN: usize = 3;
+/// How many referencing files a group header names before `+N`.
+const REFS_SHOWN: usize = 2;
 
-/// `  ← a.ts, b.ts, c.ts +2`: who references the symbol, strongest first, so a blast or
-/// trace question can be answered from the map. Empty when nothing references it.
-fn referenced_by(refs: &[crate::rank::RefBy]) -> String {
-    if refs.is_empty() {
+/// `  ← a.ts, b.ts +2` on a file's header: the other files that reference any served
+/// symbol of this file, strongest first, so a blast or trace question can be answered
+/// from the map and `find_symbol` gives a symbol's own list. The suffix sits on the
+/// header, not the rows: on hono a per-row suffix cost a budget a third of its
+/// symbols, a per-file one costs a few. References from the file itself say nothing
+/// about blast radius and are left out. Empty when nothing else references the file.
+fn referenced_by(path: &str, rows: &[&ScoredSymbol]) -> String {
+    let mut by_file: Vec<(&str, i64)> = Vec::new();
+    for r in rows.iter().flat_map(|s| s.reasons.referenced_by.iter()) {
+        if r.path == path {
+            continue;
+        }
+        match by_file.iter_mut().find(|(p, _)| *p == r.path) {
+            Some(entry) => entry.1 += r.count,
+            None => by_file.push((&r.path, r.count)),
+        }
+    }
+    if by_file.is_empty() {
         return String::new();
     }
-    let shown: Vec<&str> = refs
-        .iter()
-        .take(REFS_SHOWN)
-        .map(|r| r.path.as_str())
-        .collect();
-    let more = refs.len().saturating_sub(REFS_SHOWN);
-    let tail = if more > 0 {
-        format!(" +{more}")
+    by_file.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let shown: Vec<&str> = by_file.iter().take(REFS_SHOWN).map(|(p, _)| *p).collect();
+    let more = by_file.len().saturating_sub(REFS_SHOWN);
+    if more > 0 {
+        format!("  ← {} +{more}", shown.join(", "))
     } else {
-        String::new()
-    };
-    format!("  ← {}{tail}", shown.join(", "))
+        format!("  ← {}", shown.join(", "))
+    }
 }
 
 /// Largest `n` such that `render(items, n)` fits the budget. Binary search, as in Aider.
@@ -156,24 +163,24 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let mut two = sym("src/a.ts", 5, "export function five()", 0.9);
-        two.reasons.referenced_by = rb(&[("src/http/middleware.ts", 3), ("src/cli/login.ts", 1)]);
-        let mut many = sym("src/a.ts", 9, "export class Nine", 0.8);
-        many.reasons.referenced_by = rb(&[
-            ("src/b.ts", 9),
-            ("src/c.ts", 4),
-            ("src/d.ts", 2),
-            ("src/e.ts", 1),
-            ("src/f.ts", 1),
-        ]);
-        let none = sym("src/a.ts", 12, "export const twelve = 12", 0.7);
-        let text = render(&[two, many, none], 3);
+        // src/a.ts: b.ts references it 9 + 1 times across two symbols, d.ts 2, e.ts 1;
+        // its own references and a symbol nobody references add nothing.
+        let mut five = sym("src/a.ts", 5, "export function five()", 0.9);
+        five.reasons.referenced_by = rb(&[("src/d.ts", 2), ("src/b.ts", 1)]);
+        let mut nine = sym("src/a.ts", 9, "export class Nine", 0.8);
+        nine.reasons.referenced_by = rb(&[("src/b.ts", 9), ("src/a.ts", 4), ("src/e.ts", 1)]);
+        let mut only_self = sym("src/a.ts", 12, "export const twelve = 12", 0.7);
+        only_self.reasons.referenced_by = rb(&[("src/a.ts", 2)]);
+        let none = sym("src/z.ts", 1, "export const z = 1", 0.6);
+        let text = render(&[five, nine, only_self, none], 4);
         assert_eq!(
             text,
-            "src/a.ts:\n\
-             \x20   5  export function five()  ← src/http/middleware.ts, src/cli/login.ts\n\
-             \x20   9  export class Nine  ← src/b.ts, src/c.ts, src/d.ts +2\n\
-             \x20  12  export const twelve = 12\n"
+            "src/a.ts:  ← src/b.ts, src/d.ts +1\n\
+             \x20   5  export function five()\n\
+             \x20   9  export class Nine\n\
+             \x20  12  export const twelve = 12\n\
+             src/z.ts:\n\
+             \x20   1  export const z = 1\n"
         );
     }
 

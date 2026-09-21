@@ -110,7 +110,9 @@ async fn repo_map_and_find_symbol_match_the_cli_and_record_provenance() {
     assert_ne!(map.is_error, Some(true));
     let map_text = text_of(&map);
     assert!(map_text.starts_with("# singularrag · index "), "{map_text}");
-    assert!(map_text.contains("src/auth/session.ts:\n"));
+    assert!(map_text
+        .lines()
+        .any(|l| l.starts_with("src/auth/session.ts:")));
     assert!(!map_text.contains("console.log"));
 
     let find = client
