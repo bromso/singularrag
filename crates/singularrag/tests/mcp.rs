@@ -70,7 +70,7 @@ fn text_of(r: &rmcp::model::CallToolResult) -> String {
 /// nothing but JSON-RPC reached stdout, because the client could not have parsed a single
 /// message otherwise.
 #[tokio::test]
-async fn lists_exactly_the_two_tools_with_spec_descriptions() {
+async fn lists_exactly_the_three_tools_with_spec_descriptions() {
     let dir = tempfile::tempdir().unwrap();
     write_ts_mini(dir.path());
     let client = connect_with_log(dir.path(), &[], "debug").await;
