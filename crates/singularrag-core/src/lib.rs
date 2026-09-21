@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod blast;
+pub mod changed;
 pub mod config;
 pub mod engine;
 pub mod error;
