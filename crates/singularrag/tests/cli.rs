@@ -143,6 +143,43 @@ fn mcp_exits_cleanly_when_stdin_closes() {
 }
 
 #[test]
+fn path_prints_the_chain_and_changed_needs_git() {
+    let dir = fixture();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "path",
+            "src/cli/login.ts::login",
+            "src/auth/session.ts::createSession",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# 1 hop\n"));
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "path",
+            "nope.ts::x",
+            "src/auth/session.ts::createSession",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "from: nope.ts::x is not in the index",
+        ));
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["--repo", dir.path().to_str().unwrap(), "changed"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a git checkout"));
+}
+
+#[test]
 fn readme_mcp_json_snippet_is_valid_and_points_at_the_mcp_subcommand() {
     let readme =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();

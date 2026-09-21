@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use singularrag_core::engine::{Engine, FindRequest, MapRequest};
+use singularrag_core::engine::{ChangedRequest, Engine, FindRequest, MapRequest, TraceRequest};
 use singularrag_core::map::DEFAULT_BUDGET;
 
 mod actor;
@@ -55,6 +55,19 @@ enum Cmd {
         budget: usize,
         #[arg(long)]
         json: bool,
+    },
+    /// The shortest chain of references between two symbols (what the trace_path tool returns)
+    Path {
+        /// `path::symbol`
+        from: String,
+        /// `path::symbol`
+        to: String,
+    },
+    /// The symbols a diff touches and who references them (what the changed tool returns)
+    Changed {
+        /// A git ref; default is the working tree against HEAD
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Serve the repo_map, find_symbol and annotate tools to an agent over stdio (MCP)
     Mcp {
@@ -122,6 +135,26 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Find { name, kind, limit } => {
             let r = engine.find_symbol(&FindRequest { name, kind, limit })?;
+            print!("{}", r.text);
+        }
+        Cmd::Path { from, to } => {
+            let split = |s: &str| -> anyhow::Result<(String, String)> {
+                s.split_once("::")
+                    .map(|(p, n)| (p.to_string(), n.to_string()))
+                    .ok_or_else(|| anyhow::anyhow!("expected path::symbol, got {s}"))
+            };
+            let (from_path, from_symbol) = split(&from)?;
+            let (to_path, to_symbol) = split(&to)?;
+            let r = engine.trace_path(&TraceRequest {
+                from_path,
+                from_symbol,
+                to_path,
+                to_symbol,
+            })?;
+            print!("{}", r.text);
+        }
+        Cmd::Changed { base } => {
+            let r = engine.changed(&ChangedRequest { base })?;
             print!("{}", r.text);
         }
         Cmd::Eval {
