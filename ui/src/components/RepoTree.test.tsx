@@ -45,7 +45,7 @@ describe("RepoTree", () => {
     expect(onFocusRow.mock.calls[1]?.[0]).toMatchObject({ kind: "file", path: "src/b.ts" });
   });
   test("touched_files_render_first_with_a_retrieval", () => {
-    const reasons = { score: 0.5, file_rank: 1, seeds: [], referenced_by: [{ path: "src/x.ts", count: 2 }], pinned: false, fts_hit: false, query_ident_match: false };
+    const reasons = { score: 0.5, file_rank: 1, seeds: [], referenced_by: [{ path: "src/x.ts", count: 2 }], pinned: false, fts_hit: false, query_ident_match: false, note_hit: false };
     const items: Item[] = [
       { rank: 1, symbol_id: 2, path: "src/b.ts", name: "h", line_start: 1, score: 0.5, served: true, reasons },
     ];
@@ -78,7 +78,7 @@ describe("RepoTree", () => {
     expect(within(grid).getByText("f")).toBeTruthy();
 
     // Selecting a different retrieval does re-seed: only its touched files open.
-    const reasons = { score: 0.5, file_rank: 1, seeds: [], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false };
+    const reasons = { score: 0.5, file_rank: 1, seeds: [], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false, note_hit: false };
     const items: Item[] = [{ rank: 1, symbol_id: 2, path: "src/b.ts", name: "h", line_start: 1, score: 0.5, served: true, reasons }];
     rerender(<RepoTree rows={joinRetrieval(files, items)} filter="" seedKey={7} onFocusRow={() => {}} onAction={() => {}} />);
     expect(within(grid).getByText("h")).toBeTruthy();

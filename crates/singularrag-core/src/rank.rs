@@ -16,6 +16,7 @@ pub const ITERATIONS: usize = 50;
 pub const FOCUS_BOOST: f64 = 10.0;
 pub const PIN_BOOST: f64 = 10.0;
 pub const FTS_FILE_BOOST: f64 = 5.0;
+pub const NOTE_BOOST: f64 = 5.0;
 /// Symbols nobody references still get a sliver of their file's rank so they stay orderable.
 pub const UNREFERENCED_FRACTION: f64 = 0.001;
 
@@ -35,6 +36,7 @@ pub struct Reasons {
     pub pinned: bool,
     pub fts_hit: bool,
     pub query_ident_match: bool,
+    pub note_hit: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +145,16 @@ pub fn is_support_file(path: &str) -> bool {
         .any(|dir| SUPPORT_DIRS.contains(&dir))
 }
 
+/// A query term appears in the note as a whole word, after the same splitting the
+/// query gets (`tokens::query_terms`), so `createSession` in a note matches `session`.
+pub fn note_matches(text: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return false;
+    }
+    let words = crate::tokens::query_terms(text);
+    terms.iter().any(|t| words.contains(t))
+}
+
 pub fn rank_symbols(
     store: &Store,
     config: &MapConfig,
@@ -151,6 +163,18 @@ pub fn rank_symbols(
 ) -> Result<Vec<ScoredSymbol>> {
     let terms = query.map(query_terms).unwrap_or_default();
     let conn = store.conn();
+
+    // Notes whose text matches the query: files get a seed, named symbols a bonus.
+    let mut note_files: HashSet<String> = HashSet::new();
+    let mut note_symbols: HashSet<(String, String)> = HashSet::new();
+    for n in &config.note {
+        if note_matches(&n.text, &terms) {
+            note_files.insert(n.path.clone());
+            if let Some(s) = &n.symbol {
+                note_symbols.insert((n.path.clone(), s.clone()));
+            }
+        }
+    }
 
     // Symbols come first: which names the FTS matched decides which edges the query
     // multiplier applies to, so the graph cannot be built before they are known.
@@ -207,6 +231,10 @@ pub fn rank_symbols(
         if fts_files.contains(&node.id) {
             personalization[i] += FTS_FILE_BOOST;
             seeds[i].push(format!("query:{}", terms.join(" ")));
+        }
+        if note_files.contains(&node.path) {
+            personalization[i] += NOTE_BOOST;
+            seeds[i].push("note".to_string());
         }
     }
     let edge_triples: Vec<(usize, usize, f64)> =
@@ -274,6 +302,12 @@ pub fn rank_symbols(
             if fts_hit {
                 score += fr / *fts_in_file.get(&fi).unwrap_or(&1) as f64;
             }
+            let path = &g.nodes[fi].path;
+            let note_hit =
+                note_symbols.contains(&(path.clone(), s.name.clone())) || note_files.contains(path);
+            if note_symbols.contains(&(path.clone(), s.name.clone())) {
+                score += fr;
+            }
             let mut referenced_by: Vec<RefBy> = ref_by
                 .get(&key)
                 .map(|m| {
@@ -305,6 +339,7 @@ pub fn rank_symbols(
                     pinned: config.is_pinned(&g.nodes[fi].path),
                     fts_hit,
                     query_ident_match: query_ident_match(&s.name, &terms, &fts_names),
+                    note_hit,
                 },
             }
         })
@@ -563,5 +598,38 @@ mod tests {
         .unwrap();
         let login = ranked.iter().find(|s| s.name == "login").unwrap();
         assert!(login.reasons.seeds.contains(&"focus".to_string()));
+    }
+
+    #[test]
+    fn a_note_matching_the_query_seeds_its_file_and_its_symbol() {
+        let (_dir, store) = indexed();
+        let config = MapConfig::parse(
+            "[[note]]\npath = \"src/cli/login.ts\"\nsymbol = \"login\"\ntext = \"the onboarding flow starts here\"\nby = \"agent\"\nsession = \"s\"\nat = \"t\"\n",
+        )
+        .unwrap();
+        let plain =
+            rank_symbols(&store, &MapConfig::default(), Some("onboarding flow"), &[]).unwrap();
+        let noted = rank_symbols(&store, &config, Some("onboarding flow"), &[]).unwrap();
+        let pos = |v: &[ScoredSymbol]| v.iter().position(|s| s.name == "login").unwrap();
+        assert!(
+            pos(&noted) < pos(&plain),
+            "the note lifts login: {} vs {}",
+            pos(&noted),
+            pos(&plain)
+        );
+        let login = noted.iter().find(|s| s.name == "login").unwrap();
+        assert!(login.reasons.note_hit);
+        assert!(
+            login.reasons.seeds.iter().any(|s| s == "note"),
+            "{:?}",
+            login.reasons.seeds
+        );
+        let other = noted.iter().find(|s| s.name == "createSession").unwrap();
+        assert!(!other.reasons.note_hit);
+        assert!(note_matches("The Onboarding flow", &["onboarding".into()]));
+        assert!(
+            !note_matches("onboard", &["onboarding".into()]),
+            "whole words only"
+        );
     }
 }

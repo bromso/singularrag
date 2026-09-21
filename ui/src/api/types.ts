@@ -1,7 +1,7 @@
 export type Reasons = {
   score: number; file_rank: number; seeds: string[];
   referenced_by: { path: string; count: number }[];
-  pinned: boolean; fts_hit: boolean; query_ident_match: boolean;
+  pinned: boolean; fts_hit: boolean; query_ident_match: boolean; note_hit: boolean;
 };
 export type Item = { rank: number; symbol_id: number; path: string; name: string; line_start: number; score: number; served: boolean; reasons: Reasons };
 export type RetrievalSummary = {

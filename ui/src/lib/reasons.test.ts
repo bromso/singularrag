@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { reasonsToSentences } from "./reasons";
 
-const base = { score: 0.11, file_rank: 0.2, seeds: [], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false };
+const base = { score: 0.11, file_rank: 0.2, seeds: [], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false, note_hit: false };
 
 describe("reasonsToSentences", () => {
   test("rank and score always come first", () => {
