@@ -120,6 +120,20 @@ pub fn load(path: &Path) -> Result<RunConfig> {
             c.mcp_config = Some(abs);
         }
         for entry in &c.reset {
+            // A prefix check alone lets `.singularrag/../../x` through, and `remove_dir_all`
+            // would follow it out of the checkout.
+            let climbs = Path::new(entry).components().any(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            });
+            if climbs {
+                bail!(
+                    "condition {}: reset path {entry} must stay inside the checkout",
+                    c.name
+                );
+            }
             let under_ignored = repo::IGNORED_PREFIXES
                 .iter()
                 .any(|pre| entry.starts_with(pre) || format!("{entry}/").starts_with(pre));
@@ -262,6 +276,28 @@ mcp_config = "conditions/singularrag.json"
             "mcp_config = \"conditions/singularrag.json\"\nreset = [\".singularrag/memories\"]",
         );
         assert!(load(&write(dir.path(), &good)).is_ok());
+    }
+
+    #[test]
+    fn reset_paths_must_not_climb_out_of_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("conditions")).unwrap();
+        std::fs::write(dir.path().join("conditions/singularrag.json"), "{}").unwrap();
+        for entry in [
+            ".singularrag/../../x",
+            ".singularrag/./../x",
+            "/.singularrag",
+        ] {
+            let bad = GOOD.replace(
+                "mcp_config = \"conditions/singularrag.json\"",
+                &format!("mcp_config = \"conditions/singularrag.json\"\nreset = [\"{entry}\"]"),
+            );
+            let e = load(&write(dir.path(), &bad)).unwrap_err().to_string();
+            assert!(
+                e.contains(&format!("reset path {entry} must stay inside the checkout")),
+                "{entry}: {e}"
+            );
+        }
     }
 
     #[test]

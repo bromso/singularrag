@@ -39,9 +39,7 @@ pub fn spawn_poller(state: AppState) -> tokio::task::JoinHandle<()> {
         loop {
             tokio::time::sleep(POLL_EVERY).await;
             let snapshot = {
-                let Ok(store) = state.read.lock() else {
-                    continue;
-                };
+                let store = state.store();
                 match (store.data_version(), queries::max_retrieval_id(&store)) {
                     (Ok(v), Ok(max)) => Some((v, max)),
                     _ => None,

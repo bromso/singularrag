@@ -34,13 +34,7 @@ fn locked<T>(
     state: &AppState,
     f: impl FnOnce(&singularrag_core::store::Store) -> singularrag_core::Result<T>,
 ) -> Result<T, ApiError> {
-    let guard = state.read.lock().map_err(|_| {
-        ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({ "error": "read store poisoned" }),
-        )
-    })?;
-    Ok(f(&guard)?)
+    Ok(f(&state.store())?)
 }
 
 pub async fn status(State(s): State<AppState>) -> Result<Json<queries::StatusDto>, ApiError> {
