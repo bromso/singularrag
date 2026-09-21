@@ -4,7 +4,7 @@ import { ApiError, api, setToken, tokenFromFragment } from "@/api/client";
 import { subscribe } from "@/api/events";
 import type { BlastResult, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
 import { joinRetrieval } from "@/lib/join";
-import { addToBoundary, boundariesOf, noteFor, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
+import { addToBoundary, boundariesOf, noteFor, removeAgentNote, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
 import { fileStatusOf } from "@/lib/mapStyle";
 import { summaryLabel } from "@/lib/mapSummary";
 import { DetailPanel } from "@/components/DetailPanel";
@@ -252,6 +252,7 @@ export function App() {
         onPin={(p, s) => save((c) => togglePin(c, p, s))}
         onExclude={(p) => save((c) => toggleExclude(c, p))}
         onNote={(p, s, t) => { if (t !== noteFor(map, p, s)) save((c) => setNote(c, p, s, t)); }}
+        onRemoveAgentNote={(p, s) => save((c) => removeAgentNote(c, p, s))}
         blast={blast} blastLoading={blastLoading} onToggleBlast={toggleBlast}
         expandedPath={expandedPath} onToggleExpand={toggleExpand}
         onAddBoundary={(n, p) => save((c) => addToBoundary(c, n, p))}

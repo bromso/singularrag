@@ -1,4 +1,4 @@
-import type { MapConfig, Target } from "@/api/types";
+import type { MapConfig, Note, Target } from "@/api/types";
 
 const same = (t: Target, path: string, symbol?: string) => t.path === path && (t.symbol ?? undefined) === symbol;
 
@@ -13,12 +13,24 @@ export function toggleExclude(c: MapConfig, path: string): MapConfig {
   const exclude = isExcluded(c, path) ? c.exclude.filter((t) => t.path !== path) : [...c.exclude, { path }];
   return { ...c, exclude };
 }
+const sameTarget = (n: Note, path: string, symbol?: string) => n.path === path && (n.symbol ?? undefined) === symbol;
+const isAgent = (n: Note) => n.by === "agent";
+/** One paragraph, like the engine: whitespace runs become one space. */
+export const oneParagraph = (text: string) => text.split(/\s+/).filter(Boolean).join(" ");
+
 export function setNote(c: MapConfig, path: string, symbol: string | undefined, text: string): MapConfig {
-  const note = c.note.filter((n) => !(n.path === path && (n.symbol ?? undefined) === symbol));
-  if (text.trim()) note.push(symbol ? { path, symbol, text } : { path, text });
+  const note = c.note.filter((n) => !(sameTarget(n, path, symbol) && !isAgent(n)));
+  const t = oneParagraph(text);
+  if (t) note.push(symbol ? { path, symbol, text: t } : { path, text: t });
   return { ...c, note };
 }
-export const noteFor = (c: MapConfig, path: string, symbol?: string) => c.note.find((n) => n.path === path && (n.symbol ?? undefined) === symbol)?.text ?? "";
+export const noteFor = (c: MapConfig, path: string, symbol?: string) =>
+  c.note.find((n) => sameTarget(n, path, symbol) && !isAgent(n))?.text ?? "";
+export const agentNoteFor = (c: MapConfig, path: string, symbol?: string) =>
+  c.note.find((n) => sameTarget(n, path, symbol) && isAgent(n));
+export function removeAgentNote(c: MapConfig, path: string, symbol?: string): MapConfig {
+  return { ...c, note: c.note.filter((n) => !(sameTarget(n, path, symbol) && isAgent(n))) };
+}
 
 export const boundaryNames = (c: MapConfig) => c.boundary.map((b) => b.name);
 export const boundariesOf = (c: MapConfig, path: string) => c.boundary.filter((b) => b.paths.includes(path)).map((b) => b.name);

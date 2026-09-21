@@ -249,6 +249,31 @@ describe("App", () => {
     await user.click(within(grid).getByText("createSession"));
     await waitFor(() => expect(note().value).toBe("draft"));
   });
+  test("an_agent_note_shows_with_a_badge_and_delete_removes_only_it", async () => {
+    const user = userEvent.setup();
+    mapState = {
+      pin: [], exclude: [], boundary: [], deny: { extra_patterns: [] },
+      note: [
+        { path: "src/auth/session.ts", symbol: "createSession", text: "mine" },
+        { path: "src/auth/session.ts", symbol: "createSession", text: "from the agent", by: "agent", session: "mcp:claude-code:1:2", at: "2026-09-21T09:14:02Z" },
+      ],
+    };
+    render(<App />);
+    const rail = await screen.findByRole("region", { name: "Retrievals" });
+    await user.click(within(rail).getByRole("button", { name: /repo_map.*session/ }));
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await waitFor(() => expect(within(grid).getByText("createSession")).toBeTruthy());
+    await user.click(within(grid).getByText("createSession"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    await waitFor(() => expect((within(panel).getByLabelText("Note") as HTMLTextAreaElement).value).toBe("mine"));
+    expect(within(panel).getByText("from the agent")).toBeTruthy();
+    expect(within(panel).getByText("agent")).toBeTruthy();
+    await user.click(within(panel).getByRole("button", { name: "Delete the agent note" }));
+    const mapPuts = () => (globalThis.fetch as any).mock.calls.filter((c: any[]) => String(c[0]).endsWith("/api/map") && c[1]?.method === "PUT");
+    await waitFor(() => expect(mapPuts().length).toBe(1));
+    const savedBody = JSON.parse(mapPuts()[0][1].body);
+    expect(savedBody.note).toEqual([{ path: "src/auth/session.ts", symbol: "createSession", text: "mine" }]);
+  });
   test("rapid_pin_then_exclude_both_persist", async () => {
     const user = userEvent.setup();
     render(<App />);

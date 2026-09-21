@@ -25,4 +25,8 @@ describe("reasonsToSentences", () => {
   test("nothing extra when nothing applies", () => {
     expect(reasonsToSentences(base, 4, 0.02)).toEqual(["Ranked 4th, score 0.02."]);
   });
+  test("a note match has its own sentence", () => {
+    const r = { score: 1, file_rank: 1, seeds: ["note"], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false, note_hit: true };
+    expect(reasonsToSentences(r, 1, 1)).toContain("Matches a note.");
+  });
 });

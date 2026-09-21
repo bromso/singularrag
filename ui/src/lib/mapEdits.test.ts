@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { addToBoundary, boundariesOf, boundaryNames, isExcluded, isPinned, removeFromBoundary, setNote, togglePin, toggleExclude } from "./mapEdits";
+import { addToBoundary, agentNoteFor, boundariesOf, boundaryNames, isExcluded, isPinned, noteFor, removeAgentNote, removeFromBoundary, setNote, togglePin, toggleExclude } from "./mapEdits";
 import type { MapConfig } from "@/api/types";
 
 const empty: MapConfig = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
@@ -49,5 +49,30 @@ describe("boundaries", () => {
     expect(boundariesOf(base, "src/a.ts")).toEqual(["auth"]);
     expect(boundariesOf(base, "src/z.ts")).toEqual([]);
     expect(boundaryNames(addToBoundary(base, "http", "src/h.ts"))).toEqual(["auth", "http"]);
+  });
+});
+
+const noted = (): MapConfig => ({
+  pin: [], exclude: [], boundary: [], deny: { extra_patterns: [] },
+  note: [
+    { path: "src/a.ts", symbol: "f", text: "human" },
+    { path: "src/a.ts", symbol: "f", text: "agent", by: "agent", session: "s", at: "t" },
+  ],
+});
+
+describe("notes", () => {
+  test("noteFor and setNote see only the human note", () => {
+    expect(noteFor(noted(), "src/a.ts", "f")).toBe("human");
+    const c = setNote(noted(), "src/a.ts", "f", "  two\nlines  ");
+    expect(c.note).toEqual([
+      { path: "src/a.ts", symbol: "f", text: "agent", by: "agent", session: "s", at: "t" },
+      { path: "src/a.ts", symbol: "f", text: "two lines" },
+    ]);
+    expect(setNote(noted(), "src/a.ts", "f", " ").note).toEqual([noted().note[1]]);
+  });
+  test("agentNoteFor and removeAgentNote touch only the agent note", () => {
+    expect(agentNoteFor(noted(), "src/a.ts", "f")?.text).toBe("agent");
+    expect(agentNoteFor(noted(), "src/a.ts")).toBeUndefined();
+    expect(removeAgentNote(noted(), "src/a.ts", "f").note).toEqual([noted().note[0]]);
   });
 });
