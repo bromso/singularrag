@@ -464,7 +464,9 @@ In `impl Engine`, after `find_symbol`:
             let plural = if notes_on_file == 1 { "" } else { "s" };
             format!("noted {target} ({notes_on_file} note{plural} on this file)")
         };
-        if removed != had_own || !removed {
+        // Write when adding or replacing, and when a removal actually removed something;
+        // a no-op removal touches nothing.
+        if !removed || had_own {
             config
                 .validate(&self.config.deny.extra_patterns)
                 .map_err(|e| bad(&e.field, e.message))?;
@@ -486,7 +488,7 @@ In `impl Engine`, after `find_symbol`:
     }
 ```
 
-(`params` is already imported in `engine.rs`. The `removed != had_own || !removed` guard means: write when adding or replacing, and when a removal actually removed something; a no-op removal writes nothing.)
+(`params` is already imported in `engine.rs`. `notes_on_file` is counted on the new config, so a no-op removal reports the current count.)
 
 - [ ] **Step 4: Run the tests**
 
