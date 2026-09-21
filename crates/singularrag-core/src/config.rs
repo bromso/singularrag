@@ -33,7 +33,7 @@ pub const BUILTIN_DENY: &[&str] = &[
     "credentials*",
 ];
 
-fn check_path(field: &str, p: &str) -> std::result::Result<(), MapConfigError> {
+pub(crate) fn check_path(field: &str, p: &str) -> std::result::Result<(), MapConfigError> {
     let bad = |message: &str| MapConfigError {
         field: field.to_string(),
         message: message.to_string(),
@@ -87,12 +87,40 @@ pub struct Target {
     pub symbol: Option<String>,
 }
 
+/// Who may write a note besides a human: the MCP `annotate` tool.
+pub const AGENT: &str = "agent";
+/// One paragraph, at most this many characters after normalisation.
+pub const NOTE_MAX_CHARS: usize = 300;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Note {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
     pub text: String,
+    /// Absent for a human (the UI or a hand edit); `"agent"` for the MCP tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// The MCP session key that wrote it; present exactly when `by = "agent"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// RFC 3339 UTC; present exactly when `by = "agent"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+}
+
+impl Note {
+    pub fn is_agent(&self) -> bool {
+        self.by.as_deref() == Some(AGENT)
+    }
+}
+
+/// Control characters and whitespace runs become one space; the ends are trimmed.
+pub fn normalise_note_text(text: &str) -> String {
+    text.split(|c: char| c.is_control() || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,6 +252,13 @@ impl MapConfig {
         self.pin.iter().any(|t| t.path == path)
     }
 
+    /// The human (`agent == false`) or agent note on `path` / `path::symbol`.
+    pub fn note_on(&self, path: &str, symbol: Option<&str>, agent: bool) -> Option<&Note> {
+        self.note
+            .iter()
+            .find(|n| n.path == path && n.symbol.as_deref() == symbol && n.is_agent() == agent)
+    }
+
     /// Exact path, or a directory prefix when the exclude path ends with '/'.
     pub fn is_excluded(&self, path: &str) -> bool {
         self.exclude.iter().any(|t| {
@@ -251,8 +286,49 @@ impl MapConfig {
         for (i, t) in self.exclude.iter().enumerate() {
             check_path(&format!("exclude[{i}].path"), &t.path)?;
         }
+        let mut seen_notes: std::collections::HashSet<(String, Option<String>, bool)> =
+            std::collections::HashSet::new();
         for (i, n) in self.note.iter().enumerate() {
             check_path(&format!("note[{i}].path"), &n.path)?;
+            let err = |f: &str, message: String| MapConfigError {
+                field: format!("note[{i}].{f}"),
+                message,
+            };
+            match n.by.as_deref() {
+                None | Some(AGENT) => {}
+                Some(other) => {
+                    return Err(err(
+                        "by",
+                        format!("by must be absent or \"{AGENT}\", not {other:?}"),
+                    ))
+                }
+            }
+            if n.is_agent() != (n.session.is_some() && n.at.is_some()) {
+                return Err(err(
+                    "by",
+                    format!("session and at are present exactly when by = \"{AGENT}\""),
+                ));
+            }
+            if n.text.chars().any(char::is_control) {
+                return Err(err(
+                    "text",
+                    "text is one paragraph: no line breaks or control characters".into(),
+                ));
+            }
+            if n.text.chars().count() > NOTE_MAX_CHARS {
+                return Err(err(
+                    "text",
+                    format!("text is longer than {NOTE_MAX_CHARS} characters"),
+                ));
+            }
+            if !seen_notes.insert((n.path.clone(), n.symbol.clone(), n.is_agent())) {
+                let who = if n.is_agent() { "agent" } else { "human" };
+                let target = match &n.symbol {
+                    Some(s) => format!("{}::{s}", n.path),
+                    None => n.path.clone(),
+                };
+                return Err(err("path", format!("a second {who} note on {target}")));
+            }
         }
         for (i, b) in self.boundary.iter().enumerate() {
             for (j, p) in b.paths.iter().enumerate() {
@@ -641,5 +717,88 @@ extra_patterns = ["*.snap"]
         let e = c.validate(&[]).unwrap_err();
         assert_eq!(e.field, "boundary[0].name");
         assert!(e.message.contains("empty"));
+    }
+
+    #[test]
+    fn a_note_round_trips_its_author_keys() {
+        let text = "[[note]]\npath = \"src/a.ts\"\nsymbol = \"f\"\ntext = \"entry point\"\nby = \"agent\"\nsession = \"mcp:claude-code:1:2\"\nat = \"2026-09-21T09:14:02Z\"\n[[note]]\npath = \"src/a.ts\"\ntext = \"human\"\n";
+        let c = cfg(text);
+        assert!(c.validate(&[]).is_ok());
+        assert!(c.note[0].is_agent());
+        assert!(!c.note[1].is_agent());
+        assert_eq!(c.note[0].session.as_deref(), Some("mcp:claude-code:1:2"));
+        assert_eq!(c.note[0].at.as_deref(), Some("2026-09-21T09:14:02Z"));
+        assert_eq!(
+            c.note_on("src/a.ts", Some("f"), true)
+                .map(|n| n.text.as_str()),
+            Some("entry point")
+        );
+        assert_eq!(
+            c.note_on("src/a.ts", None, false).map(|n| n.text.as_str()),
+            Some("human")
+        );
+        assert!(c.note_on("src/a.ts", None, true).is_none());
+        let out = toml_edit::ser::to_string_pretty(&c).unwrap();
+        assert!(out.contains("by = \"agent\""), "{out}");
+        assert!(
+            !out.contains("by = \"\""),
+            "a human note has no by key: {out}"
+        );
+        assert_eq!(cfg(&out), c);
+    }
+
+    #[test]
+    fn validate_enforces_the_note_rules() {
+        let base = "[[note]]\npath = \"src/a.ts\"\ntext = \"one\"\n";
+        let field = |t: &str| cfg(t).validate(&[]).unwrap_err().field;
+        // a second human note on the same target
+        assert_eq!(
+            field(&format!(
+                "{base}[[note]]\npath = \"src/a.ts\"\ntext = \"two\"\n"
+            )),
+            "note[1].path"
+        );
+        // an agent note beside a human one is fine; a second agent note is not
+        let agent = "[[note]]\npath = \"src/a.ts\"\ntext = \"a\"\nby = \"agent\"\nsession = \"s\"\nat = \"t\"\n";
+        assert!(cfg(&format!("{base}{agent}")).validate(&[]).is_ok());
+        assert_eq!(field(&format!("{base}{agent}{agent}")), "note[2].path");
+        // by must be absent or "agent"; session/at go with by
+        assert_eq!(
+            field("[[note]]\npath = \"src/a.ts\"\ntext = \"x\"\nby = \"bot\"\n"),
+            "note[0].by"
+        );
+        assert_eq!(
+            field("[[note]]\npath = \"src/a.ts\"\ntext = \"x\"\nby = \"agent\"\n"),
+            "note[0].by"
+        );
+        assert_eq!(
+            field("[[note]]\npath = \"src/a.ts\"\ntext = \"x\"\nsession = \"s\"\nat = \"t\"\n"),
+            "note[0].by"
+        );
+        // one paragraph, at most 300 characters
+        assert_eq!(
+            field("[[note]]\npath = \"src/a.ts\"\ntext = \"two\\nlines\"\n"),
+            "note[0].text"
+        );
+        let long = "x".repeat(301);
+        assert_eq!(
+            field(&format!(
+                "[[note]]\npath = \"src/a.ts\"\ntext = \"{long}\"\n"
+            )),
+            "note[0].text"
+        );
+        let ok = "x".repeat(300);
+        assert!(
+            cfg(&format!("[[note]]\npath = \"src/a.ts\"\ntext = \"{ok}\"\n"))
+                .validate(&[])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn note_text_is_normalised_to_one_paragraph() {
+        assert_eq!(normalise_note_text("  a\n\n b\t c  "), "a b c");
+        assert_eq!(normalise_note_text("\u{0}x\r\ny"), "x y");
+        assert_eq!(normalise_note_text("   "), "");
     }
 }
