@@ -122,7 +122,7 @@ describe("App", () => {
     render(<App />);
     const rail = await screen.findByRole("region", { name: "Retrievals" });
     expect(within(rail).getByText("Claude Code")).toBeTruthy();
-    await user.click(within(rail).getByRole("button", { name: /repo_map.*session/ }));
+    await user.click(within(rail).getByRole("button", { name: /^Map · session/ }));
     const grid = await screen.findByRole("treegrid", { name: "Repository" });
     await waitFor(() => expect(within(grid).getByText("createSession")).toBeTruthy());
     expect(within(grid).getByText("Served")).toBeTruthy();
@@ -146,7 +146,7 @@ describe("App", () => {
     detailItems = [{ rank: 1, symbol_id: 999, path: "src/auth/session.ts", name: "createSession", line_start: 9, score: 0.1, served: true, reasons: r }];
     render(<App />);
     const rail = await screen.findByRole("region", { name: "Retrievals" });
-    await user.click(within(rail).getByRole("button", { name: /repo_map.*session/ }));
+    await user.click(within(rail).getByRole("button", { name: /^Map · session/ }));
     const grid = await screen.findByRole("treegrid", { name: "Repository" });
     await waitFor(() => expect(within(grid).getByText("createSession")).toBeTruthy());
     await user.click(within(grid).getByText("createSession"));
@@ -211,7 +211,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
     const rail = await screen.findByRole("region", { name: "Retrievals" });
-    await user.click(within(rail).getByRole("button", { name: /repo_map.*session/ }));
+    await user.click(within(rail).getByRole("button", { name: /^Map · session/ }));
     const grid = await screen.findByRole("treegrid", { name: "Repository" });
     await waitFor(() => expect(within(grid).getByText("createSession")).toBeTruthy());
     await user.click(within(grid).getByText("createSession"));
@@ -260,7 +260,7 @@ describe("App", () => {
     };
     render(<App />);
     const rail = await screen.findByRole("region", { name: "Retrievals" });
-    await user.click(within(rail).getByRole("button", { name: /repo_map.*session/ }));
+    await user.click(within(rail).getByRole("button", { name: /^Map · session/ }));
     const grid = await screen.findByRole("treegrid", { name: "Repository" });
     await waitFor(() => expect(within(grid).getByText("createSession")).toBeTruthy());
     await user.click(within(grid).getByText("createSession"));
@@ -285,7 +285,7 @@ describe("App", () => {
     };
     const { container } = render(<App />);
     const rail = await screen.findByRole("region", { name: "Retrievals" });
-    await user.click(within(rail).getByRole("button", { name: /repo_map.*session/ }));
+    await user.click(within(rail).getByRole("button", { name: /^Map · session/ }));
     const grid = await screen.findByRole("treegrid", { name: "Repository" });
     await waitFor(() => expect(within(grid).getByText("createSession")).toBeTruthy());
     await user.click(within(grid).getByText("createSession"));
@@ -481,7 +481,7 @@ describe("App", () => {
   test("a symbol row can show its blast radius in the panel", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(await screen.findByRole("button", { name: /^Map · / }));
     await user.click(await screen.findByRole("button", { name: "Actions for createSession" }));
     await user.click(await screen.findByRole("button", { name: "Show blast radius" }));
     const list = await screen.findByRole("list", { name: "Blast radius" });
@@ -503,7 +503,7 @@ describe("App", () => {
     let release!: () => void;
     blastGate = new Promise<void>((r) => { release = r; });
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(await screen.findByRole("button", { name: /^Map · / }));
     await user.click(await screen.findByRole("button", { name: "Actions for createSession" }));
     await user.click(await screen.findByRole("button", { name: "Show blast radius" }));
     await user.click(screen.getAllByRole("button", { name: /Actions for src\/auth\/session.ts/ })[0]);
@@ -523,7 +523,7 @@ describe("App", () => {
     let release!: () => void;
     blastGate = new Promise<void>((r) => { release = r; });
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(await screen.findByRole("button", { name: /^Map · / }));
     await user.click(await screen.findByRole("button", { name: "Actions for createSession" }));
     const button = await screen.findByRole("button", { name: "Show blast radius" });
     await user.click(button);
@@ -543,7 +543,7 @@ describe("App", () => {
   test("the map view shows the summary label, switch-to-table returns focus to the tree, and the choice persists", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(await screen.findByRole("button", { name: /^Map · / }));
     await user.click(screen.getByRole("radio", { name: "Map" }));
     const img = await screen.findByRole("img", { name: /Map of 1 file\. Retrieval 7: 1 served, 0 cut, 0 untouched\. 0 boundaries\./ });
     expect(img).toBeTruthy();
@@ -566,7 +566,7 @@ describe("App", () => {
     try {
       const user = userEvent.setup();
       render(<App />);
-      await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+      await user.click(await screen.findByRole("button", { name: /^Map · / }));
       await user.click(screen.getByRole("radio", { name: "Map" }));
       const img = await screen.findByRole("img", { name: /Map of 1 file\. Retrieval 7: 1 served, 0 cut, 0 untouched\. 0 boundaries\./ });
       expect(img).toBeTruthy();
@@ -578,7 +578,7 @@ describe("App", () => {
   test("selecting a node on the map focuses the same row in the panel", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /repo_map/ }));
+    await user.click(await screen.findByRole("button", { name: /^Map · / }));
     await user.click(screen.getByRole("radio", { name: "Map" }));
     await screen.findByRole("img");
     const s = (globalThis as any).__sigma.instances.at(-1);

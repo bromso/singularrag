@@ -51,7 +51,7 @@ warmup = ["uvx", "--from", "git+https://github.com/oraios/serena", "serena", "pr
 reset = [".serena/memories"]
 ```
 
-`mcp_config` paths are relative to the config file. `warmup` is an argv run once before the condition's loop with `<checkout>` substituted; a non-zero exit is a hard error for the run. `reset` lists checkout-relative paths deleted before every session of that condition; they must sit under a dirty-check-ignored prefix (`.singularrag/`, `.serena/`) and contain no `..`, root or drive component, and the config loader rejects any other path. Both default to none. The Serena warm-up command is unverified until the first Serena run; a wrong command fails loudly at warm-up, before any session is spent. The MCP config files are ordinary Claude Code `mcpServers` JSON, committed under `eval/conditions/`:
+`mcp_config` paths are relative to the config file. `warmup` is an argv run once before the condition's loop with `<checkout>` substituted; a non-zero exit is a hard error for the run. `reset` lists checkout-relative paths deleted before every session of that condition; they must sit under a dirty-check-ignored prefix (`.singularrag/`, `.serena/`) and contain no `..`, root or drive component, and the config loader rejects any other path. Both default to none. `settings` is a Claude Code settings JSON (relative to the config file) passed as `--settings`; it is loaded even under `--setting-sources ""` (probed 2026-09-21). `<checkout>` and `<bin>` (the `singularrag` command the harness itself runs: `SINGULARRAG_BIN` when set, else the bare name, which Claude Code resolves on the same `PATH` the warm-up used) are substituted into the copy the harness passes. The `singularrag+hook` condition uses `conditions/singularrag-hook.json`, the two query-first hooks of the workflow spec, over the same MCP config and warm-up as `singularrag`. The Serena warm-up command is unverified until the first Serena run; a wrong command fails loudly at warm-up, before any session is spent. The MCP config files are ordinary Claude Code `mcpServers` JSON, committed under `eval/conditions/`:
 
 - `singularrag.json`: `{ "mcpServers": { "singularrag": { "command": "singularrag", "args": ["mcp", "--repo", "<checkout>"] } } }`. The harness substitutes `<checkout>` with the resolved absolute path when writing the temporary config it actually passes, so the committed file stays machine-independent. `singularrag` must be on `PATH` (`cargo install --path crates/singularrag`); the harness records `singularrag --version` in `run.toml`.
 - `serena.json`: `{ "mcpServers": { "serena": { "command": "uvx", "args": ["--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server", "--context", "claude-code", "--project", "<checkout>"] } } }`, with the same substitution.
@@ -88,7 +88,7 @@ The structured answer is delivered as a tool call named `StructuredOutput`; it i
 
 `--allowedTools` is required for MCP tools: under `--permission-mode dontAsk` with `--permission-prompts none`, a tool call that would prompt is denied, and MCP tools prompt while the read-only built-ins do not. The first smoke run (2026-09-20) proved it: both singularrag tool calls were denied, the agent fell back to Read, Grep and Glob, and the verdict measured the misconfiguration. The harness derives the entries from the server names in the condition's MCP config (`mcp__<server>` allows every tool of that server), so the committed condition files need no tool lists.
 
-A permission denial is a configuration defect, never a result: the parser keeps the `permission_denials` tool names from the result line, the record stores them as `denied`, and a session with any denial aborts its condition after its record is written (§8), with the reason `tool <name> denied by permission`.
+A permission denial is a configuration defect, never a result: the parser keeps the `permission_denials` tool names from the result line, the record stores them as `denied`, and a session with any denial aborts its condition after its record is written (§8), with the reason `tool <name> denied by permission`. *Amended 2026-09-21:* the one exception is a denial the singularrag hook made on purpose, counted as `hook_denials` (§5) and never an abort.
 
 Stdout is streamed to `<qid>-<repeat>.stream.jsonl` in the condition's directory as it arrives; stderr is captured to `<qid>-<repeat>.stderr` only when non-empty. After the child exits the harness re-checks the tree is clean (same exclusions as §2); a dirty tree aborts the run, because later sessions would see a different repository.
 
@@ -98,7 +98,10 @@ The stream is one JSON object per line. The parser keeps three kinds and ignores
 
 - `system` with `subtype: "init"`: `model`, `tools`, and `mcp_servers` (name and status per server).
 - `assistant`: each `tool_use` content block is counted by its `name`.
-- `result`: `usage.input_tokens`, `usage.output_tokens`, `usage.cache_creation_input_tokens`, `usage.cache_read_input_tokens`, `total_cost_usd`, `num_turns`, `duration_ms`, `is_error`, `subtype`, `structured_output`.
+- `result`: `usage.input_tokens`, `usage.output_tokens`, `usage.cache_creation_input_tokens`, `usage.cache_read_input_tokens`, `total_cost_usd`, `num_turns`, `duration_ms`, `is_error`, `subtype`, `structured_output`, and each `permission_denials` entry's `tool_name` and `tool_use_id`.
+- `user`: each `tool_result` content block's text, by `tool_use_id`, so a denial can be matched to what the model was told.
+
+`hook_denials`: Reads refused by the singularrag hook (a `Read` denial whose tool result contains `singularrag:`; the result line carries no reason, probed 2026-09-21); counted per session, never an abort, and summed per condition in the summary table. `denied` lists the other denied tools, which still abort the condition (§4).
 
 Tokens are recorded as those four numbers, unchanged. The comparison metric "tokens" is their sum, and the summary header says so.
 

@@ -1,4 +1,4 @@
-//! The rmcp handler: three tools, server info, and the session key from clientInfo.
+//! The rmcp handler: five tools, server info, and the session key from clientInfo.
 //! All engine work goes through the actor; handlers only await a reply.
 
 use std::sync::{Arc, Mutex};
@@ -11,11 +11,13 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
-use singularrag_core::engine::{AnnotateRequest, FindRequest, MapRequest};
+use singularrag_core::engine::{
+    AnnotateRequest, ChangedRequest, FindRequest, MapRequest, TraceRequest,
+};
 
 use crate::actor::EngineHandle;
 
-pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this repository. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show. Use find_symbol to locate a name. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. repo_map and find_symbol are read-only; annotate writes only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background.";
+pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this repository. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show. Use find_symbol to locate a name, trace_path to see how two symbols connect, and changed to see what a diff touches and who references it. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background.";
 
 // Only read by the unit test below, which asserts the router's reported description
 // equals these constants (see the note on the `#[tool_router]` impl block); the macro
@@ -29,6 +31,12 @@ pub const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, pref
 
 #[allow(dead_code)]
 pub const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is repo-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs.";
+
+#[allow(dead_code)]
+pub const TRACE_PATH_DESCRIPTION: &str = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files.";
+
+#[allow(dead_code)]
+pub const CHANGED_DESCRIPTION: &str = "What a change touches: the symbols whose lines a diff modifies and the files that reference each. `base` is a git ref; omitted means the working tree against HEAD. Use it before editing to see the blast radius and after editing to check it.";
 
 /// `clientInfo.name` → the `<client>` part of the session key. Lower-case; whitespace
 /// and colons become `-` so the key stays `mcp:<client>:<pid>:<start>`.
@@ -108,6 +116,27 @@ impl From<AnnotateArgs> for AnnotateRequest {
     }
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TraceArgs {
+    /// `path::name` of the starting symbol.
+    pub from: String,
+    /// `path::name` of the target symbol.
+    pub to: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ChangedArgs {
+    /// A git ref to diff against; omit for the working tree against HEAD.
+    pub base: Option<String>,
+}
+
+fn split_symbol(s: &str) -> Result<(String, String), String> {
+    s.split_once("::")
+        .filter(|(p, n)| !p.is_empty() && !n.is_empty())
+        .map(|(p, n)| (p.to_string(), n.to_string()))
+        .ok_or_else(|| format!("expected path::name, got {s:?}"))
+}
+
 #[derive(Clone)]
 pub struct SingularragServer {
     handle: EngineHandle,
@@ -170,6 +199,44 @@ impl SingularragServer {
     ) -> Result<CallToolResult, ErrorData> {
         text_result(self.handle.annotate(args.into()).await.map(|r| r.text))
     }
+
+    #[tool(
+        name = "trace_path",
+        description = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files."
+    )]
+    async fn trace_path(
+        &self,
+        Parameters(args): Parameters<TraceArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = match (split_symbol(&args.from), split_symbol(&args.to)) {
+            (Ok((from_path, from_symbol)), Ok((to_path, to_symbol))) => TraceRequest {
+                from_path,
+                from_symbol,
+                to_path,
+                to_symbol,
+            },
+            (Err(e), _) | (_, Err(e)) => return text_result(Err(e)),
+        };
+        text_result(self.handle.trace_path(req).await.map(|r| r.text))
+    }
+
+    #[tool(
+        name = "changed",
+        description = "What a change touches: the symbols whose lines a diff modifies and the files that reference each. `base` is a git ref; omitted means the working tree against HEAD. Use it before editing to see the blast radius and after editing to check it."
+    )]
+    async fn changed(
+        &self,
+        Parameters(args): Parameters<ChangedArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        text_result(
+            self.handle
+                .changed(ChangedRequest {
+                    base: args.base.filter(|b| !b.trim().is_empty()),
+                })
+                .await
+                .map(|r| r.text),
+        )
+    }
 }
 
 #[tool_handler(router = self.tool_router.clone())]
@@ -212,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_list_is_exactly_the_three_spec_tools() {
+    fn tool_list_is_exactly_the_five_spec_tools() {
         let router = SingularragServer::tool_router();
         let mut names: Vec<String> = router
             .list_all()
@@ -220,7 +287,16 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["annotate", "find_symbol", "repo_map"]);
+        assert_eq!(
+            names,
+            vec![
+                "annotate",
+                "changed",
+                "find_symbol",
+                "repo_map",
+                "trace_path"
+            ]
+        );
         let tools = router.list_all();
         let map = tools.iter().find(|t| t.name == "repo_map").unwrap();
         assert_eq!(map.description.as_deref(), Some(REPO_MAP_DESCRIPTION));
@@ -228,6 +304,10 @@ mod tests {
         assert_eq!(find.description.as_deref(), Some(FIND_SYMBOL_DESCRIPTION));
         let ann = tools.iter().find(|t| t.name == "annotate").unwrap();
         assert_eq!(ann.description.as_deref(), Some(ANNOTATE_DESCRIPTION));
+        let trace = tools.iter().find(|t| t.name == "trace_path").unwrap();
+        assert_eq!(trace.description.as_deref(), Some(TRACE_PATH_DESCRIPTION));
+        let changed = tools.iter().find(|t| t.name == "changed").unwrap();
+        assert_eq!(changed.description.as_deref(), Some(CHANGED_DESCRIPTION));
         let schema = serde_json::to_value(&ann.input_schema).unwrap();
         let props = schema["properties"].as_object().unwrap();
         assert!(
@@ -252,6 +332,20 @@ mod tests {
         );
         let schema = serde_json::to_value(&find.input_schema).unwrap();
         assert_eq!(schema["required"], serde_json::json!(["name"]));
+        let schema = serde_json::to_value(&trace.input_schema).unwrap();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("from") && props.contains_key("to"));
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "from") && required.iter().any(|r| r == "to"));
+        let schema = serde_json::to_value(&changed.input_schema).unwrap();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("base"));
+        assert!(
+            schema
+                .get("required")
+                .is_none_or(|r| r.as_array().unwrap().is_empty()),
+            "{schema}"
+        );
     }
 
     #[test]

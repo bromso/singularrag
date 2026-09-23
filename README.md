@@ -91,7 +91,7 @@ Results land in `eval/runs/<timestamp>-<label>/` with one record and raw stream 
 
 ## What the agent sees
 
-Three tools. `repo_map` returns something like:
+Five tools. `repo_map` returns something like:
 
 ```
 # singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh · retrieval r_000123
@@ -108,12 +108,17 @@ Each file header ends with the files that reference it, strongest first, and a n
 
 `annotate` lets the agent leave a one-paragraph note on a file or symbol; it lands in `map.toml`, shows in the next map with an `(agent)` tag, and the developer can delete it from the page.
 
+`trace_path` answers how two symbols connect; `changed` lists what your uncommitted (or branch) changes touch and who references each symbol. `singularrag init` installs a Claude Code hook that refuses the first file read of a session until the map has been consulted, once per session.
+
 ## CLI
 
 ```
 singularrag index            # build or refresh the index
 singularrag query "text"     # print the map the agent would get
 singularrag find NAME        # look a symbol up
+singularrag path FROM TO     # the shortest reference chain between two path::symbol
+singularrag changed          # the symbols a diff touches and who references them (--base REF)
+singularrag init             # install the query-first hook and the MCP entry for this repo
 singularrag eval             # tier-one recall against eval/questions.toml
 singularrag serve            # open the map UI on localhost
 singularrag mcp              # serve over stdio

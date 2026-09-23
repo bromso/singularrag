@@ -49,6 +49,10 @@ pub struct Parsed {
     pub result: Option<ResultLine>,
     /// Tool names denied by permission on the result line, deduplicated, first-seen order.
     pub permission_denials: Vec<String>,
+    /// Every denial as `(tool_name, tool_use_id)`, in result-line order.
+    pub permission_denial_ids: Vec<(String, String)>,
+    /// The first 400 characters of each `tool_result`, by `tool_use_id`.
+    pub tool_results: BTreeMap<String, String>,
     /// Non-blank lines seen, and how many of them were not JSON objects.
     pub lines: usize,
     pub bad_lines: usize,
@@ -115,6 +119,28 @@ pub fn parse_stream(text: &str) -> Parsed {
                     *p.tool_calls.entry(name.to_string()).or_insert(0) += 1;
                 }
             }
+            (Some("user"), _) => {
+                let blocks = v.pointer("/message/content").and_then(Value::as_array);
+                for b in blocks.into_iter().flatten() {
+                    if b.get("type").and_then(Value::as_str) != Some("tool_result") {
+                        continue;
+                    }
+                    let Some(id) = b.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let text = match b.get("content") {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Array(items)) => items
+                            .iter()
+                            .filter_map(|i| i.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    p.tool_results
+                        .insert(id.to_string(), text.chars().take(400).collect());
+                }
+            }
             (Some("result"), subtype) => {
                 let usage = v.get("usage").cloned().unwrap_or(Value::Null);
                 if let Some(denials) = v.get("permission_denials").and_then(Value::as_array) {
@@ -123,6 +149,9 @@ pub fn parse_stream(text: &str) -> Parsed {
                             if !p.permission_denials.iter().any(|n| n == name) {
                                 p.permission_denials.push(name.to_string());
                             }
+                            let id = d.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                            p.permission_denial_ids
+                                .push((name.to_string(), id.to_string()));
                         }
                     }
                 }
@@ -266,5 +295,36 @@ mod tests {
             vec!["mcp__singularrag__repo_map".to_string()]
         );
         assert_eq!(p.tool_calls.get("mcp__singularrag__repo_map"), Some(&1));
+    }
+
+    const HOOK_STREAM: &str = concat!(
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/tmp/hono/src/router.ts"}}]},"session_id":"5"}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"singularrag: this repository has a map. Call repo_map with your task first.","is_error":true}]},"session_id":"5"}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":4000,"num_turns":2,"structured_output":{"symbols":["src/router.ts::Router"]},"session_id":"5","total_cost_usd":0.04,"usage":{"input_tokens":5,"cache_creation_input_tokens":4000,"cache_read_input_tokens":0,"output_tokens":30},"permission_denials":[{"tool_name":"Read","tool_use_id":"tu1","tool_input":{"file_path":"/tmp/hono/src/router.ts"}}]}"#,
+        "\n"
+    );
+
+    #[test]
+    fn hook_denial_stream_keeps_denial_ids_and_tool_results() {
+        let p = parse_stream(HOOK_STREAM);
+        assert_eq!(
+            p.permission_denial_ids,
+            vec![("Read".to_string(), "tu1".to_string())]
+        );
+        assert!(
+            p.tool_results["tu1"].contains("singularrag:"),
+            "{:?}",
+            p.tool_results
+        );
+        assert_eq!(p.permission_denials, vec!["Read".to_string()]);
+    }
+
+    #[test]
+    fn tool_result_text_blocks_are_joined() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu2","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}]}}"#;
+        let p = parse_stream(line);
+        assert_eq!(p.tool_results["tu2"], "first\nsecond");
     }
 }

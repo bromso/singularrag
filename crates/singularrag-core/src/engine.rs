@@ -109,6 +109,39 @@ pub struct AnnotateResponse {
     pub lock_timeout: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct TraceRequest {
+    pub from_path: String,
+    pub from_symbol: String,
+    pub to_path: String,
+    pub to_symbol: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceResponse {
+    pub retrieval_id: i64,
+    pub text: String,
+    pub hops: usize,
+    pub found: bool,
+    pub stale_count: usize,
+    pub lock_timeout: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChangedRequest {
+    /// A git ref; `None` is the working tree against HEAD.
+    pub base: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChangedResponse {
+    pub retrieval_id: i64,
+    pub text: String,
+    pub symbols: usize,
+    pub stale_count: usize,
+    pub lock_timeout: bool,
+}
+
 impl Engine {
     pub fn open(root: &Path, session_key: &str) -> Result<Engine> {
         let root = root.canonicalize().map_err(|e| {
@@ -448,6 +481,149 @@ impl Engine {
             ),
             removed,
             notes_on_file,
+            stale_count: stats.remaining,
+            lock_timeout: stats.lock_timeout,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn provenance_symbol(
+        symbol_id: i64,
+        path: &str,
+        name: &str,
+        kind: &str,
+        line: u32,
+        signature: &str,
+        i: usize,
+        seed: &str,
+    ) -> ScoredSymbol {
+        ScoredSymbol {
+            symbol_id,
+            file_id: 0,
+            path: path.to_string(),
+            name: name.to_string(),
+            kind: kind.to_string(),
+            line_start: line,
+            line_end: line,
+            signature: signature.to_string(),
+            score: 1.0 / (i as f64 + 1.0),
+            reasons: crate::rank::Reasons {
+                seeds: vec![seed.to_string()],
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn trace_path(&mut self, req: &TraceRequest) -> Result<TraceResponse> {
+        let stats = self.refresh(self.refresh_budget)?;
+        let trace = crate::trace::trace_path(
+            &self.store,
+            &self.config,
+            &req.from_path,
+            &req.from_symbol,
+            &req.to_path,
+            &req.to_symbol,
+        )?;
+        let query = format!(
+            "{}::{} -> {}::{}",
+            req.from_path, req.from_symbol, req.to_path, req.to_symbol
+        );
+        let (body, ranked) = match &trace {
+            Some(t) => {
+                let syms = crate::trace::path_symbols(&self.store, t)?;
+                let ranked: Vec<ScoredSymbol> = syms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (id, path, name, line, kind, sig))| {
+                        Self::provenance_symbol(
+                            *id,
+                            path,
+                            name,
+                            kind,
+                            *line,
+                            sig,
+                            i,
+                            &format!("trace:{query}"),
+                        )
+                    })
+                    .collect();
+                (crate::trace::render_trace(t), ranked)
+            }
+            None => (
+                format!("# no path within {} hops\n", crate::trace::MAX_PATH_DEPTH),
+                Vec::new(),
+            ),
+        };
+        let (version, head) = self.index_meta()?;
+        let served = ranked.len();
+        let retrieval_id = self.record_retrieval(
+            "trace_path",
+            Some(&query),
+            &[],
+            None,
+            Some(crate::trace::MAX_PATH_DEPTH),
+            &version,
+            head.as_deref(),
+            stats.remaining,
+            &ranked,
+            served,
+        )?;
+        Ok(TraceResponse {
+            retrieval_id,
+            text: format!(
+                "{}\n{body}",
+                map::header(&version, head.as_deref(), stats.remaining, retrieval_id)
+            ),
+            hops: trace.as_ref().map(|t| t.hops.len()).unwrap_or(0),
+            found: trace.is_some(),
+            stale_count: stats.remaining,
+            lock_timeout: stats.lock_timeout,
+        })
+    }
+
+    pub fn changed(&mut self, req: &ChangedRequest) -> Result<ChangedResponse> {
+        let stats = self.refresh(self.refresh_budget)?;
+        let c =
+            crate::changed::changed(&self.store, &self.config, &self.root, req.base.as_deref())?;
+        let ranked: Vec<ScoredSymbol> = c
+            .symbols
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                Self::provenance_symbol(
+                    s.symbol_id,
+                    &s.path,
+                    &s.name,
+                    &s.kind,
+                    s.line_start,
+                    &s.signature,
+                    i,
+                    &format!("changed:{}", c.base),
+                )
+            })
+            .collect();
+        let (version, head) = self.index_meta()?;
+        let served = ranked.len();
+        let retrieval_id = self.record_retrieval(
+            "changed",
+            Some(&c.base),
+            &[],
+            None,
+            Some(crate::changed::MAX_CHANGED),
+            &version,
+            head.as_deref(),
+            stats.remaining,
+            &ranked,
+            served,
+        )?;
+        Ok(ChangedResponse {
+            retrieval_id,
+            text: format!(
+                "{}\n{}",
+                map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+                crate::changed::render_changed(&c)
+            ),
+            symbols: c.symbols.len(),
             stale_count: stats.remaining,
             lock_timeout: stats.lock_timeout,
         })
@@ -1084,5 +1260,118 @@ mod tests {
         assert!(e2.contains("looks like a secret"), "{e2}");
         assert!(e.config().note.is_empty(), "nothing was written");
         assert!(!dir.path().join(".singularrag/map.toml").exists());
+    }
+
+    #[test]
+    fn trace_path_records_a_retrieval_with_the_path_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        let mut e = Engine::open(dir.path(), "trace").unwrap();
+        let r = e
+            .trace_path(&TraceRequest {
+                from_path: "src/cli/login.ts".into(),
+                from_symbol: "login".into(),
+                to_path: "src/auth/session.ts".into(),
+                to_symbol: "createSession".into(),
+            })
+            .unwrap();
+        assert!(r.found && r.hops == 1);
+        assert!(
+            r.text.starts_with("# singularrag · index ") && r.text.contains("retrieval r_"),
+            "{}",
+            r.text
+        );
+        assert!(r
+            .text
+            .contains("src/cli/login.ts::login → src/auth/session.ts::createSession"));
+        let (tool, query, limit): (String, String, i64) = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT tool, query, limit_n FROM retrievals WHERE id = ?1",
+                params![r.retrieval_id],
+                |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (tool.as_str(), query.as_str(), limit),
+            (
+                "trace_path",
+                "src/cli/login.ts::login -> src/auth/session.ts::createSession",
+                6
+            )
+        );
+        let served: i64 = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM retrieval_items WHERE retrieval_id = ?1 AND served = 1",
+                params![r.retrieval_id],
+                |x| x.get(0),
+            )
+            .unwrap();
+        assert_eq!(served, 2);
+        // Exclude src/cli/ so log.ts is unreachable (see the trace.rs test); the engine
+        // re-reads map.toml on its next refresh.
+        std::fs::create_dir_all(dir.path().join(".singularrag")).unwrap();
+        std::fs::write(
+            dir.path().join(".singularrag/map.toml"),
+            "[[exclude]]\npath = \"src/cli/\"\n",
+        )
+        .unwrap();
+        let none = e
+            .trace_path(&TraceRequest {
+                from_path: "src/util/log.ts".into(),
+                from_symbol: "log".into(),
+                to_path: "src/auth/session.ts".into(),
+                to_symbol: "createSession".into(),
+            })
+            .unwrap();
+        assert!(
+            !none.found && none.text.contains("# no path within 6 hops"),
+            "{}",
+            none.text
+        );
+    }
+
+    #[test]
+    fn changed_records_a_retrieval_and_errors_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        let mut e = Engine::open(dir.path(), "changed").unwrap();
+        let err = e
+            .changed(&ChangedRequest { base: None })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a git checkout"), "{err}");
+        // make it a repo with everything committed, then touch one symbol
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success())
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let p = dir.path().join("src/cli/login.ts");
+        std::fs::write(&p, std::fs::read_to_string(&p).unwrap() + "\n// tail\n").unwrap();
+        let r = e.changed(&ChangedRequest { base: None }).unwrap();
+        assert!(r.text.starts_with("# singularrag · index "), "{}", r.text);
+        assert!(r.text.contains("changed since HEAD"), "{}", r.text);
+        let tool: String = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT tool FROM retrievals WHERE id = ?1",
+                params![r.retrieval_id],
+                |x| x.get(0),
+            )
+            .unwrap();
+        assert_eq!(tool, "changed");
     }
 }

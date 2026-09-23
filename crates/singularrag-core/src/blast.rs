@@ -47,7 +47,7 @@ fn defined_names(store: &Store, file_ids: &[i64]) -> Result<Vec<String>> {
 }
 
 /// Files (id, path) that reference `name`, non-skipped, in path order.
-fn referencing_files(store: &Store, name: &str) -> Result<Vec<(i64, String)>> {
+pub(crate) fn referencing_files(store: &Store, name: &str) -> Result<Vec<(i64, String)>> {
     let mut stmt = store.conn().prepare(
         "SELECT DISTINCT f.id, f.path FROM refs r JOIN files f ON f.id = r.file_id
          WHERE r.name = ?1 AND f.skipped_reason IS NULL ORDER BY f.path",

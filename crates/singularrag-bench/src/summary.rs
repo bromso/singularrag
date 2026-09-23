@@ -25,6 +25,7 @@ pub struct ConditionStats {
     pub name: String,
     pub sessions: usize,
     pub failed: usize,
+    pub hook_denials: u64,
     pub mean_recall: f64,
     pub mean_tokens: f64,
     pub median_tokens: f64,
@@ -60,6 +61,7 @@ pub fn stats(name: &str, records: &[Record]) -> ConditionStats {
         name: name.to_string(),
         sessions: n,
         failed: records.iter().filter(|r| r.failed).count(),
+        hook_denials: records.iter().map(|r| r.hook_denials).sum(),
         mean_recall: mean(records.iter().map(|r| r.recall), n),
         mean_tokens: mean(records.iter().map(|r| r.tokens.total() as f64), n),
         median_tokens: median(records.iter().map(|r| r.tokens.total() as f64).collect()),
@@ -265,15 +267,16 @@ pub fn render(
     }
 
     let all: Vec<ConditionStats> = conditions.iter().map(|(n, rs)| stats(n, rs)).collect();
-    let _ = writeln!(out, "| condition | sessions | failed | mean recall | mean tokens | median tokens | mean tool calls | mean wall s | total cost |");
-    let _ = writeln!(out, "|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+    let _ = writeln!(out, "| condition | sessions | failed | hook denials | mean recall | mean tokens | median tokens | mean tool calls | mean wall s | total cost |");
+    let _ = writeln!(out, "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for s in &all {
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {:.2} | {:.0} | {:.0} | {:.1} | {:.1} | ${:.2} |",
+            "| {} | {} | {} | {} | {:.2} | {:.0} | {:.0} | {:.1} | {:.1} | ${:.2} |",
             s.name,
             s.sessions,
             s.failed,
+            s.hook_denials,
             s.mean_recall,
             s.mean_tokens,
             s.median_tokens,
@@ -466,6 +469,7 @@ mod tests {
             failed,
             reason: None,
             denied: vec![],
+            hook_denials: 0,
         }
     }
 
@@ -653,8 +657,8 @@ mod tests {
         ];
         let md = render(&meta, "alone", &conds, &["L1".into(), "L2".into()]);
         assert!(md.contains("tokens = input + output + cache creation + cache read"));
-        assert!(md.contains("| alone | 4 | 0 | 0.38 |"), "{md}");
-        assert!(md.contains("| singularrag | 4 | 1 | 0.75 |"), "{md}");
+        assert!(md.contains("| alone | 4 | 0 | 0 | 0.38 |"), "{md}");
+        assert!(md.contains("| singularrag | 4 | 1 | 0 | 0.75 |"), "{md}");
         assert!(md.contains("| L1 | 0.50 | 1.00 |"), "{md}");
         assert!(md.contains("**singularrag earns its place**"), "{md}");
         assert!(
@@ -754,5 +758,35 @@ mod tests {
         assert!(md.contains("singularrag: no verdict (no records)"), "{md}");
         assert!(!md.contains("singularrag earns"), "{md}");
         assert!(!md.contains("singularrag does not earn"), "{md}");
+    }
+
+    #[test]
+    fn hook_denials_are_summed_into_their_own_column() {
+        let meta = RunMeta {
+            run_dir: "eval/runs/20260921T000000Z-run".into(),
+            commit: "098e119".into(),
+            claude_version: "2.1.261".into(),
+            singularrag_version: None,
+            aborted: BTreeMap::new(),
+        };
+        let mut a = rec("L1", "singularrag+hook", 1.0, 500, 4, false);
+        a.hook_denials = 2;
+        let conds = vec![
+            (
+                "alone".to_string(),
+                vec![rec("L1", "alone", 0.5, 1000, 10, false)],
+            ),
+            ("singularrag+hook".to_string(), vec![a]),
+        ];
+        let md = render(&meta, "alone", &conds, &["L1".into()]);
+        assert!(
+            md.contains("| condition | sessions | failed | hook denials |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| singularrag+hook | 1 | 0 | 2 | 1.00 |"),
+            "{md}"
+        );
+        assert!(md.contains("| alone | 1 | 0 | 0 | 0.50 |"), "{md}");
     }
 }

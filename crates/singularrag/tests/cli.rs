@@ -143,6 +143,74 @@ fn mcp_exits_cleanly_when_stdin_closes() {
 }
 
 #[test]
+fn path_prints_the_chain_and_changed_needs_git() {
+    let dir = fixture();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "path",
+            "src/cli/login.ts::login",
+            "src/auth/session.ts::createSession",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# 1 hop\n"));
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "path",
+            "nope.ts::x",
+            "src/auth/session.ts::createSession",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "from: nope.ts::x is not in the index",
+        ));
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["--repo", dir.path().to_str().unwrap(), "changed"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a git checkout"));
+}
+
+#[test]
+fn hook_read_reads_stdin_and_prints_a_decision() {
+    let dir = fixture();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["--repo", dir.path().to_str().unwrap(), "index"])
+        .assert()
+        .success();
+    let session = format!("cli-{}", std::process::id());
+    let input = format!(
+        r#"{{"session_id":"{session}","cwd":"{}","tool_name":"Read","tool_input":{{"file_path":"{}"}}}}"#,
+        dir.path().display(),
+        dir.path().join("src/auth/session.ts").display()
+    );
+    let mut cmd = Command::cargo_bin("singularrag").unwrap();
+    cmd.args(["--repo", dir.path().to_str().unwrap(), "hook", "read"])
+        .write_stdin(input.clone());
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"permissionDecision\":\"deny\""));
+    let mut again = Command::cargo_bin("singularrag").unwrap();
+    again
+        .args(["--repo", dir.path().to_str().unwrap(), "hook", "read"])
+        .write_stdin(input);
+    again
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"permissionDecision\":\"allow\""));
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("singularrag-hook").join(&session));
+}
+
+#[test]
 fn readme_mcp_json_snippet_is_valid_and_points_at_the_mcp_subcommand() {
     let readme =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
@@ -161,4 +229,59 @@ fn readme_mcp_json_snippet_is_valid_and_points_at_the_mcp_subcommand() {
         v["mcpServers"]["singularrag"]["args"],
         serde_json::json!(["mcp"])
     );
+}
+
+#[test]
+fn init_writes_the_claude_files() {
+    let dir = fixture();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "init",
+            "--host",
+            "claude",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("wrote .claude/settings.local.json")
+                .and(predicate::str::contains("wrote .mcp.json")),
+        );
+    let s = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+    assert!(
+        s.contains("hook read") && s.contains("mcp__singularrag__repo_map"),
+        "{s}"
+    );
+}
+
+#[test]
+fn mcp_help_names_all_five_tools() {
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "repo_map, find_symbol, trace_path, changed and annotate",
+        ));
+}
+
+#[test]
+fn readme_cli_block_lists_the_new_subcommands() {
+    let readme =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
+    let cli = readme.find("## CLI").expect("a CLI section");
+    let block = &readme[cli..readme[cli + 1..].find("\n## ").unwrap() + cli + 1];
+    for sub in [
+        "singularrag path ",
+        "singularrag changed",
+        "singularrag init",
+    ] {
+        assert!(
+            block.contains(sub),
+            "README CLI block lacks `{sub}`:\n{block}"
+        );
+    }
 }

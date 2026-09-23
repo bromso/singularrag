@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use singularrag_core::engine::{Engine, FindRequest, MapRequest};
+use singularrag_core::engine::{ChangedRequest, Engine, FindRequest, MapRequest, TraceRequest};
 use singularrag_core::map::DEFAULT_BUDGET;
 
 mod actor;
+mod hook;
+mod init;
 mod mcp;
 mod serve;
 
@@ -56,7 +58,20 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Serve the repo_map, find_symbol and annotate tools to an agent over stdio (MCP)
+    /// The shortest chain of references between two symbols (what the trace_path tool returns)
+    Path {
+        /// `path::symbol`
+        from: String,
+        /// `path::symbol`
+        to: String,
+    },
+    /// The symbols a diff touches and who references them (what the changed tool returns)
+    Changed {
+        /// A git ref; default is the working tree against HEAD
+        #[arg(long)]
+        base: Option<String>,
+    },
+    /// Serve the repo_map, find_symbol, trace_path, changed and annotate tools to an agent over stdio (MCP)
     Mcp {
         /// Inline refresh budget in milliseconds (spec §8). Tests lower it.
         #[arg(long, default_value_t = 2000, hide = true)]
@@ -68,6 +83,19 @@ enum Cmd {
         port: u16,
         #[arg(long)]
         no_open: bool,
+    },
+    /// Claude Code PreToolUse hook (installed by `init`): reads the hook JSON on stdin
+    Hook {
+        #[arg(value_enum)]
+        event: hook::HookEvent,
+    },
+    /// Install the query-first hook and the MCP entry for this repo
+    Init {
+        /// Write .claude/settings.json (shared) instead of .claude/settings.local.json
+        #[arg(long)]
+        project: bool,
+        #[arg(long, value_enum, default_value_t = init::Host::All)]
+        host: init::Host,
     },
 }
 
@@ -81,7 +109,18 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Cmd::Hook { event } = cli.cmd {
+        let mut input = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+        println!("{}", hook::run(event, cli.repo.clone(), &input));
+        return Ok(());
+    }
     let root = cli.repo.unwrap_or(std::env::current_dir()?);
+    if let Cmd::Init { project, host } = cli.cmd {
+        let bin = std::env::current_exe()?;
+        print!("{}", init::run(&root, project, host, &bin)?);
+        return Ok(());
+    }
     // `mcp` returns before the `Engine::open` below, and must: the Engine is `!Sync` and
     // belongs to the actor thread, which opens it lazily at the first job with a session
     // key derived from the client name that MCP `initialize` delivers (spec §2). Opening
@@ -124,6 +163,26 @@ fn main() -> anyhow::Result<()> {
             let r = engine.find_symbol(&FindRequest { name, kind, limit })?;
             print!("{}", r.text);
         }
+        Cmd::Path { from, to } => {
+            let split = |s: &str| -> anyhow::Result<(String, String)> {
+                s.split_once("::")
+                    .map(|(p, n)| (p.to_string(), n.to_string()))
+                    .ok_or_else(|| anyhow::anyhow!("expected path::symbol, got {s}"))
+            };
+            let (from_path, from_symbol) = split(&from)?;
+            let (to_path, to_symbol) = split(&to)?;
+            let r = engine.trace_path(&TraceRequest {
+                from_path,
+                from_symbol,
+                to_path,
+                to_symbol,
+            })?;
+            print!("{}", r.text);
+        }
+        Cmd::Changed { base } => {
+            let r = engine.changed(&ChangedRequest { base })?;
+            print!("{}", r.text);
+        }
         Cmd::Eval {
             questions,
             budget,
@@ -139,6 +198,8 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Mcp { .. } => unreachable!("handled above before Engine::open"),
         Cmd::Serve { .. } => unreachable!("handled above before Engine::open"),
+        Cmd::Hook { .. } => unreachable!("handled above before Engine::open"),
+        Cmd::Init { .. } => unreachable!("handled above before Engine::open"),
     }
     Ok(())
 }

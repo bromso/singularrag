@@ -147,7 +147,7 @@ src/auth/session.ts:12  function  createSession(user: User, ttl: number): Sessio
    referenced from 7 files: src/http/middleware.ts (3), src/cli/login.ts (2), …
 ```
 
-A third tool, `annotate` (2026-09-21, `docs/superpowers/specs/2026-09-21-singularrag-annotate-design.md` §3), writes the agent's note on a file or symbol into `map.toml`. No other tools, resources or prompts. Host config: one stdio MCP entry each for Claude Code, Codex CLI and Copilot CLI, documented in the README.
+A third tool, `annotate` (2026-09-21, `docs/superpowers/specs/2026-09-21-singularrag-annotate-design.md` §3), writes the agent's note on a file or symbol into `map.toml`. Two graph tools (2026-09-21, `docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md` §4 and §5): `trace_path` returns the shortest reference chain between two `path::name` symbols, up to 6 hops; `changed` returns the symbols a git diff touches and the files that reference each. Five tools in all; `init` and `hook` are CLI subcommands, not tools. No other tools, resources or prompts. Host config: one stdio MCP entry each for Claude Code, Codex CLI and Copilot CLI, documented in the README.
 
 ## 10. UI (served by `singularrag serve`)
 
@@ -171,7 +171,7 @@ Not in v0: charts, arranged diagrams, multi-repo switcher, theming beyond shadcn
 5. The index file becomes a secret store.
 
 ### Controls (all required for v0)
-- Only retrieval rows and `map.toml` are ever written, the latter by the UI and by the agent's own notes; no exec.
+- Only retrieval rows and `map.toml` are ever written, the latter by the UI and by the agent's own notes; no agent-exposed execution; `changed` runs `git diff` and `git ls-files` read-only with fixed arguments and a validated ref.
 - Repo root canonicalised at start; every indexed path must canonicalise under it; outside-pointing symlinks skipped with reason.
 - Built-in denylist, extendable in `map.toml`, never shrinkable: `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, `*.pfx`, `.npmrc`, `.netrc`, `*.tfstate`, `secrets/`, `credentials*`. `.gitignore` honoured on top.
 - Content scan before indexing: private-key headers, cloud key patterns, JWT shape, high-entropy tokens ≥ 32 chars; a hit skips the file with reason "secret-like content".
