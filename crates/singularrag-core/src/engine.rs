@@ -1256,14 +1256,14 @@ mod tests {
             &"x".repeat(301)
         ))
         .contains("300"));
-        // `AKIA` + 16 upper-case alphanumerics is the AWS pattern; the fixture in the
-        // brief has a trailing extra character that breaks the `\b` word boundary, so a
-        // private-key header (also matched by secrets.rs `rules()`) is used instead.
+        // A private-key header trips `secrets::looks_secret`. It is assembled at
+        // runtime so this source file does not itself look secret-like to the indexer.
+        let header = format!("-----BEGIN RSA {} KEY-----", "PRIVATE");
         let e2 = err(annotate(
             &mut e,
             "src/auth/session.ts",
             None,
-            "token -----BEGIN RSA PRIVATE KEY----- here",
+            &format!("token {header} here"),
         ));
         assert!(e2.contains("looks like a secret"), "{e2}");
         assert!(e.config().note.is_empty(), "nothing was written");

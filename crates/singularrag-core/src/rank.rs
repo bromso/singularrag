@@ -122,21 +122,50 @@ fn fts_symbol_ids(store: &Store, terms: &[String]) -> Result<Vec<i64>> {
     Ok(ids)
 }
 
-/// Symbol ids whose section text matches a query term (prefix, porter-stemmed).
-pub fn fts_body_ids(store: &Store, terms: &[String]) -> Result<Vec<i64>> {
-    let mut ids = Vec::new();
-    let mut stmt = store
-        .conn()
-        .prepare("SELECT rowid FROM sections_fts WHERE sections_fts MATCH ?1")?;
+/// Symbol ids whose section text matches a query term (prefix, porter-stemmed), with
+/// the strength of the match: FTS5's `bm25()` summed over the terms, negated so a
+/// stronger match is a larger number. Sorted by id.
+pub fn fts_body_hits(store: &Store, terms: &[String]) -> Result<Vec<(i64, f64)>> {
+    let mut hits: HashMap<i64, f64> = HashMap::new();
+    let mut stmt = store.conn().prepare(
+        "SELECT rowid, -bm25(sections_fts) FROM sections_fts WHERE sections_fts MATCH ?1",
+    )?;
     for t in terms {
         let q = format!("content: \"{}\"*", t.replace('"', "\"\""));
-        for row in stmt.query_map([q], |r| r.get::<_, i64>(0))? {
-            ids.push(row?);
+        for row in stmt.query_map([q], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))? {
+            let (id, w) = row?;
+            *hits.entry(id).or_default() += w.max(0.0);
         }
     }
-    ids.sort_unstable();
-    ids.dedup();
-    Ok(ids)
+    let mut out: Vec<(i64, f64)> = hits.into_iter().collect();
+    out.sort_unstable_by_key(|(id, _)| *id);
+    Ok(out)
+}
+
+/// How a file's FTS bonus is shared between its hits (documents spec §5, amended). Each
+/// hit is `(name hit, body rank)`: a name hit weighs 1.0; a body hit weighs its rank
+/// normalised so the strongest body hit in the file weighs 1.0; a symbol with both adds
+/// them. Returns each hit's share of the bonus, summing to one. An even split falls out
+/// when every hit is a name hit, which is what code files had before.
+pub fn hit_shares(hits: &[(bool, Option<f64>)]) -> Vec<f64> {
+    let max_body = hits.iter().filter_map(|(_, b)| *b).fold(0.0_f64, f64::max);
+    let weights: Vec<f64> = hits
+        .iter()
+        .map(|(name, body)| {
+            let n = if *name { 1.0 } else { 0.0 };
+            let b = match body {
+                Some(r) if max_body > 0.0 => r / max_body,
+                Some(_) => 1.0,
+                None => 0.0,
+            };
+            n + b
+        })
+        .collect();
+    let total: f64 = weights.iter().sum();
+    if total <= 0.0 {
+        return vec![0.0; hits.len()];
+    }
+    weights.into_iter().map(|w| w / total).collect()
 }
 
 /// Directories whose files are tests or benchmarks, whatever the language.
@@ -226,8 +255,14 @@ pub fn rank_symbols(
         .filter(|s| is_fts_hit(s.id))
         .map(|s| s.name.clone())
         .collect();
-    let body_ids = fts_body_ids(store, &terms)?;
-    let is_body_hit = |id: i64| body_ids.binary_search(&id).is_ok();
+    let body_hits = fts_body_hits(store, &terms)?;
+    let body_rank = |id: i64| -> Option<f64> {
+        body_hits
+            .binary_search_by_key(&id, |(i, _)| *i)
+            .ok()
+            .map(|i| body_hits[i].1)
+    };
+    let is_body_hit = |id: i64| body_rank(id).is_some();
 
     let g: FileGraph = build_graph(store, config, &terms, &fts_names)?;
     let n = g.nodes.len();
@@ -298,14 +333,28 @@ pub fn rank_symbols(
 
     // A file's rank is *distributed*, not replicated: eight `const Child = …` in one file
     // share one name's incoming weight instead of each taking all of it, and a file with
-    // many FTS hits shares one file rank between them.
+    // many FTS hits shares one file rank between them, in proportion to each hit's
+    // strength (`hit_shares`): a spec section that really answers the query keeps most
+    // of its document's bonus instead of a twentieth of it.
     let mut group_size: HashMap<(usize, String), usize> = HashMap::new();
-    let mut fts_in_file: HashMap<usize, usize> = HashMap::new();
+    let mut hits_by_file: HashMap<usize, Vec<(i64, bool, Option<f64>)>> = HashMap::new();
     for s in &symbols {
         let fi = g.index_of[&s.file_id];
         *group_size.entry((fi, s.name.clone())).or_default() += 1;
-        if is_fts_hit(s.id) || is_body_hit(s.id) {
-            *fts_in_file.entry(fi).or_default() += 1;
+        let name_hit = is_fts_hit(s.id);
+        let body = body_rank(s.id);
+        if name_hit || body.is_some() {
+            hits_by_file
+                .entry(fi)
+                .or_default()
+                .push((s.id, name_hit, body));
+        }
+    }
+    let mut share_of: HashMap<i64, f64> = HashMap::new();
+    for hits in hits_by_file.values() {
+        let kinds: Vec<(bool, Option<f64>)> = hits.iter().map(|(_, n, b)| (*n, *b)).collect();
+        for ((id, _, _), share) in hits.iter().zip(hit_shares(&kinds)) {
+            share_of.insert(*id, share);
         }
     }
 
@@ -326,8 +375,8 @@ pub fn rank_symbols(
                 .unwrap_or(fr * UNREFERENCED_FRACTION);
             let fts_hit = is_fts_hit(s.id);
             let body_hit = is_body_hit(s.id);
-            if fts_hit || body_hit {
-                score += fr / *fts_in_file.get(&fi).unwrap_or(&1) as f64;
+            if let Some(share) = share_of.get(&s.id) {
+                score += fr * share;
             }
             let path = &g.nodes[fi].path;
             let has_symbol_note =
@@ -752,6 +801,76 @@ mod tests {
                 .any(|r| r.path == "docs/design.md"),
             "{:?}",
             sess.reasons.referenced_by
+        );
+    }
+
+    #[test]
+    fn hit_shares_weigh_body_hits_by_rank_and_name_hits_as_one() {
+        // Two name hits: even split, as before.
+        let even = hit_shares(&[(true, None), (true, None)]);
+        assert!((even[0] - 0.5).abs() < 1e-9 && (even[1] - 0.5).abs() < 1e-9);
+        // One strong body hit and three weak ones: the strong one weighs 1.0, the weak
+        // ones 0.1 each, so the strong section takes 1 / 1.3 of the file's bonus.
+        let s = hit_shares(&[
+            (false, Some(10.0)),
+            (false, Some(1.0)),
+            (false, Some(1.0)),
+            (false, Some(1.0)),
+        ]);
+        assert!((s[0] - 1.0 / 1.3).abs() < 1e-9, "{s:?}");
+        assert!((s[1] - 0.1 / 1.3).abs() < 1e-9, "{s:?}");
+        // A name hit beside body hits weighs 1.0, the same as the strongest body hit.
+        let m = hit_shares(&[(true, None), (false, Some(4.0)), (false, Some(2.0))]);
+        assert!(
+            (m[0] - 1.0 / 2.5).abs() < 1e-9
+                && (m[1] - 1.0 / 2.5).abs() < 1e-9
+                && (m[2] - 0.5 / 2.5).abs() < 1e-9,
+            "{m:?}"
+        );
+        // Shares always sum to one; a symbol with both a name and a body hit adds them.
+        let both = hit_shares(&[(true, Some(3.0)), (false, Some(3.0))]);
+        assert!(
+            (both.iter().sum::<f64>() - 1.0).abs() < 1e-9 && both[0] > both[1],
+            "{both:?}"
+        );
+        assert!(hit_shares(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_strong_section_takes_most_of_its_documents_bonus() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_ts_mini(dir.path());
+        let mut md = String::from("# Notes\n\n## Strong\n\nrouting routing routing routing routing routing decides the route.\n");
+        for i in 1..=5 {
+            md.push_str(&format!("\n## Weak{i}\n\nan unrelated paragraph that mentions routing once among many other words about nothing in particular.\n"));
+        }
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/notes.md"), md).unwrap();
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = crate::workspace::Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let ranked = rank_symbols(&store, &MapConfig::default(), Some("routing"), &[]).unwrap();
+        let score = |name: &str| {
+            ranked
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name}"))
+                .score
+        };
+        let strong = score("Strong");
+        let weak = score("Weak1");
+        assert!(
+            strong > 2.0 * weak,
+            "strong {strong} vs weak {weak}: an even split would make them equal"
+        );
+        let pos = |name: &str| ranked.iter().position(|s| s.name == name).unwrap();
+        assert!(
+            (1..=5).all(|i| pos("Strong") < pos(&format!("Weak{i}"))),
+            "{:?}",
+            ranked.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
     }
 }

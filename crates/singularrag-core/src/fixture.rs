@@ -60,7 +60,11 @@ export function login(userId: string): void {
     w(
         root,
         "src/config.ts",
-        "export const awsKey = \"AKIAIOSFODNN7EXAMPLE\";\n",
+        // Assembled at runtime: the literal would make this source file look secret-like.
+        &format!(
+            "export const awsKey = \"{}{}\";\n",
+            "AKIA", "IOSFODNN7EXAMPLE"
+        ),
     );
     w(root, "dist/bundle.js", "function bundled() {}\n");
     w(root, ".env", "SECRET=1\n");
@@ -114,7 +118,10 @@ pub fn write_docs_mini(root: &Path) {
     w(
         root,
         "secrets.json",
-        "{\"token\": \"ghp_notreallyasecretbutlongenough1234567890\", \"name\": \"mini\"}\n",
+        &format!(
+            "{{\"token\": \"{}{}\", \"name\": \"mini\"}}\n",
+            "ghp_", "notreallyasecretbutlongenough1234567890"
+        ),
     );
     w(root, "ci.yml", "name: ci\njobs:\n  build:\n    steps: []\n");
     w(

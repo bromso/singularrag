@@ -98,11 +98,25 @@ pub fn changed(
     }
     let mut ranges: Vec<(String, u32, u32)> = Vec::new();
     let mut git_roots = 0usize;
+    let mut base_resolved = 0usize;
     for r in &ws.roots {
         if !r.path.join(".git").exists() {
             continue;
         }
         git_roots += 1;
+        // A ref that exists in one root and not another (`HEAD~1` in a one-commit
+        // notes vault) skips that root rather than failing the whole call.
+        if let Some(b) = base {
+            if git(
+                &r.path,
+                &["rev-parse", "--verify", "-q", &format!("{b}^{{commit}}")],
+            )
+            .is_err()
+            {
+                continue;
+            }
+            base_resolved += 1;
+        }
         let prefix = ws.prefix(r);
         // Fixed prefixes and no external diff, so a user's `diff.noprefix`,
         // `diff.mnemonicPrefix` or `diff.external` cannot change the format we parse;
@@ -139,6 +153,13 @@ pub fn changed(
     }
     if git_roots == 0 {
         return Err(Error::Config("not a git checkout".into()));
+    }
+    if let Some(b) = base {
+        if base_resolved == 0 {
+            return Err(Error::Config(format!(
+                "base: {b:?} does not resolve in any root"
+            )));
+        }
     }
     let base_name = base.unwrap_or("HEAD").to_string();
 
@@ -651,5 +672,65 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("not a git checkout"), "{e}");
+    }
+
+    #[test]
+    fn a_base_ref_missing_in_one_root_skips_that_root() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, notes) = crate::fixture::write_workspace(d.path());
+        for root in [&app, &notes] {
+            git(root, &["init", "-q"]);
+            git(
+                root,
+                &["-c", "user.email=t@t", "-c", "user.name=t", "add", "."],
+            );
+            git(
+                root,
+                &[
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-qm",
+                    "base",
+                ],
+            );
+        }
+        // A second commit only in `app`, so `HEAD~1` resolves there and not in `notes`.
+        touch_create_session(&app);
+        git(
+            &app,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qam",
+                "edit",
+            ],
+        );
+        let ws = Workspace::open(d.path()).unwrap();
+        let store = Store::open(&d.path().join(crate::engine::DB_FILE)).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let c = changed(&store, &MapConfig::default(), &ws, Some("HEAD~1")).unwrap();
+        assert!(
+            c.symbols
+                .iter()
+                .any(|s| s.path == "app/src/auth/session.ts" && s.name == "createSession"),
+            "{c:?}"
+        );
+        assert!(
+            !c.symbols.iter().any(|s| s.path.starts_with("notes/")),
+            "the root without the ref is skipped: {c:?}"
+        );
+        let e = changed(&store, &MapConfig::default(), &ws, Some("nope-ref"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("nope-ref"), "no root resolves the ref: {e}");
     }
 }
