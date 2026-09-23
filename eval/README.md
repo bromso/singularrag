@@ -170,6 +170,50 @@ Tried and reverted: routing code references only to code definers (spec §4 says
 
 Reaching 0.6 needs a ranking change the spec rules out for this branch (§5: the same boost as a `symbols_fts` hit): for example weighting the bonus by how strongly each section matches instead of splitting it evenly, or a per-document share. That is a decision for the next spec, not a constant to tune here.
 
+### Weighted hit shares (29c6057)
+
+The first lever from the gate analysis: a file's FTS bonus is shared between its hits in proportion to strength (`rank::hit_shares`: a name hit weighs 1.0, a body hit its `bm25()` rank normalised to the file's strongest body hit) instead of an even split. No constant changed. The hono checkout's leftover `.serena/` directory from the tier-two Serena warm-up was excluded locally (`.git/info/exclude`) so it no longer indexes as a document; it was not the deciding row.
+
+Docs set at 4096, 0.361 → **0.653** (gate 0.6 met):
+
+```
+id    category  recall  tokens  missed
+D1    locate-doc  1.00    4140  
+D2    locate-doc  0.00    4114  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::2. The query-first hook
+D3    locate-doc  0.00    4131  docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::3. Run config, docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::4. Session
+D4    locate-doc  1.00    4143  
+D5    doc-to-code  0.67    4139  docs/superpowers/specs/2026-09-19-singularrag-design.md::8. Freshness
+D6    doc-to-code  0.50    4105  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::2. The query-first hook
+D7    doc-to-code  0.67    4130  docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::5. Parsing and scoring
+D8    doc-to-code  1.00    4139  
+D9    code-to-doc  0.50    4137  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::3. `singularrag init`
+D10   code-to-doc  1.00    4126  
+D11   code-to-doc  0.50    4134  README.md::Claude Code
+D12   code-to-doc  1.00    4142  
+mean recall 0.653 over 12 questions
+```
+
+hono at 4096, unchanged at **0.771** against 0.792 (still 0.021 down, limit 0.02). The one lost gold is T1's `src/compose.ts::compose`, ranked about 195 with 183 rows served; twelve document rows sit above it (`bunfig.toml`, `package.json`, `jsr.json`, `runtime-tests/deno/deno.json`, two `.github` issue templates, README, `docs/CONTRIBUTING.md`, `docs/MIGRATION.md`), which is the budget documents now share by design (no per-kind share).
+
+```
+id    category  recall  tokens  missed
+L1    locate     0.75    4112  src/router.ts::match
+L2    locate     1.00    4133  
+L3    locate     1.00    4113  
+T1    trace      0.75    4134  src/compose.ts::compose
+T2    trace      1.00    4135  
+T3    trace      0.75    4123  src/compose.ts::dispatch
+B1    blast      1.00    4144  
+B2    blast      0.60    4139  src/compose.ts::compose, src/compose.ts::dispatch
+B3    blast      0.40    4133  src/middleware/logger/index.ts::logger, src/middleware/cors/index.ts::cors, src/middleware/jwt/jwt.ts::jwt
+P1    placement  0.25    4099  src/middleware/powered-by/index.ts::poweredBy, src/middleware/logger/index.ts::logger, src/middleware/etag/index.ts::etag
+P2    placement  1.00    4132  
+P3    placement  0.75    4136  src/context.ts::JSONRespond
+mean recall 0.771 over 12 questions
+```
+
+Second lever, tried and reverted: `key` symbols (config keys) as reference targets, so `bunfig.toml::test` stops collecting every `test(...)` call by name join. hono unchanged at 0.771; docs fell to 0.486. Out.
+
 ## Tier two
 
 Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.
