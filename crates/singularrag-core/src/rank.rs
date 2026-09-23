@@ -150,9 +150,13 @@ const SUPPORT_DIRS: [&str; 7] = [
     "benchmarks",
 ];
 
-/// A test, spec or benchmark file: it ranks as a referrer but is never served as a map
+/// A test, spec or benchmark source file (never a document): it ranks as a referrer but is never served as a map
 /// row, and `map.toml`'s `exclude` is still the way to drop a file from the graph.
 pub fn is_support_file(path: &str) -> bool {
+    // Documents are never support files (documents spec §5).
+    if crate::lang::Language::from_path(path).is_some_and(|l| l.is_document()) {
+        return false;
+    }
     let file = path.rsplit('/').next().unwrap_or(path);
     if file.contains(".test.") || file.contains(".spec.") {
         return true;
@@ -604,6 +608,10 @@ mod tests {
         ] {
             assert!(!is_support_file(p), "{p}");
         }
+        // Documents are never support files (documents spec §5).
+        assert!(!is_support_file("docs/test/guide.md"));
+        assert!(!is_support_file("api.spec.md"));
+        assert!(is_support_file("src/a.test.ts"));
     }
 
     #[test]

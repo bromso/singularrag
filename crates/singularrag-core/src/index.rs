@@ -217,6 +217,11 @@ impl<'a> Indexer<'a> {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "too-large", now)?;
             return Ok(Outcome::Skipped);
         }
+        let base = e.rel_path.rsplit('/').next().unwrap_or(&e.rel_path);
+        if crate::doc::is_lockfile(base) {
+            self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "lockfile", now)?;
+            return Ok(Outcome::Skipped);
+        }
         let Some(lang) = Language::from_path(&e.rel_path) else {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "unsupported-language", now)?;
             return Ok(Outcome::Skipped);
@@ -761,6 +766,8 @@ mod tests {
     fn documents_become_sections_bodies_mentions_and_skips() {
         let dir = tempfile::tempdir().unwrap();
         crate::fixture::write_docs_mini(dir.path());
+        // A lockfile no `Language` claims still skips as a lockfile.
+        std::fs::write(dir.path().join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         let ws = Workspace::single(dir.path()).unwrap();
         Indexer::new(&store, &ws, &MapConfig::default())
@@ -837,6 +844,7 @@ mod tests {
             .unwrap()
         };
         assert_eq!(skipped("package-lock.json").as_deref(), Some("lockfile"));
+        assert_eq!(skipped("yarn.lock").as_deref(), Some("lockfile"));
         assert_eq!(skipped("big.min.css").as_deref(), Some("minified"));
         assert_eq!(
             skipped("secrets.json").as_deref(),

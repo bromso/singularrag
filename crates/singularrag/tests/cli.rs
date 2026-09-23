@@ -392,9 +392,20 @@ fn the_docs_question_file_loads_and_names_sections_that_exist() {
         cats.into_iter().collect::<Vec<_>>(),
         vec!["code-to-doc", "doc-to-code", "locate-doc"]
     );
-    // Every gold section must exist in this repository's own index.
+    // Every gold section must exist in an index of this repository's corpus. The corpus is
+    // copied into a tempdir so the test never writes (or waits on the lock of) the
+    // checkout's own `.singularrag/index.db`.
     let repo = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-    let mut e = singularrag_core::engine::Engine::open(repo, "docs-gold-check").unwrap();
+    let copy = tempfile::tempdir().unwrap();
+    std::fs::copy(repo.join("README.md"), copy.path().join("README.md")).unwrap();
+    copy_tree(&repo.join("docs"), &copy.path().join("docs"));
+    for krate in ["singularrag", "singularrag-core", "singularrag-bench"] {
+        copy_tree(
+            &repo.join("crates").join(krate).join("src"),
+            &copy.path().join("crates").join(krate).join("src"),
+        );
+    }
+    let mut e = singularrag_core::engine::Engine::open(copy.path(), "docs-gold-check").unwrap();
     e.refresh(std::time::Duration::from_secs(120)).unwrap();
     for q in &qs {
         for g in &q.gold {
@@ -409,6 +420,28 @@ fn the_docs_question_file_loads_and_names_sections_that_exist() {
                 )
                 .unwrap();
             assert!(n > 0, "{} gold {g} is not in the index", q.id);
+        }
+    }
+}
+
+/// Recursively copy `from` into `to`, skipping build output, dependencies, VCS and index
+/// directories.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if [".git", ".singularrag", "target", "node_modules"]
+            .iter()
+            .any(|skip| name == *skip)
+        {
+            continue;
+        }
+        let ty = entry.file_type().unwrap();
+        if ty.is_dir() {
+            copy_tree(&entry.path(), &to.join(&name));
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), to.join(&name)).unwrap();
         }
     }
 }

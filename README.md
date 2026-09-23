@@ -146,7 +146,7 @@ name = "vault"
 path = "/Users/jonas/Notes"
 ```
 
-Every path is then `<name>/<relative>` (`app/src/auth/session.ts`), in the map, in `map.toml` and in the UI. Names are `[A-Za-z0-9_-]`, unique, and no root may contain another. Each root keeps its own `.gitignore`; the deny list and `map.toml` excludes apply to all of them. singularrag reads this file and never writes it.
+Every path is then `<name>/<relative>` (`app/src/auth/session.ts`), in the map, in `map.toml` and in the UI. Names are `[A-Za-z0-9_-]`, unique, and no root may contain another. Each root keeps its own `.gitignore`; the deny list and `map.toml` excludes apply to all of them. singularrag reads this file and never writes it. It is read when `serve` or `mcp` starts: edit it, then restart. The hook and the `.mcp.json` entry that `init` writes take the workspace from the process's working directory, so run the agent from the workspace directory or pass `--repo` in the hook command.
 
 Documents are indexed next to code:
 
@@ -158,7 +158,7 @@ Documents are indexed next to code:
 | JSON, YAML, TOML | `.json` `.yaml` `.yml` `.toml` | a `key` per key path to depth 2, with the value's type, never the value |
 | text | `.txt` | one `document` |
 
-Every document also gets a `document` symbol named by its file stem, so `[[design]]` and `../specs/design.md` links resolve to it. Section text is searchable; code spans that name one identifier, wiki links and relative links become references, and fenced code blocks do not.
+Every document also gets a `document` symbol named by its file stem, so `[[design]]` and `../specs/design.md` links resolve to it. Section text is searchable; code spans that name one identifier, wiki links and relative links become references; fenced code blocks and front matter do not.
 
 Skipped, with the reason shown in the UI's skipped sheet: documents over 256 KB, lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `bun.lock`, `bun.lockb`, `composer.lock`, `Gemfile.lock`, `poetry.lock`), minified files (average line over 500 characters) and anything that looks like a secret.
 

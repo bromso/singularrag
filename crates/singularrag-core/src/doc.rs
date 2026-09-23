@@ -238,7 +238,16 @@ fn markdown(source: &str, stem: &str) -> Result<DocExtract> {
     let mut d = DocExtract::default();
     let mut fences: Vec<(usize, usize)> = Vec::new();
     collect_kind(tree.root_node(), "fenced_code_block", &mut fences);
-    d.tags.push(document_tag(stem, source));
+    // YAML (`---`) or TOML (`+++`) front matter is metadata, possibly secret: cut it
+    // like a fence from every body and from mention scanning, and take the document
+    // signature from the first line after it.
+    let mut front: Vec<(usize, usize)> = Vec::new();
+    collect_kind(tree.root_node(), "minus_metadata", &mut front);
+    collect_kind(tree.root_node(), "plus_metadata", &mut front);
+    fences.extend(front.iter().copied());
+    let mut doc = document_tag(stem, source);
+    doc.signature = first_line(&blank(source, 0, &front));
+    d.tags.push(doc);
     // The document body is the whole prose minus fences; sections get their own bodies
     // below and the document row keeps only what no section owns (the preamble).
     let mut own_sections: Vec<(usize, usize)> = Vec::new();
@@ -810,6 +819,40 @@ mod tests {
         );
         assert!(!body("Title").contains("hidden"), "fenced code is stripped");
         assert!(d.tags.iter().all(|t| t.is_definition));
+    }
+
+    #[test]
+    fn front_matter_never_reaches_signature_or_body() {
+        for src in [
+            "---\ntitle: My note\napi_key: hunter2value\nsee: `frontIdent` [[frontWiki]]\n---\n# Heading\n\nBody text `bodyIdent`.\n",
+            "+++\ntitle = \"My note\"\napi_key = \"hunter2value\"\nsee = \"`frontIdent` [[frontWiki]]\"\n+++\n# Heading\n\nBody text `bodyIdent`.\n",
+        ] {
+            let d = extract(Language::Markdown, src, "note").unwrap();
+            let tree = parse(tree_sitter_md::LANGUAGE.into(), src).unwrap();
+            let sexp = tree.root_node().to_sexp();
+            assert_eq!(
+                find(&d, "document", "note").signature,
+                "# Heading",
+                "tree: {sexp}"
+            );
+            for (_, b) in &d.bodies {
+                assert!(
+                    !b.contains("hunter2value") && !b.contains("title"),
+                    "front matter in a body {b:?}; tree: {sexp}"
+                );
+            }
+            let names: Vec<&str> = d.mentions.iter().map(|(n, _)| n.as_str()).collect();
+            assert!(names.contains(&"bodyIdent"), "{names:?}");
+            assert!(
+                !names.contains(&"frontIdent") && !names.contains(&"frontWiki"),
+                "{names:?}; tree: {sexp}"
+            );
+            assert!(
+                d.tags.iter().all(|t| !t.name.contains("hunter2value")),
+                "{:?}",
+                d.tags
+            );
+        }
     }
 
     #[test]

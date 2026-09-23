@@ -95,7 +95,8 @@ fn interesting(ws: &Workspace, p: &Path) -> bool {
         .map(|(_, r)| r)
         .filter(|_| ws.is_named())
         .unwrap_or(&rel);
-    !inner.starts_with(".git") && !inner.starts_with(".singularrag")
+    let first = inner.split('/').next();
+    first != Some(".git") && first != Some(".singularrag")
 }
 
 /// Start watching every root in `state.ws`, plus (for a named workspace) the
@@ -172,6 +173,8 @@ mod tests {
         assert!(interesting(&ws, &app.join("src/a.ts")));
         assert!(interesting(&ws, &notes.join("n.md")));
         assert!(!interesting(&ws, &app.join(".git/HEAD")));
+        assert!(interesting(&ws, &app.join(".gitignore")));
+        assert!(interesting(&ws, &app.join(".github/workflows/ci.yml")));
         assert!(interesting(&ws, &ws.dir.join(".singularrag/map.toml")));
         assert!(!interesting(&ws, &ws.dir.join(".singularrag/index.db")));
         assert!(
