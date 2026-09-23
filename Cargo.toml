@@ -50,7 +50,7 @@ open = "5"
 rand = "0.10"
 hex = "0.4"
 subtle = "2"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "blocking"] }
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
