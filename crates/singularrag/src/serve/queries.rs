@@ -124,6 +124,43 @@ pub struct GraphDto {
     pub edges: Vec<GraphEdge>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityDto {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+    pub description: String,
+    pub mentions: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRelationDto {
+    pub id: i64,
+    pub src: i64,
+    pub dst: i64,
+    pub description: String,
+    pub symbol_id: i64,
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityMentionDto {
+    pub entity_id: i64,
+    pub symbol_id: i64,
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntitiesDto {
+    pub entities: Vec<EntityDto>,
+    pub relations: Vec<EntityRelationDto>,
+    pub mentions: Vec<EntityMentionDto>,
+    /// Set when any of the three caps below cut a list short.
+    pub truncated: bool,
+}
+
 /// Spec §3: `mcp:<slug>:…` → title-cased slug; `cli-<pid>` → CLI; `serve` → UI; else raw.
 pub fn session_label(key: &str) -> String {
     if let Some(rest) = key.strip_prefix("mcp:") {
@@ -409,6 +446,92 @@ pub fn graph(store: &Store, config: &singularrag_core::config::MapConfig) -> Res
         index_version: store.get_meta("index_version")?.unwrap_or_default(),
         nodes,
         edges,
+    })
+}
+
+/// Caps for the knowledge overlay (task brief): entities ordered by `mentions` desc then
+/// `name`, relations and mentions ordered by id so paging (if ever added) is stable. Each
+/// cap is checked by asking for one row past the limit; three queries total, no N+1.
+const ENTITY_CAP: i64 = 500;
+const REL_MENTION_CAP: i64 = 2000;
+
+pub fn entities(store: &Store) -> Result<EntitiesDto> {
+    let conn = store.conn();
+    let mut truncated = false;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, name, type, description, mentions FROM entities ORDER BY mentions DESC, name LIMIT ?1",
+    )?;
+    let mut entities: Vec<EntityDto> = stmt
+        .query_map([ENTITY_CAP + 1], |r| {
+            Ok(EntityDto {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                r#type: r.get(2)?,
+                description: r.get(3)?,
+                mentions: r.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if entities.len() as i64 > ENTITY_CAP {
+        entities.truncate(ENTITY_CAP as usize);
+        truncated = true;
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.src_entity, r.dst_entity, r.description, r.symbol_id, f.path, s.name
+           FROM relations r
+           JOIN symbols s ON s.id = r.symbol_id
+           JOIN files f ON f.id = s.file_id
+          ORDER BY r.id
+          LIMIT ?1",
+    )?;
+    let mut relations: Vec<EntityRelationDto> = stmt
+        .query_map([REL_MENTION_CAP + 1], |r| {
+            Ok(EntityRelationDto {
+                id: r.get(0)?,
+                src: r.get(1)?,
+                dst: r.get(2)?,
+                description: r.get(3)?,
+                symbol_id: r.get(4)?,
+                path: r.get(5)?,
+                name: r.get(6)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if relations.len() as i64 > REL_MENTION_CAP {
+        relations.truncate(REL_MENTION_CAP as usize);
+        truncated = true;
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT m.entity_id, m.symbol_id, f.path, s.name
+           FROM entity_mentions m
+           JOIN symbols s ON s.id = m.symbol_id
+           JOIN files f ON f.id = s.file_id
+          ORDER BY m.entity_id, m.symbol_id
+          LIMIT ?1",
+    )?;
+    let mut mentions: Vec<EntityMentionDto> = stmt
+        .query_map([REL_MENTION_CAP + 1], |r| {
+            Ok(EntityMentionDto {
+                entity_id: r.get(0)?,
+                symbol_id: r.get(1)?,
+                path: r.get(2)?,
+                name: r.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if mentions.len() as i64 > REL_MENTION_CAP {
+        mentions.truncate(REL_MENTION_CAP as usize);
+        truncated = true;
+    }
+
+    Ok(EntitiesDto {
+        entities,
+        relations,
+        mentions,
+        truncated,
     })
 }
 

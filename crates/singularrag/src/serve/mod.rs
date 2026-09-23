@@ -33,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/retrievals/{id}", get(routes::retrieval))
         .route("/tree", get(routes::tree))
         .route("/skipped", get(routes::skipped))
+        .route("/entities", get(routes::entities))
         .route("/map", get(routes::get_map).put(routes::put_map))
         .route("/graph", get(routes::graph))
         .route("/blast", get(routes::blast))
