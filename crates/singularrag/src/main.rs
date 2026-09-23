@@ -40,6 +40,12 @@ enum Cmd {
         /// Repo-relative files to seed the ranking; repeatable
         #[arg(long = "focus", value_name = "PATH")]
         focus: Vec<String>,
+        /// Entity names that matter; repeatable
+        #[arg(long = "entity", value_name = "NAME")]
+        entity: Vec<String>,
+        /// Themes as short phrases; repeatable
+        #[arg(long = "theme", value_name = "TEXT")]
+        theme: Vec<String>,
     },
     /// Look up symbols by name (what the find_symbol tool returns)
     Find {
@@ -153,11 +159,15 @@ fn main() -> anyhow::Result<()> {
             text,
             budget,
             focus,
+            entity,
+            theme,
         } => {
             let r = engine.repo_map(&MapRequest {
                 query: text,
                 focus_files: focus,
                 budget_tokens: budget,
+                entities: entity,
+                themes: theme,
             })?;
             print!("{}", r.text);
         }

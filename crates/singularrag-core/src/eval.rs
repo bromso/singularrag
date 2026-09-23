@@ -58,6 +58,7 @@ pub fn run(engine: &mut Engine, questions: &[Question], budget: usize) -> Result
             query: Some(q.query.clone()),
             focus_files: vec![],
             budget_tokens: budget,
+            ..Default::default()
         })?;
         let served = served_keys(engine, resp.retrieval_id)?;
         let (hit, miss): (Vec<String>, Vec<String>) =

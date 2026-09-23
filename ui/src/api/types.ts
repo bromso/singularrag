@@ -3,6 +3,8 @@ export type Reasons = {
   referenced_by: { path: string; count: number }[];
   pinned: boolean; fts_hit: boolean; query_ident_match: boolean; note_hit: boolean;
   body_hit: boolean;
+  /** Similarity to the query's vector when the section was among the nearest. */
+  semantic: number | null; entities: string[]; themes: string[];
 };
 export type Item = { rank: number; symbol_id: number; path: string; name: string; line_start: number; score: number; served: boolean; reasons: Reasons };
 export type RetrievalSummary = {

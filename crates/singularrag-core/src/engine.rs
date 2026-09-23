@@ -59,6 +59,10 @@ pub struct MapRequest {
     pub query: Option<String>,
     pub focus_files: Vec<String>,
     pub budget_tokens: usize,
+    /// Entity names the caller already knows matter (knowledge spec §4).
+    pub entities: Vec<String>,
+    /// Themes as short phrases, matched against relation vectors.
+    pub themes: Vec<String>,
 }
 
 impl Default for MapRequest {
@@ -69,6 +73,8 @@ impl Default for MapRequest {
             query: None,
             focus_files: Vec::new(),
             budget_tokens: map::DEFAULT_BUDGET,
+            entities: Vec::new(),
+            themes: Vec::new(),
         }
     }
 }
@@ -344,11 +350,25 @@ impl Engine {
     pub fn repo_map(&mut self, req: &MapRequest) -> Result<MapResponse> {
         let stats = self.refresh(self.refresh_budget)?;
         let budget = map::clamp_budget(req.budget_tokens);
+        // With no vectors yet no seed needs a model, so the client is not even built.
+        let models = if crate::store::vec::dim(&self.store)?.is_some() {
+            self.models()
+        } else {
+            None
+        };
+        let seeds = knowledge::seeds_for(
+            &self.store,
+            models,
+            req.query.as_deref(),
+            &req.entities,
+            &req.themes,
+        )?;
         let ranked = rank_symbols(
             &self.store,
             &self.config,
             req.query.as_deref(),
             &req.focus_files,
+            &seeds,
         )?;
         let served = map::fit(&ranked, budget, &self.config.note);
         // The budget is soft (the footer says so): a note-heavy top file at a tiny
@@ -370,13 +390,17 @@ impl Engine {
             &ranked,
             served,
         )?;
+        // A seed embedding that failed is this response's outage; `meta` stays the
+        // tick's to write.
+        let mut extras = self.extras()?;
+        extras.models_unavailable |= seeds.models_unavailable;
         let text = format!(
             "{}\n{}{}\n",
             map::header(
                 &version,
                 head.as_deref(),
                 stats.remaining,
-                &self.extras()?,
+                &extras,
                 retrieval_id,
             ),
             body,
@@ -850,6 +874,61 @@ mod tests {
     }
 
     #[test]
+    fn entity_seeds_reach_the_map_and_a_seed_outage_marks_only_that_header() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let f = crate::fake_ollama::FakeOllama::spawn(32);
+        f.set_extraction("Storage", serde_json::json!({"entities": [{"name": "SessionStore", "type": "system", "description": "keeps sessions"}], "relations": []}));
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.set_models_url(&f.url());
+        e.refresh(Duration::from_secs(60)).unwrap();
+        while knowledge::pending(e.store()).unwrap() > 0 {
+            e.knowledge_tick(&|| false).unwrap();
+        }
+        let r = e
+            .repo_map(&MapRequest {
+                entities: vec!["SessionStore".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(r.text.contains("docs/design.md:"), "{}", r.text);
+        assert!(r.text.contains("## Storage"), "{}", r.text);
+        let reasons: String = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT reasons_json FROM retrieval_items WHERE retrieval_id = ?1 AND name = 'Storage'",
+                [r.retrieval_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            reasons.contains(r#""entities":["SessionStore"]"#),
+            "{reasons}"
+        );
+
+        f.set_down(true);
+        let down = e
+            .repo_map(&MapRequest {
+                query: Some("session storage".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let first = down.text.lines().next().unwrap();
+        assert!(first.contains("models: unavailable"), "{first}");
+        assert!(
+            down.served > 0 && down.text.contains("docs/design.md:"),
+            "{}",
+            down.text
+        );
+        assert_eq!(
+            e.store().get_meta("models_error").unwrap(),
+            None,
+            "repo_map does not write the outage to meta"
+        );
+    }
+
+    #[test]
     fn repo_map_indexes_renders_and_records_provenance() {
         let (_dir, mut e) = engine();
         let resp = e
@@ -857,6 +936,7 @@ mod tests {
                 query: Some("session".into()),
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         assert!(
@@ -940,6 +1020,7 @@ mod tests {
                 query: Some("session".into()),
                 focus_files: vec![],
                 budget_tokens: 64,
+                ..Default::default()
             })
             .unwrap();
         assert!(resp.served >= 1, "{}", resp.text);
@@ -966,6 +1047,7 @@ mod tests {
                 query: Some("log".into()),
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         let item = |e: &Engine| -> (i64, String, String, i64) {
@@ -1026,6 +1108,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         for line in resp.text.lines().filter(|l| l.starts_with(' ')) {
@@ -1051,6 +1134,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 64,
+                ..Default::default()
             })
             .unwrap();
         assert!(resp.served < resp.total);
@@ -1082,6 +1166,7 @@ mod tests {
                 query: Some("createSession".into()),
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         assert!(
@@ -1111,6 +1196,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         assert!(before.text.contains("src/util/log.ts:"));
@@ -1125,6 +1211,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         assert!(!after.text.contains("src/util/log.ts:"), "{}", after.text);
@@ -1137,6 +1224,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         assert!(back.text.contains("src/util/log.ts:"));
@@ -1159,6 +1247,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         assert!(started.elapsed() >= Duration::from_millis(LOCK_WAIT_MS));
@@ -1240,6 +1329,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         assert!(first.stale_count > 0, "{first:?}");
@@ -1250,6 +1340,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(second.stale_count, 0);

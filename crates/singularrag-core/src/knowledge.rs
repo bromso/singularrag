@@ -708,6 +708,128 @@ fn write_section(
     Ok(())
 }
 
+/// Nearest sections a query vector seeds (knowledge spec §4).
+pub const SEMANTIC_K: usize = 20;
+/// Nearest entities a query vector may match.
+pub const ENTITY_K: usize = 10;
+/// An entity matched by vector must be at least this close to the query.
+pub const ENTITY_MIN_SIM: f64 = 0.5;
+/// Nearest relations one theme seeds.
+pub const THEME_K: usize = 10;
+
+/// What the knowledge layer adds to one ranking: the query's vector, the entities the
+/// query or the caller named, and one vector per theme. `entity_ids` and `entity_names`
+/// are parallel. `models_unavailable` means a model call failed, so the vectors are empty.
+#[derive(Debug, Clone, Default)]
+pub struct Seeds {
+    pub query_vec: Option<Vec<f32>>,
+    pub entity_ids: Vec<i64>,
+    pub entity_names: Vec<String>,
+    pub theme_vecs: Vec<(String, Vec<f32>)>,
+    pub models_unavailable: bool,
+}
+
+impl Seeds {
+    fn add_entity(&mut self, id: i64, name: String) {
+        if !self.entity_ids.contains(&id) {
+            self.entity_ids.push(id);
+            self.entity_names.push(name);
+        }
+    }
+}
+
+/// The seeds for one `repo_map` call, with at most two model calls: one embedding for
+/// the query, one batch for all themes. A model outage never escapes: it sets
+/// `models_unavailable` and leaves the vectors empty. Without models (disabled) only the
+/// entity names the query terms or the arguments spell out match. With no vectors in
+/// the index yet nothing could be matched by vector, so the models are not asked.
+pub fn seeds_for(
+    store: &Store,
+    models: Option<&Models>,
+    query: Option<&str>,
+    entities: &[String],
+    themes: &[String],
+) -> Result<Seeds> {
+    let mut seeds = Seeds::default();
+    let conn = store.conn();
+
+    let names: Vec<String> = query
+        .map(crate::tokens::query_terms)
+        .unwrap_or_default()
+        .iter()
+        .chain(entities)
+        .map(|n| norm_name(n))
+        .filter(|n| !n.is_empty())
+        .collect();
+    {
+        let mut stmt = conn.prepare("SELECT id, name FROM entities WHERE norm_name = ?1")?;
+        for n in &names {
+            if let Some((id, name)) = stmt
+                .query_row([n], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .optional()?
+            {
+                seeds.add_entity(id, name);
+            }
+        }
+    }
+
+    let Some(models) = models else {
+        return Ok(seeds);
+    };
+    if vec::dim(store)?.is_none() {
+        return Ok(seeds);
+    }
+    let unavailable = |e: Error| match e {
+        Error::ModelUnavailable(_) => Ok(()),
+        e => Err(e),
+    };
+
+    if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+        match models.embed(&[q.to_string()]) {
+            Ok(mut v) if v.len() == 1 => seeds.query_vec = v.pop(),
+            Ok(_) => seeds.models_unavailable = true,
+            Err(e) => {
+                unavailable(e)?;
+                seeds.models_unavailable = true;
+            }
+        }
+    }
+    if let Some(qv) = &seeds.query_vec {
+        let mut stmt = conn.prepare("SELECT name FROM entities WHERE id = ?1")?;
+        for (id, sim) in vec::knn(store, "entity_vec", qv, ENTITY_K)? {
+            if sim < ENTITY_MIN_SIM {
+                continue;
+            }
+            if let Some(name) = stmt.query_row([id], |r| r.get::<_, String>(0)).optional()? {
+                seeds.add_entity(id, name);
+            }
+        }
+    }
+
+    let themes: Vec<String> = themes
+        .iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if !themes.is_empty() {
+        match models.embed(&themes) {
+            Ok(v) if v.len() == themes.len() => {
+                seeds.theme_vecs = themes.into_iter().zip(v).collect();
+            }
+            Ok(_) => seeds.models_unavailable = true,
+            Err(e) => {
+                unavailable(e)?;
+                seeds.models_unavailable = true;
+            }
+        }
+    }
+    if seeds.models_unavailable {
+        seeds.query_vec = None;
+        seeds.theme_vecs.clear();
+    }
+    Ok(seeds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

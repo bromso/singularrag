@@ -24,7 +24,7 @@ pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this works
 // itself needs a string literal, not a path to these, so they're otherwise unused outside
 // `#[cfg(test)]`.
 #[allow(dead_code)]
-pub const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
+pub const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment. `entities` and `themes` are optional: entity names you already know matter; themes as short phrases.";
 
 #[allow(dead_code)]
 pub const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module, section, document, element, rule, key. `limit` defaults to 10, max 50.";
@@ -63,6 +63,10 @@ pub struct MapArgs {
     pub focus_files: Option<Vec<String>>,
     /// Soft token budget for the map. Default 1024, max 8192.
     pub budget_tokens: Option<u32>,
+    /// Entity names you already know matter; they seed the sections that mention them.
+    pub entities: Option<Vec<String>>,
+    /// Themes as short phrases; they seed the sections stating the nearest relations.
+    pub themes: Option<Vec<String>>,
 }
 
 impl From<MapArgs> for MapRequest {
@@ -72,6 +76,8 @@ impl From<MapArgs> for MapRequest {
             query: a.query,
             focus_files: a.focus_files.unwrap_or_default(),
             budget_tokens: a.budget_tokens.map_or(d.budget_tokens, |b| b as usize),
+            entities: a.entities.unwrap_or_default(),
+            themes: a.themes.unwrap_or_default(),
         }
     }
 }
@@ -169,7 +175,7 @@ impl SingularragServer {
     // literal and the constant fails the test.
     #[tool(
         name = "repo_map",
-        description = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment."
+        description = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment. `entities` and `themes` are optional: entity names you already know matter; themes as short phrases."
     )]
     async fn repo_map(
         &self,
@@ -354,16 +360,23 @@ mod tests {
             query: None,
             focus_files: None,
             budget_tokens: None,
+            entities: None,
+            themes: None,
         }
         .into();
         assert_eq!(m.budget_tokens, singularrag_core::map::DEFAULT_BUDGET);
         assert!(m.focus_files.is_empty());
+        assert!(m.entities.is_empty() && m.themes.is_empty());
         let m: MapRequest = MapArgs {
             query: Some("x".into()),
             focus_files: Some(vec!["a.ts".into()]),
             budget_tokens: Some(99_999),
+            entities: Some(vec!["SessionStore".into()]),
+            themes: Some(vec!["refresh first".into()]),
         }
         .into();
+        assert_eq!(m.entities, vec!["SessionStore".to_string()]);
+        assert_eq!(m.themes, vec!["refresh first".to_string()]);
         assert_eq!(
             m.budget_tokens, 99_999,
             "clamping is the engine's job, not the server's"

@@ -122,6 +122,30 @@ fn budget_over_cap_is_clamped_not_rejected() {
 }
 
 #[test]
+fn query_takes_repeatable_entities_and_themes() {
+    let dir = fixture();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "query",
+            "session",
+            "--entity",
+            "SessionStore",
+            "--entity",
+            "createSession",
+            "--theme",
+            "refresh first",
+            "--theme",
+            "login flow",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\nsrc/auth/session.ts:"));
+}
+
+#[test]
 fn help_lists_the_mcp_subcommand() {
     Command::cargo_bin("singularrag")
         .unwrap()

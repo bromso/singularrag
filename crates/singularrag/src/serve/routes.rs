@@ -230,6 +230,7 @@ pub async fn query(
         budget_tokens: singularrag_core::map::clamp_budget(
             b.budget.unwrap_or(singularrag_core::map::DEFAULT_BUDGET),
         ),
+        ..Default::default()
     };
     match s.handle.map(req).await {
         Ok(r) => Ok(Json(QueryDto {

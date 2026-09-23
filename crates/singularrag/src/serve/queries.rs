@@ -430,6 +430,7 @@ mod tests {
             // ts_mini fixture is guaranteed to cut something (at 256 tokens, every
             // symbol fits and nothing is cut, which the assertions below require).
             budget_tokens: 64,
+            ..Default::default()
         })
         .unwrap();
         e.find_symbol(&FindRequest {
