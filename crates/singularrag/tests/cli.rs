@@ -377,3 +377,38 @@ fn readme_cli_block_lists_the_new_subcommands() {
         );
     }
 }
+
+#[test]
+fn the_docs_question_file_loads_and_names_sections_that_exist() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../e",
+        "val/questions-docs.toml"
+    );
+    let qs = singularrag_core::eval::load_questions(std::path::Path::new(path)).unwrap();
+    assert_eq!(qs.len(), 12);
+    let cats: std::collections::BTreeSet<&str> = qs.iter().map(|q| q.category.as_str()).collect();
+    assert_eq!(
+        cats.into_iter().collect::<Vec<_>>(),
+        vec!["code-to-doc", "doc-to-code", "locate-doc"]
+    );
+    // Every gold section must exist in this repository's own index.
+    let repo = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let mut e = singularrag_core::engine::Engine::open(repo, "docs-gold-check").unwrap();
+    e.refresh(std::time::Duration::from_secs(120)).unwrap();
+    for q in &qs {
+        for g in &q.gold {
+            let (path, name) = g.split_once("::").unwrap();
+            let n: i64 = e
+                .store()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1 AND s.name = ?2",
+                    [path, name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(n > 0, "{} gold {g} is not in the index", q.id);
+        }
+    }
+}

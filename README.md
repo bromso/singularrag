@@ -101,10 +101,14 @@ src/auth/session.ts:  ← src/http/middleware.ts, src/cli/login.ts
 src/http/middleware.ts:  ← src/http/routes.ts
         note (agent): Wraps every request; the token check lives here.
     2  export function requireSession(token: string): Session
+docs/design.md:
+  108  ## 8. Freshness
 # 42 of 310 symbols shown · 268 more ranked below budget · 25 recorded · widen with a larger budget or a focus file
 ```
 
 Each file header ends with the files that reference it, strongest first, and a note (yours or the agent's) sits under the header or under its symbol's row, so locate, trace, blast-radius and placement questions can be answered from the map without opening files. `find_symbol` looks a name up and lists which files reference it. Neither tool ever returns function bodies, comments or string literals.
+
+Documents rank alongside code: a Markdown or HTML heading is a `section` row showing its heading line, a config key is a `key` row showing its type (`scripts.build: string`), and the agent reads the section the map points at rather than the whole file.
 
 `annotate` lets the agent leave a one-paragraph note on a file or symbol; it lands in `map.toml`, shows in the next map with an `(agent)` tag, and the developer can delete it from the page.
 
@@ -124,7 +128,39 @@ singularrag serve            # open the map UI on localhost
 singularrag mcp              # serve over stdio
 ```
 
+Every command takes `--repo <dir>` (default: the current directory). The directory may be a workspace: see below.
+
 Logs go to stderr; set `RUST_LOG=debug` for more.
+
+## Workspaces and documents
+
+A workspace is any directory holding `.singularrag/`. With no `.singularrag/workspace.toml` the directory is its own only root and paths are relative to it, as always. To index several directories together, say a repo and a notes vault, declare roots:
+
+```toml
+[[root]]
+name = "app"
+path = "../app"            # relative to the workspace directory, or absolute
+
+[[root]]
+name = "vault"
+path = "/Users/jonas/Notes"
+```
+
+Every path is then `<name>/<relative>` (`app/src/auth/session.ts`), in the map, in `map.toml` and in the UI. Names are `[A-Za-z0-9_-]`, unique, and no root may contain another. Each root keeps its own `.gitignore`; the deny list and `map.toml` excludes apply to all of them. singularrag reads this file and never writes it.
+
+Documents are indexed next to code:
+
+| format | extensions | symbols |
+|---|---|---|
+| Markdown | `.md` `.markdown` | a `section` per heading (h4 and deeper fold into their parent) |
+| HTML | `.html` `.htm` | a `section` per heading, an `element` per `id` |
+| CSS | `.css` | a `rule` per selector; rules inside `@media` fold into one |
+| JSON, YAML, TOML | `.json` `.yaml` `.yml` `.toml` | a `key` per key path to depth 2, with the value's type, never the value |
+| text | `.txt` | one `document` |
+
+Every document also gets a `document` symbol named by its file stem, so `[[design]]` and `../specs/design.md` links resolve to it. Section text is searchable; code spans that name one identifier, wiki links and relative links become references, and fenced code blocks do not.
+
+Skipped, with the reason shown in the UI's skipped sheet: documents over 256 KB, lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `bun.lock`, `bun.lockb`, `composer.lock`, `Gemfile.lock`, `poetry.lock`), minified files (average line over 500 characters) and anything that looks like a secret.
 
 ## Design
 
