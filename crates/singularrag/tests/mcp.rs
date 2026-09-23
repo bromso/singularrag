@@ -9,7 +9,7 @@ use singularrag_core::fixture::write_ts_mini;
 use singularrag_core::store::Store;
 use tokio::process::Command;
 
-const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the symbols most relevant to a task, each with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature`, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
+const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
 const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module. `limit` defaults to 10, max 50.";
 const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is repo-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs.";
 const TRACE_PATH_DESCRIPTION: &str = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files.";
@@ -258,6 +258,25 @@ async fn repo_map_and_find_symbol_match_the_cli_and_record_provenance() {
         keys.iter().any(|k| k.starts_with("mcp:singularrag-test:")),
         "{keys:?}"
     );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn repo_map_serves_a_document_section() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_docs_mini(dir.path());
+    let client = connect(dir.path(), &[]).await;
+
+    let map = client
+        .call_tool(CallToolRequestParams::new("repo_map").with_arguments(
+            object!({ "query": "what does the STALE header mean", "budget_tokens": 2048 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(map.is_error, Some(true));
+    let text = text_of(&map);
+    assert!(text.contains("docs/runbook.md:"), "{text}");
+    assert!(text.contains("## When the header says STALE"), "{text}");
     client.cancel().await.unwrap();
 }
 

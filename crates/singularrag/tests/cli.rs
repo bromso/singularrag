@@ -306,6 +306,61 @@ fn changed_in_a_named_workspace_prefixes_paths() {
 }
 
 #[test]
+fn query_and_changed_cover_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_docs_mini(dir.path());
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "query",
+            "STALE header",
+            "--budget",
+            "2048",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("docs/runbook.md:")
+                .and(predicate::str::contains("## When the header says STALE")),
+        );
+    let git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "."]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "base",
+    ]);
+    std::fs::write(
+        dir.path().join("docs/runbook.md"),
+        "# Runbook\n\n## When the header says STALE\n\nWait longer.\n",
+    )
+    .unwrap();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["--repo", dir.path().to_str().unwrap(), "changed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "docs/runbook.md::When the header says STALE",
+        ));
+}
+
+#[test]
 fn readme_cli_block_lists_the_new_subcommands() {
     let readme =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
