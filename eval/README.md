@@ -243,7 +243,6 @@ To get a number that means something, the prose set is scored on the same pinned
 ```
 git archive 5ec066b | tar -x -C <dir>
 cp crates/singularrag-core/fixtures/prose/voyage.md crates/singularrag-core/fixtures/prose/handbook.md <dir>/docs/
-mkdir <dir>/.singularrag
 singularrag index --repo <dir>
 singularrag eval --repo <dir> --questions eval/questions-prose.toml --budget <N> --no-models
 ```

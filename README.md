@@ -177,7 +177,7 @@ ollama pull nomic-embed-text
 ollama pull qwen2.5:7b-instruct
 ```
 
-With Ollama running, indexing picks the queue up on its own: `serve` and `mcp` embed and extract document sections in the background, a few at a time, under a time budget, so nothing blocks a tool call. The one-shot CLI (`index`, `query`, `eval`) never talks to a model.
+With Ollama running, indexing picks the queue up on its own: `serve` and `mcp` embed and extract document sections in the background, a few at a time, under a time budget, so nothing blocks a tool call. `index` never talks to a model. `query` and `eval` embed the query text once (one `/api/embed` call, the query only, never file contents) when the index already holds embeddings from that background job; `eval --no-models` turns that off. Without Ollama, or before the index has any embeddings, the seed is skipped and the header says `models: unavailable`.
 
 Configure it in `.singularrag/workspace.toml`, all optional:
 
