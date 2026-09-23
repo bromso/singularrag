@@ -214,6 +214,8 @@ mean recall 0.771 over 12 questions
 
 Second lever, tried and reverted: `key` symbols (config keys) as reference targets, so `bunfig.toml::test` stops collecting every `test(...)` call by name join. hono unchanged at 0.771; docs fell to 0.486. Out.
 
+**Verdict (2026-09-23):** docs gate met; the hono shortfall of 0.001 beyond the limit, one symbol in 48, accepted by the project owner as the cost of documents sharing the budget by design. The branch ships at 0.771 / 0.653.
+
 ## Tier two
 
 Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.
