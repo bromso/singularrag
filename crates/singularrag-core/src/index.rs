@@ -236,18 +236,9 @@ impl<'a> Indexer<'a> {
                 return Ok(Outcome::Skipped);
             }
         }
-        // A document's tags never carry raw values (doc::extract only ever emits key
-        // names, section titles and format words into signatures), so a document whose
-        // raw bytes merely *look* secret-like is still safe to index structurally; it is
-        // flagged on the `files` row instead of skipped outright, which also keeps the
-        // hook's read gate lenient about it (skipped_reason IS NOT NULL there). Any other
-        // language is skipped entirely, as before.
-        let secret: Option<&'static str> = looks_secret(source).map(|_| "secret-like content");
-        if let Some(reason) = secret {
-            if !lang.is_document() {
-                self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, reason, now)?;
-                return Ok(Outcome::Skipped);
-            }
+        if looks_secret(source).is_some() {
+            self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "secret-like content", now)?;
+            return Ok(Outcome::Skipped);
         }
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let conn = self.store.conn();
@@ -277,10 +268,10 @@ impl<'a> Indexer<'a> {
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
              ON CONFLICT(path) DO UPDATE SET lang = excluded.lang, content_hash = excluded.content_hash,
-               mtime_ms = excluded.mtime_ms, size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = excluded.skipped_reason",
-            params![e.rel_path, lang.as_str(), hash, e.mtime_ms, e.size as i64, now, secret],
+               mtime_ms = excluded.mtime_ms, size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = NULL",
+            params![e.rel_path, lang.as_str(), hash, e.mtime_ms, e.size as i64, now],
         )?;
         let file_id: i64 =
             tx.query_row("SELECT id FROM files WHERE path = ?1", [&e.rel_path], |r| {
@@ -325,15 +316,9 @@ impl<'a> Indexer<'a> {
             if body.trim().is_empty() {
                 continue;
             }
-            // The section/element's own heading text is deliberately excluded from
-            // its own body (a child section's heading is not repeated in its
-            // parent's body either), so a search would otherwise never find a
-            // section by its title. `content` (the only indexed column; `name` is
-            // UNINDEXED, kept only for display) carries the title alongside the body.
-            let content = format!("{}\n{}", tags[*i].name, body);
             tx.execute(
                 "INSERT INTO sections_fts(rowid, path, name, content) VALUES (?1, ?2, ?3, ?4)",
-                params![id, e.rel_path, tags[*i].name, content],
+                params![id, e.rel_path, tags[*i].name, body],
             )?;
         }
         for (name, line) in &mentions {
@@ -823,7 +808,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(body_hits >= 2, "both STALE sections: {body_hits}");
+        assert!(body_hits >= 1, "design.md's Freshness prose: {body_hits}");
         let no_values: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM symbols_fts WHERE symbols_fts MATCH 'tsc'",
@@ -854,9 +839,17 @@ mod tests {
         assert_eq!(skipped("package-lock.json").as_deref(), Some("lockfile"));
         assert_eq!(skipped("big.min.css").as_deref(), Some("minified"));
         assert_eq!(
-            skipped("package.json").as_deref(),
+            skipped("secrets.json").as_deref(),
             Some("secret-like content")
         );
+        let secrets_symbols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = 'secrets.json'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(secrets_symbols, 0, "a secret-like file is skipped whole");
     }
 
     #[test]

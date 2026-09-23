@@ -94,8 +94,8 @@ pub fn write_workspace(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// Documents next to the TS mini repo: two Markdown files that mention its symbols and
-/// each other, a page, a stylesheet, three config files, a text note, and two files
-/// that must be skipped.
+/// each other, a page, a stylesheet, four config files (one of them secret-like), a
+/// text note, and two files that must be skipped for other reasons.
 pub fn write_docs_mini(root: &Path) {
     write_ts_mini(root);
     w(root, "docs/design.md", "# Design\n\nSessions are created by `createSession` in [session](../src/auth/session.ts).\n\n## Freshness\n\nEvery call refreshes; see [[runbook]] for the STALE header.\n\n## Storage\n\n`SessionStore` keeps them.\n");
@@ -106,7 +106,16 @@ pub fn write_docs_mini(root: &Path) {
         "site/app.css",
         ".login { color: red }\n@media (max-width: 600px) { .login { color: blue } }\n",
     );
-    w(root, "package.json", "{\"name\": \"mini\", \"scripts\": {\"build\": \"tsc\"}, \"token\": \"ghp_notreallyasecretbutlongenough1234567890\"}\n");
+    w(
+        root,
+        "package.json",
+        "{\"name\": \"mini\", \"scripts\": {\"build\": \"tsc\"}, \"private\": true}\n",
+    );
+    w(
+        root,
+        "secrets.json",
+        "{\"token\": \"ghp_notreallyasecretbutlongenough1234567890\", \"name\": \"mini\"}\n",
+    );
     w(root, "ci.yml", "name: ci\njobs:\n  build:\n    steps: []\n");
     w(
         root,
