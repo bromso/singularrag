@@ -1,6 +1,6 @@
 /// Bumped whenever the DDL below changes. The index is derived data: on a mismatch
 /// `Store::init` drops every table and rebuilds from scratch.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -116,8 +116,10 @@ CREATE TABLE IF NOT EXISTS extraction_cache (
   json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS embedding_cache (
-  hash TEXT PRIMARY KEY,
-  dim  INTEGER NOT NULL,
-  blob BLOB NOT NULL
+  hash  TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dim   INTEGER NOT NULL,
+  blob  BLOB NOT NULL,
+  PRIMARY KEY (hash, model)
 );
 "#;

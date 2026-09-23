@@ -385,17 +385,25 @@ fn record_outage(store: &Store, t: &mut KnowledgeTick, message: String) -> Resul
 /// When the model now answers in a different dimension than the index holds, rebuild
 /// (which clears the vectors and re-queues every section) and tell the caller to end
 /// the tick; the next ticks re-embed at the new dimension. Not an outage.
-fn dimension_changed(store: &Store, vectors: &[Vec<f32>]) -> Result<bool> {
+fn dimension_changed(store: &Store, models: &Models, vectors: &[Vec<f32>]) -> Result<bool> {
     let Some(len) = vectors.first().map(Vec::len) else {
         return Ok(false);
     };
     match vec::dim(store)? {
         Some(d) if d != len => {
-            vec::ensure_tables(store, len)?;
+            vec::ensure_tables(store, len, &models.config().embed)?;
             Ok(true)
         }
         _ => Ok(false),
     }
+}
+
+/// The index's dimension when its vectors came from another embedding model than `models` uses.
+fn swapped_model_dim(store: &Store, models: &Models) -> Result<Option<usize>> {
+    if vec::model(store)?.is_some_and(|m| m != models.config().embed) {
+        return vec::dim(store);
+    }
+    Ok(None)
 }
 
 fn clear_meta(store: &Store, key: &str) -> Result<()> {
@@ -422,7 +430,11 @@ pub fn tick(
         t.pending = pending(store)?;
         return Ok(t);
     }
-    if embed_step(store, models, &mut t)? {
+    if let Some(d) = swapped_model_dim(store, models)? {
+        // A different embedding model at any dimension: the same rebuild a dimension change
+        // does, before anything is embedded. The next ticks re-embed with the new model.
+        vec::ensure_tables(store, d, &models.config().embed)?;
+    } else if embed_step(store, models, &mut t)? {
         extract_step(store, models, &mut t, start, budget, should_yield)?;
     }
     t.pending = pending(store)?;
@@ -441,7 +453,8 @@ struct ToEmbed {
     body: String,
 }
 
-/// What a model answering in a different dimension than the index holds means to the caller.
+/// What a model answering in a different dimension (or a different embedding model) than
+/// the index holds means to the caller.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OnNewDim {
     /// The tick: rebuild (clear the vectors, re-queue every section) and end the tick.
@@ -452,9 +465,9 @@ enum OnNewDim {
 }
 
 /// The section-embedding write the tick and the extraction loader share. Vectors for
-/// `items` come from the embedding cache (by hash, at the index's dimension); the misses
-/// and the `extra` texts go to the model in one call. The first vectors ever create the
-/// tables. A different dimension is handled as `on_new_dim` says; otherwise `section_vec`,
+/// `items` come from the embedding cache (by hash and model, at the index's dimension); the
+/// misses and the `extra` texts go to the model in one call. The first vectors ever create
+/// the tables. A different dimension or embedding model is handled as `on_new_dim` says; otherwise `section_vec`,
 /// `section_embeddings` and `embedding_cache` are written for every item in one
 /// transaction (and a queue row's empty rebuild hash is filled in). Returns the vectors
 /// for `extra`, in order, or `None` when a rebuild ended the step. A model outage is an
@@ -467,13 +480,26 @@ fn embed_sections(
     on_new_dim: OnNewDim,
 ) -> Result<Option<Vec<Vec<f32>>>> {
     let conn = store.conn();
+    let model = models.config().embed.as_str();
     let dim_before = vec::dim(store)?;
+    if let Some(d) = swapped_model_dim(store, models)? {
+        return match on_new_dim {
+            OnNewDim::Rebuild => {
+                vec::ensure_tables(store, d, model)?;
+                Ok(None)
+            }
+            OnNewDim::Refuse => Err(Error::ModelUnavailable(format!(
+                "embeddings from {model} for an index built with {}",
+                vec::model(store)?.unwrap_or_default()
+            ))),
+        };
+    }
     let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(items.len());
     for it in items {
         let cached: Option<(i64, Vec<u8>)> = conn
             .query_row(
-                "SELECT dim, blob FROM embedding_cache WHERE hash = ?1",
-                [&it.hash],
+                "SELECT dim, blob FROM embedding_cache WHERE hash = ?1 AND model = ?2",
+                params![it.hash, model],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
@@ -488,7 +514,7 @@ fn embed_sections(
     let mut extra_vectors = Vec::new();
     if misses.is_empty() && extra.is_empty() {
         if let Some(d) = dim_before {
-            vec::ensure_tables(store, d)?;
+            vec::ensure_tables(store, d, model)?;
         }
     } else {
         let texts: Vec<String> = misses
@@ -511,7 +537,7 @@ fn embed_sections(
         if let Some(before) = dim_before.filter(|&b| b != d) {
             return match on_new_dim {
                 OnNewDim::Rebuild => {
-                    vec::ensure_tables(store, d)?;
+                    vec::ensure_tables(store, d, model)?;
                     Ok(None)
                 }
                 OnNewDim::Refuse => Err(Error::ModelUnavailable(format!(
@@ -520,7 +546,7 @@ fn embed_sections(
             };
         }
         // First vectors ever: this creates the tables; otherwise a cheap no-op.
-        vec::ensure_tables(store, d)?;
+        vec::ensure_tables(store, d, model)?;
         extra_vectors = answered.split_off(misses.len());
         for (i, v) in misses.into_iter().zip(answered) {
             vectors[i] = Some(v);
@@ -536,8 +562,8 @@ fn embed_sections(
             params![it.symbol_id, it.hash],
         )?;
         tx.execute(
-            "INSERT OR REPLACE INTO embedding_cache(hash, dim, blob) VALUES (?1, ?2, ?3)",
-            params![it.hash, v.len() as i64, vec::to_blob(v)],
+            "INSERT OR REPLACE INTO embedding_cache(hash, model, dim, blob) VALUES (?1, ?2, ?3, ?4)",
+            params![it.hash, model, v.len() as i64, vec::to_blob(v)],
         )?;
         tx.execute(
             "UPDATE extract_queue SET hash = ?2 WHERE symbol_id = ?1 AND hash = ''",
@@ -676,7 +702,7 @@ fn extract_step(
         } else {
             match models.embed(&texts) {
                 Ok(v) => {
-                    if dimension_changed(store, &v)? {
+                    if dimension_changed(store, models, &v)? {
                         return Ok(());
                     }
                     texts.into_iter().zip(v).collect()
@@ -1593,6 +1619,57 @@ mod tests {
         })
         .unwrap();
         assert!(t.embedded > 0 && t.extracted == 1, "{t:?}");
+    }
+
+    #[test]
+    fn a_model_swap_at_the_same_dimension_rebuilds_and_misses_the_cache() {
+        let (_d, store) = indexed_docs();
+        let sections = count(&store, "SELECT COUNT(*) FROM sections_fts");
+        let f = FakeOllama::spawn(8);
+        let t = tick(&store, &models(&f), Duration::ZERO, &|| false).unwrap();
+        assert_eq!(t.embedded as i64, sections);
+        let embeds = |f: &FakeOllama| {
+            f.calls()
+                .iter()
+                .filter(|p| p.as_str() == "/api/embed")
+                .count()
+        };
+        let before = embeds(&f);
+        let swapped = Models::new(ModelsConfig {
+            ollama: f.url(),
+            embed: "other-embed".into(),
+            ..Default::default()
+        });
+        tick(&store, &swapped, Duration::ZERO, &|| false).unwrap();
+        assert_eq!(
+            crate::store::vec::dim(&store).unwrap(),
+            Some(8),
+            "same dimension"
+        );
+        assert_eq!(
+            store.get_meta("embed_model").unwrap().as_deref(),
+            Some("other-embed")
+        );
+        assert_eq!(
+            store.get_meta("embeddings_rebuilding").unwrap().as_deref(),
+            Some("1")
+        );
+        while count(&store, "SELECT COUNT(*) FROM section_embeddings") < sections {
+            let t = tick(&store, &swapped, Duration::ZERO, &|| false).unwrap();
+            assert!(t.model_error.is_none(), "{t:?}");
+            assert!(
+                embeds(&f) > before,
+                "the old model's vectors are a cache miss"
+            );
+        }
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM section_vec"), sections);
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM embedding_cache WHERE model = 'other-embed'"
+            ),
+            count(&store, "SELECT COUNT(*) FROM embedding_cache")
+        );
     }
 
     #[test]

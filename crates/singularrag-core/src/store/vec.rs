@@ -1,5 +1,6 @@
 //! sqlite-vec tables (knowledge spec §3): `section_vec`, `entity_vec`, `relation_vec`,
-//! created when the embedding dimension is first known; a dimension change rebuilds.
+//! created when the embedding dimension is first known; a different dimension or embedding
+//! model rebuilds.
 
 use crate::store::Store;
 use crate::{Error, Result};
@@ -21,14 +22,20 @@ pub fn dim(store: &Store) -> Result<Option<usize>> {
     Ok(store.get_meta("embed_dim")?.and_then(|s| s.parse().ok()))
 }
 
-/// Creates the three `vec0` tables for `dim_now` when absent. Returns `true` when it
-/// (re)created them. A different stored dimension drops them, clears everything derived
-/// from embeddings or extraction, marks `embeddings_rebuilding` and re-queues every
-/// document section with a body.
-pub fn ensure_tables(store: &Store, dim_now: usize) -> Result<bool> {
+/// The embedding model the stored vectors came from, written beside `embed_dim`.
+pub fn model(store: &Store) -> Result<Option<String>> {
+    store.get_meta("embed_model")
+}
+
+/// Creates the three `vec0` tables for `dim_now` from `model_now` when absent. Returns
+/// `true` when it (re)created them. A different stored dimension or model drops them,
+/// clears everything derived from embeddings or extraction, marks `embeddings_rebuilding`
+/// and re-queues every document section with a body.
+pub fn ensure_tables(store: &Store, dim_now: usize, model_now: &str) -> Result<bool> {
     let conn = store.conn();
+    let same_model = model(store)?.as_deref() == Some(model_now);
     match dim(store)? {
-        Some(d) if d == dim_now => {
+        Some(d) if d == dim_now && same_model => {
             let exists: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (?1, ?2, ?3)",
                 TABLES,
@@ -62,6 +69,7 @@ pub fn ensure_tables(store: &Store, dim_now: usize) -> Result<bool> {
         ))?;
     }
     store.set_meta("embed_dim", &dim_now.to_string())?;
+    store.set_meta("embed_model", model_now)?;
     Ok(true)
 }
 
@@ -113,9 +121,9 @@ mod tests {
     fn vec_tables_are_created_once_and_knn_returns_nearest_by_cosine() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(dim(&store).unwrap(), None);
-        assert!(ensure_tables(&store, 3).unwrap());
+        assert!(ensure_tables(&store, 3, "m").unwrap());
         assert!(
-            !ensure_tables(&store, 3).unwrap(),
+            !ensure_tables(&store, 3, "m").unwrap(),
             "same dim: nothing to do"
         );
         insert(&store, "section_vec", 1, &[1.0, 0.0, 0.0]).unwrap();
@@ -140,11 +148,11 @@ mod tests {
     #[test]
     fn missing_vector_tables_are_recreated_at_the_same_dimension() {
         let store = Store::open_in_memory().unwrap();
-        assert!(ensure_tables(&store, 3).unwrap());
+        assert!(ensure_tables(&store, 3, "m").unwrap());
         insert(&store, "section_vec", 1, &[1.0, 0.0, 0.0]).unwrap();
         store.conn().execute_batch("DROP TABLE entity_vec").unwrap();
         assert!(
-            ensure_tables(&store, 3).unwrap(),
+            ensure_tables(&store, 3, "m").unwrap(),
             "a missing table is recreated"
         );
         let n: i64 = store
@@ -165,9 +173,45 @@ mod tests {
     }
 
     #[test]
+    fn a_model_change_at_the_same_dimension_rebuilds() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(ensure_tables(&store, 3, "old-embed").unwrap());
+        assert!(!ensure_tables(&store, 3, "old-embed").unwrap());
+        insert(&store, "section_vec", 1, &[1.0, 0.0, 0.0]).unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO embedding_cache(hash, model, dim, blob) VALUES ('h', 'old-embed', 3, x'00')",
+                [],
+            )
+            .unwrap();
+        assert!(
+            ensure_tables(&store, 3, "new-embed").unwrap(),
+            "model changed"
+        );
+        assert_eq!(dim(&store).unwrap(), Some(3), "dimension unchanged");
+        assert_eq!(model(&store).unwrap().as_deref(), Some("new-embed"));
+        assert!(
+            knn(&store, "section_vec", &[1.0, 0.0, 0.0], 5)
+                .unwrap()
+                .is_empty(),
+            "the old model's vectors are gone"
+        );
+        let cached: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM embedding_cache", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cached, 0);
+        assert_eq!(
+            store.get_meta("embeddings_rebuilding").unwrap().as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
     fn a_wrong_dimension_is_refused() {
         let store = Store::open_in_memory().unwrap();
-        ensure_tables(&store, 3).unwrap();
+        ensure_tables(&store, 3, "m").unwrap();
         let e = insert(&store, "section_vec", 1, &[1.0, 0.0]).unwrap_err();
         assert!(matches!(e, crate::Error::ModelUnavailable(_)), "{e}");
     }
@@ -182,7 +226,7 @@ mod tests {
             .unwrap()
             .refresh(None)
             .unwrap();
-        ensure_tables(&store, 4).unwrap();
+        ensure_tables(&store, 4, "m").unwrap();
         insert(&store, "section_vec", 1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
         store
             .conn()
@@ -195,7 +239,7 @@ mod tests {
             .conn()
             .execute("DELETE FROM extract_queue", [])
             .unwrap();
-        assert!(ensure_tables(&store, 8).unwrap(), "dim changed");
+        assert!(ensure_tables(&store, 8, "m").unwrap(), "dim changed");
         assert_eq!(dim(&store).unwrap(), Some(8));
         let n: i64 = store
             .conn()
