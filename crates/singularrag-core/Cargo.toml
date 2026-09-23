@@ -14,6 +14,12 @@ tree-sitter-tags = { workspace = true }
 tree-sitter-typescript = { workspace = true }
 tree-sitter-javascript = { workspace = true }
 tree-sitter-rust = { workspace = true }
+tree-sitter-md = { workspace = true }
+tree-sitter-html = { workspace = true }
+tree-sitter-css = { workspace = true }
+tree-sitter-json = { workspace = true }
+tree-sitter-yaml = { workspace = true }
+tree-sitter-toml-ng = { workspace = true }
 ignore = { workspace = true }
 globset = { workspace = true }
 blake3 = { workspace = true }

@@ -265,6 +265,7 @@ mod tests {
             "symbols",
             "refs",
             "symbols_fts",
+            "sections_fts",
             "retrievals",
             "retrieval_items",
             "indexer_lock",

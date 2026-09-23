@@ -130,4 +130,12 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn own_sources_that_carry_secret_fixtures_are_not_secret_like() {
+        // These files hold detector fixtures for their tests; the fixture strings are
+        // assembled at runtime so the source files themselves index normally.
+        assert_eq!(looks_secret(include_str!("engine.rs")), None, "engine.rs");
+        assert_eq!(looks_secret(include_str!("fixture.rs")), None, "fixture.rs");
+    }
 }

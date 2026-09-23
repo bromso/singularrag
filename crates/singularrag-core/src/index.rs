@@ -3,7 +3,7 @@
 //! as `remaining` so callers can say "STALE: N files changed since index".
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::{params, Connection};
@@ -15,7 +15,8 @@ use crate::secrets::looks_secret;
 use crate::store::Store;
 use crate::time::now_ms;
 use crate::tokens::split_identifier;
-use crate::walk::{walk, WalkEntry};
+use crate::walk::{walk_workspace, WalkEntry};
+use crate::workspace::Workspace;
 use crate::{Error, Result};
 
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -35,7 +36,7 @@ pub struct IndexStats {
 
 pub struct Indexer<'a> {
     store: &'a Store,
-    root: PathBuf,
+    ws: Workspace,
     config: &'a MapConfig,
 }
 
@@ -55,10 +56,10 @@ enum Outcome {
 }
 
 impl<'a> Indexer<'a> {
-    pub fn new(store: &'a Store, root: &Path, config: &'a MapConfig) -> Result<Self> {
+    pub fn new(store: &'a Store, ws: &Workspace, config: &'a MapConfig) -> Result<Self> {
         Ok(Indexer {
             store,
-            root: root.canonicalize()?,
+            ws: ws.clone(),
             config,
         })
     }
@@ -90,7 +91,7 @@ impl<'a> Indexer<'a> {
     /// Files whose mtime or size differ from the table, or that are not in it yet.
     pub fn stale_count(&self) -> Result<usize> {
         let known = self.known_files()?;
-        let w = walk(&self.root, &self.config.deny_patterns())?;
+        let w = walk_workspace(&self.ws, &self.config.deny_patterns())?;
         Ok(w.entries
             .iter()
             .filter(|e| Self::changed(&known, e))
@@ -118,7 +119,7 @@ impl<'a> Indexer<'a> {
     ) -> Result<IndexStats> {
         let mut stats = IndexStats::default();
         let known = self.known_files()?;
-        let w = walk(&self.root, &self.config.deny_patterns())?;
+        let w = walk_workspace(&self.ws, &self.config.deny_patterns())?;
         stats.scanned = w.entries.len() + w.skipped.len();
         let now = now_ms();
 
@@ -216,6 +217,11 @@ impl<'a> Indexer<'a> {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "too-large", now)?;
             return Ok(Outcome::Skipped);
         }
+        let base = e.rel_path.rsplit('/').next().unwrap_or(&e.rel_path);
+        if crate::doc::is_lockfile(base) {
+            self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "lockfile", now)?;
+            return Ok(Outcome::Skipped);
+        }
         let Some(lang) = Language::from_path(&e.rel_path) else {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "unsupported-language", now)?;
             return Ok(Outcome::Skipped);
@@ -229,6 +235,12 @@ impl<'a> Indexer<'a> {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "not-utf8", now)?;
             return Ok(Outcome::Skipped);
         };
+        if lang.is_document() {
+            if let Some(reason) = crate::doc::skip_reason(&e.rel_path, e.size, source) {
+                self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, reason, now)?;
+                return Ok(Outcome::Skipped);
+            }
+        }
         if looks_secret(source).is_some() {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "secret-like content", now)?;
             return Ok(Outcome::Skipped);
@@ -246,7 +258,18 @@ impl<'a> Indexer<'a> {
             return Ok(Outcome::Unchanged);
         }
 
-        let tags = extract_tags(lang, source)?;
+        let stem = e.rel_path.rsplit('/').next().unwrap_or(&e.rel_path);
+        let stem = stem
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(stem)
+            .to_string();
+        let (tags, bodies, mentions) = if lang.is_document() {
+            let d = crate::doc::extract(lang, source, &stem)?;
+            (d.tags, d.bodies, d.mentions)
+        } else {
+            (extract_tags(lang, source)?, Vec::new(), Vec::new())
+        };
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason)
@@ -261,23 +284,53 @@ impl<'a> Indexer<'a> {
             })?;
         delete_symbols_for(&tx, file_id)?;
 
+        let mut ids: Vec<i64> = Vec::with_capacity(tags.len());
         for t in &tags {
+            if t.name.is_empty() {
+                ids.push(0);
+                continue;
+            }
             if t.is_definition {
                 tx.execute(
                     "INSERT INTO symbols(file_id, name, kind, line_start, line_end, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![file_id, t.name, t.kind, t.line_start, t.line_end, t.signature],
                 )?;
                 let id = tx.last_insert_rowid();
+                ids.push(id);
                 tx.execute(
                     "INSERT INTO symbols_fts(rowid, name, name_tokens, signature, path) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![id, t.name, split_identifier(&t.name).join(" "), t.signature, e.rel_path],
                 )?;
             } else {
+                ids.push(0);
                 tx.execute(
                     "INSERT INTO refs(file_id, name, line) VALUES (?1, ?2, ?3)",
                     params![file_id, t.name, t.line_start],
                 )?;
             }
+        }
+        for (i, body) in &bodies {
+            let id = ids[*i];
+            if id == 0 || !matches!(tags[*i].kind.as_str(), "section" | "document" | "element") {
+                continue;
+            }
+            // A wrapper whose whole content lives in child sections (e.g. the
+            // document row of a file that opens straight into an H1, or a section
+            // that holds nothing but a nested heading) blanks down to whitespace;
+            // skip it rather than writing a noise row.
+            if body.trim().is_empty() {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO sections_fts(rowid, path, name, content) VALUES (?1, ?2, ?3, ?4)",
+                params![id, e.rel_path, tags[*i].name, body],
+            )?;
+        }
+        for (name, line) in &mentions {
+            tx.execute(
+                "INSERT INTO refs(file_id, name, line) VALUES (?1, ?2, ?3)",
+                params![file_id, name, line],
+            )?;
         }
         tx.commit()?;
         Ok(Outcome::Indexed)
@@ -298,9 +351,25 @@ impl<'a> Indexer<'a> {
         let version = hasher.finalize().to_hex()[..12].to_string();
         self.store.set_meta("index_version", &version)?;
         self.store.set_meta("indexed_at_ms", &now.to_string())?;
-        match git_head(&self.root) {
-            Some(h) => self.store.set_meta("git_head", &h)?,
-            None => self.store.set_meta("git_head", "")?,
+        if self.ws.is_named() {
+            let mut parts = Vec::new();
+            for r in &self.ws.roots {
+                let head = git_head(&r.path).unwrap_or_default();
+                self.store
+                    .set_meta(&format!("git_head:{}", r.name), &head)?;
+                let short = if head.is_empty() {
+                    "none".to_string()
+                } else {
+                    head.chars().take(7).collect()
+                };
+                parts.push(format!("{}:{short}", r.name));
+            }
+            self.store.set_meta("git_head", &parts.join(" "))?;
+        } else {
+            match git_head(&self.ws.roots[0].path) {
+                Some(h) => self.store.set_meta("git_head", &h)?,
+                None => self.store.set_meta("git_head", "")?,
+            }
         }
         Ok(())
     }
@@ -311,6 +380,10 @@ impl<'a> Indexer<'a> {
 fn delete_symbols_for(conn: &Connection, file_id: i64) -> Result<()> {
     conn.execute(
         "DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
+        [file_id],
+    )?;
+    conn.execute(
+        "DELETE FROM sections_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
         [file_id],
     )?;
     conn.execute("DELETE FROM symbols WHERE file_id = ?1", [file_id])?;
@@ -349,6 +422,7 @@ mod tests {
     use crate::config::MapConfig;
     use crate::fixture::{write_rust_mini, write_ts_mini};
     use crate::store::Store;
+    use crate::workspace::Workspace;
 
     fn setup() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -365,7 +439,7 @@ mod tests {
     fn full_index_records_files_symbols_refs_and_skips() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(None).unwrap();
         assert_eq!(stats.remaining, 0);
         assert!(stats.indexed >= 4, "{stats:?}");
@@ -386,7 +460,7 @@ mod tests {
             reason("src/config.ts").as_deref(),
             Some("secret-like content")
         );
-        assert_eq!(reason("README.md").as_deref(), Some("unsupported-language"));
+        assert_eq!(reason("README.md"), None, "Markdown is indexed");
         assert_eq!(reason("src/auth/session.ts"), None);
         assert_eq!(
             count(
@@ -431,7 +505,7 @@ mod tests {
             return; // running as root: the file is readable anyway
         }
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(None).unwrap();
         let reason: Option<String> = store
             .conn()
@@ -462,9 +536,9 @@ mod tests {
         write_rust_mini(dir.path());
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(None).unwrap();
-        assert_eq!(stats.indexed, 2, "{stats:?}");
+        assert_eq!(stats.indexed, 3, "two .rs files and Cargo.toml: {stats:?}");
         assert_eq!(stats.remaining, 0);
 
         let reason: Option<String> = store
@@ -475,7 +549,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(reason.as_deref(), Some("unsupported-language"));
+        assert_eq!(reason, None, "TOML is indexed");
         assert_eq!(
             count(
                 &store,
@@ -519,7 +593,7 @@ mod tests {
     fn incremental_refresh_touches_only_changed_files() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         ix.refresh(None).unwrap();
         let before: i64 = store
             .conn()
@@ -565,7 +639,7 @@ mod tests {
     fn same_content_new_mtime_is_unchanged_not_indexed() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         ix.refresh(None).unwrap();
 
         let p = dir.path().join("src/util/log.ts");
@@ -588,7 +662,7 @@ mod tests {
     fn deleted_files_are_removed_with_their_symbols() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         ix.refresh(None).unwrap();
         std::fs::remove_file(dir.path().join("src/util/log.ts")).unwrap();
         let stats = ix.refresh(None).unwrap();
@@ -610,7 +684,7 @@ mod tests {
     fn expired_deadline_indexes_nothing_and_reports_remaining() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(Some(std::time::Instant::now())).unwrap();
         assert_eq!(stats.indexed, 0);
         assert!(stats.remaining >= 4, "{stats:?}");
@@ -621,8 +695,9 @@ mod tests {
     fn refresh_with_calls_on_file_once_per_walked_entry() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
-        let w = walk(&dir.path().canonicalize().unwrap(), &cfg.deny_patterns()).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
+        let w =
+            crate::walk::walk(&dir.path().canonicalize().unwrap(), &cfg.deny_patterns()).unwrap();
         let mut count = 0usize;
         let stats = ix.refresh_with(None, || count += 1).unwrap();
         assert_eq!(count, w.entries.len());
@@ -685,5 +760,200 @@ mod tests {
             git_head(dir.path()).as_deref(),
             Some("4444444444444444444444444444444444444444")
         );
+    }
+
+    #[test]
+    fn documents_become_sections_bodies_mentions_and_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        // A lockfile no `Language` claims still skips as a lockfile.
+        std::fs::write(dir.path().join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let conn = store.conn();
+        let kind = |path: &str, name: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT s.kind FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1 AND s.name = ?2",
+                [path, name], |r| r.get(0)).ok()
+        };
+        assert_eq!(
+            kind("docs/design.md", "Freshness").as_deref(),
+            Some("section")
+        );
+        assert_eq!(
+            kind("docs/design.md", "design").as_deref(),
+            Some("document")
+        );
+        assert_eq!(kind("site/index.html", "app").as_deref(), Some("element"));
+        assert_eq!(kind("site/app.css", ".login").as_deref(), Some("rule"));
+        assert_eq!(
+            kind("package.json", "scripts.build").as_deref(),
+            Some("key")
+        );
+        assert_eq!(kind("ci.yml", "jobs.build").as_deref(), Some("key"));
+        assert_eq!(
+            kind("Cargo.toml", "dependencies.serde").as_deref(),
+            Some("key")
+        );
+        assert_eq!(kind("notes.txt", "notes").as_deref(), Some("document"));
+        let lang: String = conn
+            .query_row(
+                "SELECT lang FROM files WHERE path = 'docs/design.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lang, "markdown");
+        let body_hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sections_fts WHERE sections_fts MATCH 'stale'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(body_hits >= 1, "design.md's Freshness prose: {body_hits}");
+        let no_values: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols_fts WHERE symbols_fts MATCH 'tsc'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(no_values, 0);
+        let mentions: Vec<String> = {
+            let mut st = conn.prepare("SELECT r.name FROM refs r JOIN files f ON f.id = r.file_id WHERE f.path = 'docs/design.md' ORDER BY r.name").unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            mentions,
+            vec!["SessionStore", "createSession", "runbook", "session"]
+        );
+        let skipped = |path: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT skipped_reason FROM files WHERE path = ?1",
+                [path],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(skipped("package-lock.json").as_deref(), Some("lockfile"));
+        assert_eq!(skipped("yarn.lock").as_deref(), Some("lockfile"));
+        assert_eq!(skipped("big.min.css").as_deref(), Some("minified"));
+        assert_eq!(
+            skipped("secrets.json").as_deref(),
+            Some("secret-like content")
+        );
+        let secrets_symbols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = 'secrets.json'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(secrets_symbols, 0, "a secret-like file is skipped whole");
+    }
+
+    #[test]
+    fn reindexing_a_document_replaces_its_fts_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = Workspace::single(dir.path()).unwrap();
+        let cfg = MapConfig::default();
+        Indexer::new(&store, &ws, &cfg)
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        std::fs::write(
+            dir.path().join("docs/runbook.md"),
+            "# Runbook\n\nNothing stale here any more.\n",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Indexer::new(&store, &ws, &cfg)
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let n: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sections_fts WHERE path = 'docs/runbook.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "one document row, the old section row is gone");
+        std::fs::remove_file(dir.path().join("docs/runbook.md")).unwrap();
+        Indexer::new(&store, &ws, &cfg)
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let n: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sections_fts WHERE path = 'docs/runbook.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_named_workspace_indexes_both_roots_and_records_a_head_per_root() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, _notes) = crate::fixture::write_workspace(d.path());
+        // Make `app` a git checkout so it has a head; `notes` stays plain.
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(&app)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "."]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "base",
+        ]);
+        let ws = Workspace::open(d.path()).unwrap();
+        let store = Store::open(&d.path().join(crate::engine::DB_FILE)).unwrap();
+        let s = Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        assert!(s.indexed >= 4, "{s:?}");
+        let n: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path LIKE 'app/%' AND skipped_reason IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(n >= 4, "{n}");
+        let head = store.get_meta("git_head:app").unwrap().unwrap();
+        assert_eq!(head.len(), 40);
+        assert_eq!(
+            store.get_meta("git_head:notes").unwrap().as_deref(),
+            Some("")
+        );
+        let composed = store.get_meta("git_head").unwrap().unwrap();
+        assert_eq!(composed, format!("app:{} notes:none", &head[..7]));
     }
 }

@@ -10,6 +10,7 @@ use rusqlite::params;
 use crate::blast::referencing_files;
 use crate::config::MapConfig;
 use crate::store::Store;
+use crate::workspace::Workspace;
 use crate::{Error, Result};
 
 pub const MAX_CHANGED: usize = 50;
@@ -87,7 +88,7 @@ pub fn parse_unified0(diff: &str) -> Vec<(String, u32, u32)> {
 pub fn changed(
     store: &Store,
     config: &MapConfig,
-    root: &Path,
+    ws: &Workspace,
     base: Option<&str>,
 ) -> Result<Changed> {
     if let Some(b) = base {
@@ -95,31 +96,70 @@ pub fn changed(
             return Err(Error::Config(format!("base: {b:?} is not a git ref")));
         }
     }
-    // Fixed prefixes and no external diff, so a user's `diff.noprefix`,
-    // `diff.mnemonicPrefix` or `diff.external` cannot change the format we parse;
-    // `core.quotepath=off` keeps non-ASCII paths literal.
-    let mut args = vec![
-        "-c",
-        "core.quotepath=off",
-        "diff",
-        "--unified=0",
-        "--no-color",
-        "--no-ext-diff",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-    ];
-    match base {
-        Some(b) => args.push(b),
-        // No revision means index vs working tree, which hides staged edits; compare
-        // against HEAD when there is one. An unborn HEAD leaves every file untracked.
-        None if git(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok() => args.push("HEAD"),
-        None => {}
+    let mut ranges: Vec<(String, u32, u32)> = Vec::new();
+    let mut git_roots = 0usize;
+    let mut base_resolved = 0usize;
+    for r in &ws.roots {
+        if !r.path.join(".git").exists() {
+            continue;
+        }
+        git_roots += 1;
+        // A ref that exists in one root and not another (`HEAD~1` in a one-commit
+        // notes vault) skips that root rather than failing the whole call.
+        if let Some(b) = base {
+            if git(
+                &r.path,
+                &["rev-parse", "--verify", "-q", &format!("{b}^{{commit}}")],
+            )
+            .is_err()
+            {
+                continue;
+            }
+            base_resolved += 1;
+        }
+        let prefix = ws.prefix(r);
+        // Fixed prefixes and no external diff, so a user's `diff.noprefix`,
+        // `diff.mnemonicPrefix` or `diff.external` cannot change the format we parse;
+        // `core.quotepath=off` keeps non-ASCII paths literal.
+        let mut args = vec![
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "--unified=0",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+        ];
+        match base {
+            Some(b) => args.push(b),
+            // No revision means index vs working tree, which hides staged edits; compare
+            // against HEAD when there is one. An unborn HEAD leaves every file untracked.
+            None if git(&r.path, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok() => {
+                args.push("HEAD")
+            }
+            None => {}
+        }
+        let diff = git(&r.path, &args)?;
+        let untracked = git(&r.path, &["ls-files", "--others", "--exclude-standard"])?;
+        ranges.extend(
+            parse_unified0(&diff)
+                .into_iter()
+                .map(|(p, a, b)| (format!("{prefix}{p}"), a, b)),
+        );
+        for p in untracked.lines().filter(|l| !l.is_empty()) {
+            ranges.push((format!("{prefix}{p}"), 1, u32::MAX));
+        }
     }
-    let diff = git(root, &args)?;
-    let untracked = git(root, &["ls-files", "--others", "--exclude-standard"])?;
-    let mut ranges = parse_unified0(&diff);
-    for p in untracked.lines().filter(|l| !l.is_empty()) {
-        ranges.push((p.to_string(), 1, u32::MAX));
+    if git_roots == 0 {
+        return Err(Error::Config("not a git checkout".into()));
+    }
+    if let Some(b) = base {
+        if base_resolved == 0 {
+            return Err(Error::Config(format!(
+                "base: {b:?} does not resolve in any root"
+            )));
+        }
     }
     let base_name = base.unwrap_or("HEAD").to_string();
 
@@ -248,6 +288,7 @@ mod tests {
     use crate::fixture::write_ts_mini;
     use crate::index::Indexer;
     use crate::store::Store;
+    use crate::workspace::Workspace;
     use std::process::Command;
 
     fn git(root: &std::path::Path, args: &[&str]) {
@@ -283,10 +324,14 @@ mod tests {
             ],
         );
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
         (dir, store)
     }
 
@@ -319,11 +364,21 @@ mod tests {
             "export function fresh(): number { return 1; }\n",
         )
         .unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
-        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
+        let c = changed(
+            &store,
+            &MapConfig::default(),
+            &Workspace::single(dir.path()).unwrap(),
+            None,
+        )
+        .unwrap();
         assert_eq!(c.base, "HEAD");
         let cs = c
             .symbols
@@ -378,16 +433,32 @@ mod tests {
                 "comment",
             ],
         );
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
-        let now = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
+        let now = changed(
+            &store,
+            &MapConfig::default(),
+            &Workspace::single(dir.path()).unwrap(),
+            None,
+        )
+        .unwrap();
         assert!(
             now.symbols.is_empty() && now.files_without_symbols.is_empty(),
             "clean tree: {now:?}"
         );
-        let vs_base = changed(&store, &MapConfig::default(), dir.path(), Some("HEAD~1")).unwrap();
+        let vs_base = changed(
+            &store,
+            &MapConfig::default(),
+            &Workspace::single(dir.path()).unwrap(),
+            Some("HEAD~1"),
+        )
+        .unwrap();
         assert_eq!(vs_base.base, "HEAD~1");
         assert_eq!(
             vs_base.files_without_symbols,
@@ -397,7 +468,7 @@ mod tests {
         let e = changed(
             &store,
             &MapConfig::default(),
-            dir.path(),
+            &Workspace::single(dir.path()).unwrap(),
             Some("--output=/tmp/x"),
         )
         .unwrap_err()
@@ -410,13 +481,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
-        let e = changed(&store, &MapConfig::default(), dir.path(), None)
-            .unwrap_err()
-            .to_string();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
+        let e = changed(
+            &store,
+            &MapConfig::default(),
+            &Workspace::single(dir.path()).unwrap(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("not a git checkout"), "{e}");
     }
 
@@ -431,10 +511,14 @@ mod tests {
     }
 
     fn refresh(store: &Store, dir: &std::path::Path) {
-        Indexer::new(store, dir, &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            store,
+            &Workspace::single(dir).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
     }
 
     fn names(c: &Changed) -> Vec<String> {
@@ -447,7 +531,13 @@ mod tests {
         touch_create_session(dir.path());
         git(dir.path(), &["add", "."]);
         refresh(&store, dir.path());
-        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        let c = changed(
+            &store,
+            &MapConfig::default(),
+            &Workspace::single(dir.path()).unwrap(),
+            None,
+        )
+        .unwrap();
         assert!(
             names(&c).contains(&"createSession".to_string()),
             "a staged edit is still a change against HEAD: {c:?}"
@@ -461,7 +551,13 @@ mod tests {
         git(dir.path(), &["config", "diff.mnemonicPrefix", "true"]);
         touch_create_session(dir.path());
         refresh(&store, dir.path());
-        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        let c = changed(
+            &store,
+            &MapConfig::default(),
+            &Workspace::single(dir.path()).unwrap(),
+            None,
+        )
+        .unwrap();
         assert!(
             names(&c).contains(&"createSession".to_string()),
             "hunks parse whatever the user's prefix config: {c:?}"
@@ -480,7 +576,13 @@ mod tests {
         );
         std::fs::write(&p, text).unwrap();
         refresh(&store, dir.path());
-        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        let c = changed(
+            &store,
+            &MapConfig::default(),
+            &Workspace::single(dir.path()).unwrap(),
+            None,
+        )
+        .unwrap();
         assert!(names(&c).contains(&"login".to_string()), "{c:?}");
         assert!(
             c.files_without_symbols.is_empty(),
@@ -496,10 +598,139 @@ mod tests {
         git(dir.path(), &["init", "-q"]);
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         refresh(&store, dir.path());
-        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        let c = changed(
+            &store,
+            &MapConfig::default(),
+            &Workspace::single(dir.path()).unwrap(),
+            None,
+        )
+        .unwrap();
         assert!(
             names(&c).contains(&"createSession".to_string()),
             "unborn HEAD: the tree is all untracked: {c:?}"
         );
+    }
+
+    #[test]
+    fn a_named_workspace_diffs_each_git_root_and_prefixes_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, notes) = crate::fixture::write_workspace(d.path());
+        for root in [&app, &notes] {
+            git(root, &["init", "-q"]);
+            git(
+                root,
+                &["-c", "user.email=t@t", "-c", "user.name=t", "add", "."],
+            );
+            git(
+                root,
+                &[
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-qm",
+                    "base",
+                ],
+            );
+        }
+        touch_create_session(&app);
+        std::fs::write(notes.join("new.md"), "# New\n").unwrap();
+        let ws = Workspace::open(d.path()).unwrap();
+        let store = Store::open(&d.path().join(crate::engine::DB_FILE)).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let c = changed(&store, &MapConfig::default(), &ws, None).unwrap();
+        assert!(
+            c.symbols
+                .iter()
+                .any(|s| s.path == "app/src/auth/session.ts" && s.name == "createSession"),
+            "{c:?}"
+        );
+        // Markdown is indexed: the new file's heading is a changed symbol.
+        assert!(c.symbols.iter().any(|s| s.path == "notes/new.md"), "{c:?}");
+        assert!(
+            !c.files_without_symbols
+                .contains(&"notes/new.md".to_string()),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn a_workspace_with_no_git_root_is_not_a_checkout() {
+        let d = tempfile::tempdir().unwrap();
+        crate::fixture::write_workspace(d.path());
+        let ws = Workspace::open(d.path()).unwrap();
+        let store = Store::open(&d.path().join(crate::engine::DB_FILE)).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let e = changed(&store, &MapConfig::default(), &ws, None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not a git checkout"), "{e}");
+    }
+
+    #[test]
+    fn a_base_ref_missing_in_one_root_skips_that_root() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, notes) = crate::fixture::write_workspace(d.path());
+        for root in [&app, &notes] {
+            git(root, &["init", "-q"]);
+            git(
+                root,
+                &["-c", "user.email=t@t", "-c", "user.name=t", "add", "."],
+            );
+            git(
+                root,
+                &[
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-qm",
+                    "base",
+                ],
+            );
+        }
+        // A second commit only in `app`, so `HEAD~1` resolves there and not in `notes`.
+        touch_create_session(&app);
+        git(
+            &app,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qam",
+                "edit",
+            ],
+        );
+        let ws = Workspace::open(d.path()).unwrap();
+        let store = Store::open(&d.path().join(crate::engine::DB_FILE)).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let c = changed(&store, &MapConfig::default(), &ws, Some("HEAD~1")).unwrap();
+        assert!(
+            c.symbols
+                .iter()
+                .any(|s| s.path == "app/src/auth/session.ts" && s.name == "createSession"),
+            "{c:?}"
+        );
+        assert!(
+            !c.symbols.iter().any(|s| s.path.starts_with("notes/")),
+            "the root without the ref is skipped: {c:?}"
+        );
+        let e = changed(&store, &MapConfig::default(), &ws, Some("nope-ref"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("nope-ref"), "no root resolves the ref: {e}");
     }
 }

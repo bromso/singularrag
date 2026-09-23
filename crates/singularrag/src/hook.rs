@@ -56,7 +56,10 @@ pub fn run(event: HookEvent, repo: Option<PathBuf>, input: &str) -> String {
                 return ALLOW_JSON.to_string();
             }
             let root = repo.or_else(|| v.get("cwd").and_then(Value::as_str).map(PathBuf::from));
-            let Some(root) = root.and_then(|r| r.canonicalize().ok()) else {
+            let Some(root) = root else {
+                return ALLOW_JSON.to_string();
+            };
+            let Ok(ws) = singularrag_core::workspace::Workspace::open(&root) else {
                 return ALLOW_JSON.to_string();
             };
             let file = v
@@ -69,11 +72,10 @@ pub fn run(event: HookEvent, repo: Option<PathBuf>, input: &str) -> String {
             let Ok(abs) = Path::new(file).canonicalize() else {
                 return ALLOW_JSON.to_string();
             };
-            let Ok(rel) = abs.strip_prefix(&root) else {
+            let Some(rel) = ws.rel_of(&abs) else {
                 return ALLOW_JSON.to_string();
             };
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            let db = root.join(singularrag_core::engine::DB_FILE);
+            let db = ws.dir.join(singularrag_core::engine::DB_FILE);
             let Ok(store) = singularrag_core::store::Store::open_read_only(&db) else {
                 return ALLOW_JSON.to_string();
             };
@@ -162,7 +164,7 @@ mod tests {
                 &input(
                     &session,
                     dir.path(),
-                    &dir.path().join("README.md").display().to_string()
+                    &dir.path().join(".env").display().to_string()
                 )
             ),
             ALLOW_JSON,
@@ -186,6 +188,24 @@ mod tests {
             ),
             DENY_JSON
         );
+        let _ = std::fs::remove_dir_all(marker_dir(&session));
+    }
+
+    #[test]
+    fn hook_denies_a_read_in_a_second_root() {
+        let d = tempfile::tempdir().unwrap();
+        let (_app, notes) = singularrag_core::fixture::write_workspace(d.path());
+        let mut e = singularrag_core::engine::Engine::open(d.path(), "hook-test").unwrap();
+        e.refresh(std::time::Duration::from_secs(60)).unwrap();
+        let session = format!("ws-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(marker_dir(&session));
+        let file = notes.join("README.md").display().to_string();
+        let first = run(
+            HookEvent::Read,
+            Some(d.path().to_path_buf()),
+            &input(&session, d.path(), &file),
+        );
+        assert_eq!(first, DENY_JSON, "a file in the second root is indexed");
         let _ = std::fs::remove_dir_all(marker_dir(&session));
     }
 }

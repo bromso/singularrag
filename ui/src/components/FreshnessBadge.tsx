@@ -22,7 +22,8 @@ export function FreshnessBadge({ status }: { status: Status | null }) {
     // and a second live region would say everything twice.
     <span aria-label="Index freshness" className="rounded border px-2 py-1 text-sm">
       <span className="font-medium">{freshnessText(status)}</span>
-      {status?.git_head && <span className="ml-2 font-mono text-xs">{status.git_head.slice(0, 7)}</span>}
+      {/* A workspace head is composed (`app:9b1e0d4 notes:none`): show it whole. */}
+      {status?.git_head && <span className="ml-2 font-mono text-xs">{status.git_head.includes(":") ? status.git_head : status.git_head.slice(0, 7)}</span>}
       <span className="ml-2 text-xs text-muted-foreground">{age(status?.indexed_at_ms ?? null)}</span>
     </span>
   );

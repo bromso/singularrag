@@ -7,6 +7,7 @@ import type { BlastResult, Boundary, GraphPayload } from "@/api/types";
 import type { FileRow } from "@/lib/join";
 import { applyPositions, buildGraph, layoutGraph, loadLayout, saveLayout, type Positions } from "@/lib/graph";
 import { convexHull, padHull } from "@/lib/hull";
+import { langGroup } from "@/lib/langGroup";
 import { edgeStyle, fileStatusOf, nodeStyle, readPalette, satelliteKey, type Palette } from "@/lib/mapStyle";
 
 export type MapViewProps = {
@@ -129,7 +130,7 @@ export function MapView(props: MapViewProps) {
         const pal = palRef.current!;
         const sat = data.symbolOf as string | undefined;
         if (sat) {
-          const s = nodeStyle(data.symbolName as string, { status: (data.symbolStatus as never) ?? null, focused: p.focusedPath === sat && p.focusedSymbol === data.symbolName, blastDepth: null, blastActive: false, symbols: 0, hovered: false, zoomRatio: ratio }, pal);
+          const s = nodeStyle(data.symbolName as string, { status: (data.symbolStatus as never) ?? null, focused: p.focusedPath === sat && p.focusedSymbol === data.symbolName, blastDepth: null, blastActive: false, symbols: 0, hovered: false, zoomRatio: ratio, group: "code" }, pal);
           return { ...data, ...s, size: 3 + (s.type === "border" ? 2 : 0), borderColor: s.borderColor ?? pal.focus, label: s.label ?? (data.symbolName as string) };
         }
         const s = nodeStyle(node, {
@@ -140,6 +141,7 @@ export function MapView(props: MapViewProps) {
           symbols: (data.symbols as number) ?? 0,
           hovered: hovered.current === node,
           zoomRatio: ratio,
+          group: langGroup((data.lang as string | null) ?? null),
         }, pal);
         return { ...data, size: s.size, color: s.color, borderColor: s.borderColor ?? pal.focus, type: s.type, label: s.label, zIndex: s.zIndex };
       },

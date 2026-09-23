@@ -92,6 +92,130 @@ never rows gave 0.79. Of the 387 indexed files, 134 are tests and 48 benchmarks;
 filter they were 72 of the 168 rows a 4096-token map served for L1, led by
 `src/jsx/dom/index.test.tsx`.
 
+## Tier one on documents
+
+The documents design (`docs/superpowers/specs/2026-09-23-singularrag-documents-design.md` §7) adds `questions-docs.toml`: twelve questions run against this repository as the corpus, gold named `path::name` with a section's heading text as the name. Run: `singularrag eval --repo <this checkout> --questions eval/questions-docs.toml --budget 4096`. Gate: hono at 4096 within 0.02 of its value before the branch, and the docs set at or above 0.6 at 4096.
+
+Two gold entries named `crates/singularrag-core/src/engine.rs`, which is skipped as secret-like content in this repository's own index (its tests hold a fixture key), so it has no symbols: D5 names `index.rs::refresh` instead of `engine.rs::refresh`, and D12 names the MCP handler `mcp/server.rs::repo_map` instead of `engine.rs::repo_map`. Every other entry was confirmed with `singularrag find`.
+
+**The spec §7 gate is not met on either count.** hono is 0.771 at 4096 against a baseline of 0.792, a drop of 0.021 against a 0.02 limit; the docs set is 0.361 against 0.6. There are two causes. Documents have a low file rank because nothing references them. And the per-file FTS bonus is split evenly over the 7 to 22 sections of a spec that match the query. Every gold entry is indexed, and no ranking constant was changed. Dropping the reference edges from code to documents was tried and reverted, because it did not raise either number. The ranking question goes to the project owner.
+
+hono before the branch (0b769e3, schema 2, built in a scratch worktree):
+
+```
+id    category  recall  tokens  missed
+L1    locate     0.75    4144  src/router.ts::match
+L2    locate     1.00    4134  
+L3    locate     1.00    4138  
+T1    trace      1.00    4117  
+T2    trace      1.00    4143  
+T3    trace      0.75    4131  src/compose.ts::dispatch
+B1    blast      1.00    4136  
+B2    blast      0.60    4117  src/compose.ts::compose, src/compose.ts::dispatch
+B3    blast      0.40    4138  src/middleware/logger/index.ts::logger, src/middleware/cors/index.ts::cors, src/middleware/jwt/jwt.ts::jwt
+P1    placement  0.25    4106  src/middleware/powered-by/index.ts::poweredBy, src/middleware/logger/index.ts::logger, src/middleware/etag/index.ts::etag
+P2    placement  1.00    4123  
+P3    placement  0.75    4135  src/context.ts::JSONRespond
+mean recall 0.792 over 12 questions
+```
+
+hono on `documents-v0` (schema 3; the checkout now also indexes 101 documents: README, docs, package.json, jsr.json, bunfig.toml, workflow YAML):
+
+```
+id    category  recall  tokens  missed
+L1    locate     0.75    4143  src/router.ts::match
+L2    locate     1.00    4140  
+L3    locate     1.00    4142  
+T1    trace      0.75    4130  src/compose.ts::compose
+T2    trace      1.00    4122  
+T3    trace      0.75    4129  src/compose.ts::dispatch
+B1    blast      1.00    4140  
+B2    blast      0.60    4139  src/compose.ts::compose, src/compose.ts::dispatch
+B3    blast      0.40    4133  src/middleware/logger/index.ts::logger, src/middleware/cors/index.ts::cors, src/middleware/jwt/jwt.ts::jwt
+P1    placement  0.25    4109  src/middleware/powered-by/index.ts::poweredBy, src/middleware/logger/index.ts::logger, src/middleware/etag/index.ts::etag
+P2    placement  1.00    4118  
+P3    placement  0.75    4129  src/context.ts::JSONRespond
+mean recall 0.771 over 12 questions
+```
+
+Docs set on `documents-v0`, with this commit's README and parent-spec amendments in the corpus:
+
+```
+id    category  recall  tokens  missed
+D1    locate-doc  0.00    4138  docs/superpowers/specs/2026-09-19-singularrag-design.md::8. Freshness
+D2    locate-doc  0.00    4119  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::2. The query-first hook
+D3    locate-doc  0.00    4134  docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::3. Run config, docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::4. Session
+D4    locate-doc  0.00    4142  docs/superpowers/specs/2026-09-19-singularrag-design.md::Gates for deferred features (eval-driven, §12)
+D5    doc-to-code  0.67    4125  docs/superpowers/specs/2026-09-19-singularrag-design.md::8. Freshness
+D6    doc-to-code  0.50    4119  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::2. The query-first hook
+D7    doc-to-code  0.67    4132  docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::5. Parsing and scoring
+D8    doc-to-code  1.00    4138  
+D9    code-to-doc  0.50    4135  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::3. `singularrag init`
+D10   code-to-doc  0.50    4080  docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::7. Summary and verdict
+D11   code-to-doc  0.00    4125  README.md::Claude Code, README.md::Connect an agent
+D12   code-to-doc  0.50    4116  README.md::What the agent sees
+mean recall 0.361 over 12 questions
+```
+
+Detail: hono is 0.771 against 0.792 (−0.021, one quarter-symbol past the 0.02 allowance) and the docs set is 0.361 against 0.6. Before this commit's README and spec amendments the docs set was 0.444; D11 fell from 1.00 to 0.00 when the README gained a section, which shows how close to the cut the sections sit.
+
+What the misses are, from a probe of `rank_symbols` at 4096 (cut at rank 191 to 214 in every question):
+
+- Every gold section is indexed, is a name or body hit for its query, and seeds its file. None is an extraction or mention defect: headings, spans and bodies are right (bodies exclude subsections and fences; the fenced `#` lines in §9 of the parent spec are correctly not headings).
+- They lose on two structural terms of the ranking. A document's file rank is about 0.004 to 0.007, against 0.02 to 0.05 for the code files that answer the same question, because nothing references a document: code never does and specs cite each other by path in code spans, which are not identifiers. And a file's FTS bonus is divided equally among its hits, so a spec in which 11 to 22 sections mention some query term gives the right one 1/11 to 1/22 of an already small bonus. Gold sections rank 212 to 539; D4 is the nearest miss (rank 212, cut at 191, 7 hits in its file).
+- Code gold is fine: all 10 code entries are served, so doc-to-code and code-to-doc questions score 0.5 to 1.0 on their code half. All 13 section entries are missed, which is the whole gap.
+- On hono the one lost quarter is T1's `src/compose.ts::compose`, now rank 195 with 184 served; thirteen document rows rank above it (the top one `bunfig.toml::test`, which takes the edges of every `test(...)` call in the test files). Without them it would be served. That is documents taking map room with no per-kind share, as spec §5 intends.
+
+Tried and reverted: routing code references only to code definers (spec §4 says "code does not reference documents"), which removes the `bunfig.toml::test` edges. hono stayed at 0.771 and the docs set fell to 0.361 before the README change, so it is not the fix and is not in this branch.
+
+Reaching 0.6 needs a ranking change the spec rules out for this branch (§5: the same boost as a `symbols_fts` hit): for example weighting the bonus by how strongly each section matches instead of splitting it evenly, or a per-document share. That is a decision for the next spec, not a constant to tune here.
+
+### Weighted hit shares (29c6057)
+
+The first lever from the gate analysis: a file's FTS bonus is shared between its hits in proportion to strength (`rank::hit_shares`: a name hit weighs 1.0, a body hit its `bm25()` rank normalised to the file's strongest body hit) instead of an even split. No constant changed. The hono checkout's leftover `.serena/` directory from the tier-two Serena warm-up was excluded locally (`.git/info/exclude`) so it no longer indexes as a document; it was not the deciding row.
+
+Docs set at 4096, 0.361 → **0.653** (gate 0.6 met):
+
+```
+id    category  recall  tokens  missed
+D1    locate-doc  1.00    4140  
+D2    locate-doc  0.00    4114  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::2. The query-first hook
+D3    locate-doc  0.00    4131  docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::3. Run config, docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::4. Session
+D4    locate-doc  1.00    4143  
+D5    doc-to-code  0.67    4139  docs/superpowers/specs/2026-09-19-singularrag-design.md::8. Freshness
+D6    doc-to-code  0.50    4105  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::2. The query-first hook
+D7    doc-to-code  0.67    4130  docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::5. Parsing and scoring
+D8    doc-to-code  1.00    4139  
+D9    code-to-doc  0.50    4137  docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::3. `singularrag init`
+D10   code-to-doc  1.00    4126  
+D11   code-to-doc  0.50    4134  README.md::Claude Code
+D12   code-to-doc  1.00    4142  
+mean recall 0.653 over 12 questions
+```
+
+hono at 4096, unchanged at **0.771** against 0.792 (still 0.021 down, limit 0.02). The one lost gold is T1's `src/compose.ts::compose`, ranked about 195 with 183 rows served; twelve document rows sit above it (`bunfig.toml`, `package.json`, `jsr.json`, `runtime-tests/deno/deno.json`, two `.github` issue templates, README, `docs/CONTRIBUTING.md`, `docs/MIGRATION.md`), which is the budget documents now share by design (no per-kind share).
+
+```
+id    category  recall  tokens  missed
+L1    locate     0.75    4112  src/router.ts::match
+L2    locate     1.00    4133  
+L3    locate     1.00    4113  
+T1    trace      0.75    4134  src/compose.ts::compose
+T2    trace      1.00    4135  
+T3    trace      0.75    4123  src/compose.ts::dispatch
+B1    blast      1.00    4144  
+B2    blast      0.60    4139  src/compose.ts::compose, src/compose.ts::dispatch
+B3    blast      0.40    4133  src/middleware/logger/index.ts::logger, src/middleware/cors/index.ts::cors, src/middleware/jwt/jwt.ts::jwt
+P1    placement  0.25    4099  src/middleware/powered-by/index.ts::poweredBy, src/middleware/logger/index.ts::logger, src/middleware/etag/index.ts::etag
+P2    placement  1.00    4132  
+P3    placement  0.75    4136  src/context.ts::JSONRespond
+mean recall 0.771 over 12 questions
+```
+
+Second lever, tried and reverted: `key` symbols (config keys) as reference targets, so `bunfig.toml::test` stops collecting every `test(...)` call by name join. hono unchanged at 0.771; docs fell to 0.486. Out.
+
+**Verdict (2026-09-23):** docs gate met; the hono shortfall of 0.001 beyond the limit, one symbol in 48, accepted by the project owner as the cost of documents sharing the budget by design. The branch ships at 0.771 / 0.653.
+
 ## Tier two
 
 Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.

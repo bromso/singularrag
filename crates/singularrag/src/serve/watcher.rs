@@ -8,6 +8,7 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
 use singularrag_core::index::IndexStats;
+use singularrag_core::workspace::Workspace;
 use tokio::sync::mpsc;
 
 use super::state::{AppState, ServerEvent};
@@ -22,7 +23,7 @@ fn broadcast_status(state: &AppState) {
         .read()
         .map(|g| g.clone())
         .unwrap_or_default();
-    let dto = super::queries::status(&state.store(), &f);
+    let dto = super::queries::status(&state.store(), &f, &state.ws);
     match dto {
         Ok(dto) => {
             let _ = state.events.send(ServerEvent::Freshness(dto));
@@ -77,41 +78,55 @@ pub async fn refresh_once(state: &AppState, handle: &EngineHandle) {
     }
 }
 
-fn interesting(root: &Path, p: &Path) -> bool {
-    let Ok(rel) = p.strip_prefix(root) else {
+/// `p` is worth a refresh: it is under a workspace root (any repo's `.git` aside), or it
+/// is the workspace's own `map.toml` (a hand edit there must refresh — the Engine reloads
+/// the config by mtime — and bump `data_version` so the UI refetches the map it is
+/// editing). The rest of `.singularrag` (the index and its WAL) is our own writes, and
+/// watching them would loop.
+fn interesting(ws: &Workspace, p: &Path) -> bool {
+    if p == ws.dir.join(singularrag_core::config::MAP_FILE) {
+        return true;
+    }
+    let Some(rel) = ws.rel_of(p) else {
         return false;
     };
-    if rel.starts_with(".git") {
-        return false;
-    }
-    if rel.starts_with(".singularrag") {
-        // The index and its WAL are our own writes — watching them would loop. `map.toml`
-        // is the exception: a hand edit there must refresh (the Engine reloads the config
-        // by mtime) and bump `data_version` so the UI refetches the map it is editing.
-        return rel == Path::new(singularrag_core::config::MAP_FILE);
-    }
-    true
+    let inner = rel
+        .split_once('/')
+        .map(|(_, r)| r)
+        .filter(|_| ws.is_named())
+        .unwrap_or(&rel);
+    let first = inner.split('/').next();
+    first != Some(".git") && first != Some(".singularrag")
 }
 
-/// Start watching `state.root`. The returned debouncer must be kept alive.
+/// Start watching every root in `state.ws`, plus (for a named workspace) the
+/// `.singularrag` directory non-recursively so a hand-edited `map.toml` is seen. The
+/// returned debouncer must be kept alive.
 pub fn start(
     state: AppState,
     handle: EngineHandle,
 ) -> anyhow::Result<Debouncer<notify::RecommendedWatcher, RecommendedCache>> {
     let (tx, mut rx) = mpsc::channel::<()>(4);
-    let root = state.root.clone();
-    let root_for_handler = root.clone();
+    let ws = state.ws.clone();
+    let ws_for_handler = ws.clone();
     let mut debouncer = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
         if let Ok(events) = res {
             if events
                 .iter()
-                .any(|e| e.paths.iter().any(|p| interesting(&root_for_handler, p)))
+                .any(|e| e.paths.iter().any(|p| interesting(&ws_for_handler, p)))
             {
                 let _ = tx.try_send(());
             }
         }
     })?;
-    debouncer.watch(&root, RecursiveMode::Recursive)?;
+    for r in &ws.roots {
+        debouncer.watch(&r.path, RecursiveMode::Recursive)?;
+    }
+    if ws.is_named() {
+        let dot_dir = ws.dir.join(".singularrag");
+        std::fs::create_dir_all(&dot_dir)?;
+        debouncer.watch(&dot_dir, RecursiveMode::NonRecursive)?;
+    }
     tokio::spawn(async move {
         while rx.recv().await.is_some() {
             refresh_once(&state, &handle).await;
@@ -136,27 +151,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
         Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1).unwrap();
         let (handle, _join, _died) = spawn(EngineConfig {
             root: dir.path().to_path_buf(),
             session_key: SessionKey::Fixed("serve".into()),
             refresh_budget: singularrag_core::engine::REFRESH_BUDGET,
         });
+        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1, handle.clone())
+            .unwrap();
         (dir, state, handle)
     }
 
     #[test]
-    fn map_toml_is_watched_but_the_rest_of_dot_singularrag_is_not() {
-        let root = Path::new("/repo");
-        assert!(interesting(root, &root.join("src/a.ts")));
+    fn interesting_paths_follow_the_roots_and_the_workspace_map_file() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, notes) = singularrag_core::fixture::write_workspace(d.path());
+        // Canonicalize: `interesting` compares against `ws.roots`, which `Workspace::open`
+        // canonicalizes, and on macOS `TMPDIR` is itself a symlink (`/var` -> `/private/var`).
+        let app = app.canonicalize().unwrap();
+        let notes = notes.canonicalize().unwrap();
+        let ws = singularrag_core::workspace::Workspace::open(d.path()).unwrap();
+        assert!(interesting(&ws, &app.join("src/a.ts")));
+        assert!(interesting(&ws, &notes.join("n.md")));
+        assert!(!interesting(&ws, &app.join(".git/HEAD")));
+        assert!(interesting(&ws, &app.join(".gitignore")));
+        assert!(interesting(&ws, &app.join(".github/workflows/ci.yml")));
+        assert!(interesting(&ws, &ws.dir.join(".singularrag/map.toml")));
+        assert!(!interesting(&ws, &ws.dir.join(".singularrag/index.db")));
         assert!(
-            interesting(root, &root.join(".singularrag/map.toml")),
-            "a hand edit to map.toml must produce a refresh (C1)"
+            !interesting(&ws, &ws.dir.join("unrelated.txt")),
+            "the workspace dir is not a root"
         );
-        assert!(!interesting(root, &root.join(".singularrag/index.db")));
-        assert!(!interesting(root, &root.join(".singularrag/index.db-wal")));
-        assert!(!interesting(root, &root.join(".singularrag/map.toml.tmp")));
-        assert!(!interesting(root, &root.join(".git/HEAD")));
     }
 
     #[tokio::test]
@@ -201,7 +225,7 @@ mod tests {
             !seen[1].index_version.is_empty(),
             "the payload is a full status"
         );
-        assert_eq!(seen[1].files.indexed, 4);
+        assert_eq!(seen[1].files.indexed, 5, "four .ts files and README.md");
         assert!(seen[1].indexed_at_ms.is_some());
     }
 

@@ -16,6 +16,13 @@ pub enum Language {
     Tsx,
     JavaScript,
     Rust,
+    Markdown,
+    Html,
+    Css,
+    Json,
+    Yaml,
+    Toml,
+    Text,
 }
 
 impl Language {
@@ -26,6 +33,13 @@ impl Language {
             "tsx" => Some(Language::Tsx),
             "js" | "mjs" | "cjs" | "jsx" => Some(Language::JavaScript),
             "rs" => Some(Language::Rust),
+            "md" | "markdown" => Some(Language::Markdown),
+            "html" | "htm" => Some(Language::Html),
+            "css" => Some(Language::Css),
+            "json" => Some(Language::Json),
+            "yaml" | "yml" => Some(Language::Yaml),
+            "toml" => Some(Language::Toml),
+            "txt" => Some(Language::Text),
             _ => None,
         }
     }
@@ -36,7 +50,27 @@ impl Language {
             Language::Tsx => "tsx",
             Language::JavaScript => "javascript",
             Language::Rust => "rust",
+            Language::Markdown => "markdown",
+            Language::Html => "html",
+            Language::Css => "css",
+            Language::Json => "json",
+            Language::Yaml => "yaml",
+            Language::Toml => "toml",
+            Language::Text => "text",
         }
+    }
+
+    pub fn is_document(self) -> bool {
+        matches!(
+            self,
+            Language::Markdown
+                | Language::Html
+                | Language::Css
+                | Language::Json
+                | Language::Yaml
+                | Language::Toml
+                | Language::Text
+        )
     }
 }
 
@@ -89,6 +123,7 @@ fn make_config(lang: Language) -> Result<TagsConfiguration> {
             format!("{}\n{}", tree_sitter_rust::TAGS_QUERY, RUST_CALLS),
             "",
         ),
+        _ => return Err(Error::Tags(format!("{lang:?} has no tags query"))),
     };
     TagsConfiguration::new(language, &tags, locals)
         .map_err(|e| Error::Tags(format!("{lang:?}: {e:?}")))
@@ -221,6 +256,9 @@ fn line_of(source: &str, byte_offset: usize) -> u32 {
 }
 
 pub fn extract_tags(lang: Language, source: &str) -> Result<Vec<Tag>> {
+    if lang.is_document() {
+        return Ok(crate::doc::extract(lang, source, "")?.tags);
+    }
     CONFIGS.with(|configs| {
         let mut configs = configs.borrow_mut();
         let config = match configs.entry(lang) {
@@ -287,7 +325,11 @@ export class SessionStore {
         assert_eq!(Language::from_path("src/a.js"), Some(Language::JavaScript));
         assert_eq!(Language::from_path("src/a.mjs"), Some(Language::JavaScript));
         assert_eq!(Language::from_path("src/a.rs"), Some(Language::Rust));
-        assert_eq!(Language::from_path("README.md"), None);
+        assert_eq!(Language::from_path("README.md"), Some(Language::Markdown));
+        assert_eq!(Language::from_path("a/b.yml"), Some(Language::Yaml));
+        assert_eq!(Language::from_path("x.htm"), Some(Language::Html));
+        assert_eq!(Language::from_path("notes.txt"), Some(Language::Text));
+        assert!(Language::Markdown.is_document() && !Language::Rust.is_document());
     }
 
     #[test]

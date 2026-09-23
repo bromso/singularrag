@@ -40,9 +40,10 @@ fn build_denyset(deny: &[String]) -> Result<GlobSet> {
     b.build().map_err(|e| Error::Config(e.to_string()))
 }
 
-/// Walk `root`. Files ignored by `.gitignore` are silently absent; files hit by the
-/// denylist or resolving outside `root` are returned in `skipped` with a reason.
-pub fn walk(root: &Path, deny: &[String]) -> Result<WalkResult> {
+/// Walk one root; `prefix` (`""` or `"<name>/"`) is prepended to every relative path.
+/// Files ignored by `.gitignore` are silently absent; files hit by the denylist or
+/// resolving outside `root` are returned in `skipped` with a reason.
+pub fn walk_root(root: &Path, prefix: &str, deny: &[String]) -> Result<WalkResult> {
     let root = root.canonicalize()?;
     let denyset = build_denyset(deny)?;
     let mut out = WalkResult::default();
@@ -80,7 +81,7 @@ pub fn walk(root: &Path, deny: &[String]) -> Result<WalkResult> {
         };
         if !resolved.starts_with(&root) {
             out.skipped.push(Skipped {
-                rel_path: rel,
+                rel_path: format!("{prefix}{rel}"),
                 reason: "outside-root",
             });
             continue;
@@ -94,7 +95,7 @@ pub fn walk(root: &Path, deny: &[String]) -> Result<WalkResult> {
         }
         if denyset.is_match(&rel) {
             out.skipped.push(Skipped {
-                rel_path: rel,
+                rel_path: format!("{prefix}{rel}"),
                 reason: "denylisted",
             });
             continue;
@@ -106,11 +107,28 @@ pub fn walk(root: &Path, deny: &[String]) -> Result<WalkResult> {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         out.entries.push(WalkEntry {
-            rel_path: rel,
+            rel_path: format!("{prefix}{rel}"),
             abs_path: resolved,
             mtime_ms,
             size: meta.len(),
         });
+    }
+    out.entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(out)
+}
+
+/// The single-root walk, kept for callers and tests that have only a directory.
+pub fn walk(root: &Path, deny: &[String]) -> Result<WalkResult> {
+    walk_root(root, "", deny)
+}
+
+/// Every root of the workspace, concatenated and sorted by prefixed path.
+pub fn walk_workspace(ws: &crate::workspace::Workspace, deny: &[String]) -> Result<WalkResult> {
+    let mut out = WalkResult::default();
+    for r in &ws.roots {
+        let one = walk_root(&r.path, &ws.prefix(r), deny)?;
+        out.entries.extend(one.entries);
+        out.skipped.extend(one.skipped);
     }
     out.entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(out)
@@ -179,5 +197,27 @@ mod tests {
         let r = walk(dir.path(), &["*.snap".to_string()]).unwrap();
         assert_eq!(r.entries.len(), 1);
         assert_eq!(r.skipped[0].rel_path, "a.snap");
+    }
+
+    #[test]
+    fn walk_workspace_prefixes_named_roots_and_sorts() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".singularrag")).unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        write(a.path(), "src/z.ts", "");
+        write(b.path(), "n.md", "");
+        std::fs::write(
+            d.path().join(crate::workspace::WORKSPACE_FILE),
+            format!("[[root]]\nname = \"app\"\npath = \"{}\"\n[[root]]\nname = \"vault\"\npath = \"{}\"\n", a.path().display(), b.path().display()),
+        )
+        .unwrap();
+        let ws = crate::workspace::Workspace::open(d.path()).unwrap();
+        let r = walk_workspace(&ws, &[]).unwrap();
+        let paths: Vec<&str> = r.entries.iter().map(|e| e.rel_path.as_str()).collect();
+        assert_eq!(paths, vec!["app/src/z.ts", "vault/n.md"]);
+        let single =
+            walk_workspace(&crate::workspace::Workspace::single(a.path()).unwrap(), &[]).unwrap();
+        assert_eq!(single.entries[0].rel_path, "src/z.ts");
     }
 }

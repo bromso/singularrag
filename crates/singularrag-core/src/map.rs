@@ -126,6 +126,7 @@ pub fn fit(items: &[ScoredSymbol], budget: usize, notes: &[Note]) -> usize {
 pub fn freshness_header(index_version: &str, git_head: Option<&str>, stale: usize) -> String {
     let idx: String = index_version.chars().take(6).collect();
     let head = match git_head {
+        Some(h) if h.contains(':') => h.to_string(),
         Some(h) if !h.is_empty() => h.chars().take(7).collect::<String>(),
         _ => "none".to_string(),
     };
@@ -313,5 +314,36 @@ mod tests {
         assert_eq!(clamp_budget(0), MIN_BUDGET);
         assert_eq!(clamp_budget(1024), 1024);
         assert_eq!(clamp_budget(1_000_000), MAX_BUDGET);
+    }
+
+    #[test]
+    fn a_section_renders_under_its_document_with_its_heading_line() {
+        let s = ScoredSymbol {
+            symbol_id: 1,
+            file_id: 1,
+            path: "docs/design.md".into(),
+            name: "Freshness".into(),
+            kind: "section".into(),
+            line_start: 5,
+            line_end: 8,
+            signature: "## Freshness".into(),
+            score: 1.0,
+            reasons: Reasons::default(),
+        };
+        assert_eq!(
+            render(&[s], 1, &[]),
+            "docs/design.md:\n    5  ## Freshness\n"
+        );
+    }
+
+    #[test]
+    fn freshness_header_keeps_a_composed_multi_root_head_whole() {
+        let h = freshness_header("abcdef123", Some("app:9b1e0d4 notes:none"), 0);
+        assert_eq!(
+            h,
+            "# singularrag · index abcdef · HEAD app:9b1e0d4 notes:none · fresh"
+        );
+        let single = freshness_header("abcdef123", Some("9b1e0d4f00"), 2);
+        assert!(single.contains("HEAD 9b1e0d4 ·"), "{single}");
     }
 }

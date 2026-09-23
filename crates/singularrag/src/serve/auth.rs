@@ -91,7 +91,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         singularrag_core::fixture::write_ts_mini(dir.path());
         singularrag_core::store::Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 4173).unwrap();
+        let (state, _handle) = crate::serve::state::test_state(dir.path(), 4173);
         let token = state.token.to_string();
         std::mem::forget(dir);
         (crate::serve::router(state), token)
