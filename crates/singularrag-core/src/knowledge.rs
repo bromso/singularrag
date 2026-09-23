@@ -439,11 +439,117 @@ struct ToEmbed {
     symbol_id: i64,
     hash: String,
     body: String,
-    vector: Option<Vec<f32>>,
 }
 
-/// Queued sections without a vector, up to `EMBED_PER_TICK`: cache hits by hash, the misses
-/// in one model call. Returns `false` when a model outage or a dimension rebuild ended the tick.
+/// What a model answering in a different dimension than the index holds means to the caller.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnNewDim {
+    /// The tick: rebuild (clear the vectors, re-queue every section) and end the tick.
+    Rebuild,
+    /// A load: stop with `ModelUnavailable` and write nothing, so what earlier sections
+    /// wrote survives.
+    Refuse,
+}
+
+/// The section-embedding write the tick and the extraction loader share. Vectors for
+/// `items` come from the embedding cache (by hash, at the index's dimension); the misses
+/// and the `extra` texts go to the model in one call. The first vectors ever create the
+/// tables. A different dimension is handled as `on_new_dim` says; otherwise `section_vec`,
+/// `section_embeddings` and `embedding_cache` are written for every item in one
+/// transaction (and a queue row's empty rebuild hash is filled in). Returns the vectors
+/// for `extra`, in order, or `None` when a rebuild ended the step. A model outage is an
+/// `Err(ModelUnavailable)` with nothing written.
+fn embed_sections(
+    store: &Store,
+    models: &Models,
+    items: &[ToEmbed],
+    extra: &[String],
+    on_new_dim: OnNewDim,
+) -> Result<Option<Vec<Vec<f32>>>> {
+    let conn = store.conn();
+    let dim_before = vec::dim(store)?;
+    let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(items.len());
+    for it in items {
+        let cached: Option<(i64, Vec<u8>)> = conn
+            .query_row(
+                "SELECT dim, blob FROM embedding_cache WHERE hash = ?1",
+                [&it.hash],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        vectors.push(
+            cached
+                .filter(|(d, _)| dim_before == Some(*d as usize))
+                .map(|(_, b)| vec::from_blob(&b)),
+        );
+    }
+
+    let misses: Vec<usize> = (0..items.len()).filter(|&i| vectors[i].is_none()).collect();
+    let mut extra_vectors = Vec::new();
+    if misses.is_empty() && extra.is_empty() {
+        if let Some(d) = dim_before {
+            vec::ensure_tables(store, d)?;
+        }
+    } else {
+        let texts: Vec<String> = misses
+            .iter()
+            .map(|&i| items[i].body.clone())
+            .chain(extra.iter().cloned())
+            .collect();
+        let mut answered = models.embed(&texts)?;
+        if answered.len() != texts.len() {
+            return Err(Error::ModelUnavailable(format!(
+                "embed: {} vectors for {} texts",
+                answered.len(),
+                texts.len()
+            )));
+        }
+        let d = answered.first().map_or(0, Vec::len);
+        if d == 0 {
+            return Err(Error::ModelUnavailable("embed: empty vector".to_string()));
+        }
+        if let Some(before) = dim_before.filter(|&b| b != d) {
+            return match on_new_dim {
+                OnNewDim::Rebuild => {
+                    vec::ensure_tables(store, d)?;
+                    Ok(None)
+                }
+                OnNewDim::Refuse => Err(Error::ModelUnavailable(format!(
+                    "embedding of {d} dims for a {before}-dim index"
+                ))),
+            };
+        }
+        // First vectors ever: this creates the tables; otherwise a cheap no-op.
+        vec::ensure_tables(store, d)?;
+        extra_vectors = answered.split_off(misses.len());
+        for (i, v) in misses.into_iter().zip(answered) {
+            vectors[i] = Some(v);
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    for (it, v) in items.iter().zip(&vectors) {
+        let Some(v) = v else { continue };
+        vec::insert(store, "section_vec", it.symbol_id, v)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO section_embeddings(symbol_id, hash) VALUES (?1, ?2)",
+            params![it.symbol_id, it.hash],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO embedding_cache(hash, dim, blob) VALUES (?1, ?2, ?3)",
+            params![it.hash, v.len() as i64, vec::to_blob(v)],
+        )?;
+        tx.execute(
+            "UPDATE extract_queue SET hash = ?2 WHERE symbol_id = ?1 AND hash = ''",
+            params![it.symbol_id, it.hash],
+        )?;
+    }
+    tx.commit()?;
+    Ok(Some(extra_vectors))
+}
+
+/// Queued sections without a vector, up to `EMBED_PER_TICK`, through `embed_sections`.
+/// Returns `false` when a model outage or a dimension rebuild ended the tick.
 fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<bool> {
     let conn = store.conn();
     let rows: Vec<(i64, String)> = {
@@ -458,7 +564,6 @@ fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<b
     if rows.is_empty() {
         return Ok(true);
     }
-    let dim_before = vec::dim(store)?;
     let mut items = Vec::with_capacity(rows.len());
     for (symbol_id, hash) in rows {
         let Some(body) = section_body(conn, symbol_id)? else {
@@ -474,84 +579,24 @@ fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<b
         } else {
             hash
         };
-        let cached: Option<(i64, Vec<u8>)> = conn
-            .query_row(
-                "SELECT dim, blob FROM embedding_cache WHERE hash = ?1",
-                [&hash],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let vector = cached
-            .filter(|(d, _)| dim_before == Some(*d as usize))
-            .map(|(_, b)| vec::from_blob(&b));
         items.push(ToEmbed {
             symbol_id,
             hash,
             body,
-            vector,
         });
     }
-
-    let misses: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].vector.is_none())
-        .collect();
-    if !misses.is_empty() {
-        let texts: Vec<String> = misses.iter().map(|&i| items[i].body.clone()).collect();
-        let vectors = match models.embed(&texts) {
-            Ok(v) => v,
-            Err(Error::ModelUnavailable(m)) => {
-                record_outage(store, t, m)?;
-                return Ok(false);
-            }
-            Err(e) => return Err(e),
-        };
-        let d = vectors.first().map_or(0, Vec::len);
-        if d == 0 {
-            record_outage(store, t, "embed: empty vector".to_string())?;
-            return Ok(false);
+    match embed_sections(store, models, &items, &[], OnNewDim::Rebuild) {
+        Ok(Some(_)) => {
+            t.embedded += items.len();
+            Ok(true)
         }
-        if dimension_changed(store, &vectors)? {
-            return Ok(false);
+        Ok(None) => Ok(false),
+        Err(Error::ModelUnavailable(m)) => {
+            record_outage(store, t, m)?;
+            Ok(false)
         }
-        // First vectors ever: this creates the tables; otherwise a cheap no-op.
-        vec::ensure_tables(store, d)?;
-        for (i, v) in misses.into_iter().zip(vectors) {
-            items[i].vector = Some(v);
-        }
-    } else if let Some(d) = dim_before {
-        vec::ensure_tables(store, d)?;
+        Err(e) => Err(e),
     }
-
-    let tx = conn.unchecked_transaction()?;
-    let mut embedded = 0;
-    for it in &items {
-        let Some(v) = &it.vector else { continue };
-        match vec::insert(store, "section_vec", it.symbol_id, v) {
-            Ok(()) => {}
-            Err(Error::ModelUnavailable(m)) => {
-                drop(tx);
-                record_outage(store, t, m)?;
-                return Ok(false);
-            }
-            Err(e) => return Err(e),
-        }
-        tx.execute(
-            "INSERT OR REPLACE INTO section_embeddings(symbol_id, hash) VALUES (?1, ?2)",
-            params![it.symbol_id, it.hash],
-        )?;
-        tx.execute(
-            "INSERT OR REPLACE INTO embedding_cache(hash, dim, blob) VALUES (?1, ?2, ?3)",
-            params![it.hash, v.len() as i64, vec::to_blob(v)],
-        )?;
-        tx.execute(
-            "UPDATE extract_queue SET hash = ?2 WHERE symbol_id = ?1 AND hash = ''",
-            params![it.symbol_id, it.hash],
-        )?;
-        embedded += 1;
-    }
-    tx.commit()?;
-    t.embedded += embedded;
-    Ok(true)
 }
 
 /// Up to `EXTRACT_PER_TICK` embedded queue rows, oldest first, while `budget` lasts.
@@ -759,8 +804,8 @@ pub fn load_extraction_json(store: &Store, models: Option<&Models>, json: &str) 
     Ok(applied)
 }
 
-/// One model call for a loaded section: its body (written to `section_vec` and the embedding
-/// cache here) and the entity/relation texts `write_section` will look up.
+/// A loaded section's vector and those of its new entities and relations, through the
+/// tick's `embed_sections`; a dimension change stops the load instead of rebuilding.
 fn embed_loaded_section(
     store: &Store,
     models: &Models,
@@ -770,25 +815,13 @@ fn embed_loaded_section(
     x: &Extraction,
 ) -> Result<HashMap<String, Vec<f32>>> {
     let texts = vector_texts(store.conn(), x)?;
-    let mut all = Vec::with_capacity(texts.len() + 1);
-    all.push(body.to_string());
-    all.extend(texts.iter().cloned());
-    let mut vectors = models.embed(&all)?.into_iter();
-    let Some(section) = vectors.next().filter(|v| !v.is_empty()) else {
-        return Err(Error::ModelUnavailable("embed: empty vector".to_string()));
+    let item = ToEmbed {
+        symbol_id,
+        hash: hash.to_string(),
+        body: body.to_string(),
     };
-    vec::ensure_tables(store, section.len())?;
-    let tx = store.conn().unchecked_transaction()?;
-    vec::insert(store, "section_vec", symbol_id, &section)?;
-    tx.execute(
-        "INSERT OR REPLACE INTO section_embeddings(symbol_id, hash) VALUES (?1, ?2)",
-        params![symbol_id, hash],
-    )?;
-    tx.execute(
-        "INSERT OR REPLACE INTO embedding_cache(hash, dim, blob) VALUES (?1, ?2, ?3)",
-        params![hash, section.len() as i64, vec::to_blob(&section)],
-    )?;
-    tx.commit()?;
+    let vectors = embed_sections(store, models, &[item], &texts, OnNewDim::Refuse)?
+        .expect("Refuse never rebuilds");
     Ok(texts.into_iter().zip(vectors).collect())
 }
 
@@ -1778,6 +1811,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_dimension_change_mid_load_stops_the_load_and_keeps_what_was_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let all: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(include_str!("../fixtures/prose/extraction.json")).unwrap();
+        let (voyage, handbook): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|(k, _)| k.starts_with("docs/voyage.md::"));
+        let json = |part: Vec<(String, serde_json::Value)>| {
+            serde_json::Value::Object(part.into_iter().collect()).to_string()
+        };
+
+        let f8 = FakeOllama::spawn(8);
+        let n = load_extraction_json(&store, Some(&models(&f8)), &json(voyage)).unwrap();
+        assert_eq!(n, 5);
+        let entities = count(&store, "SELECT COUNT(*) FROM entities");
+        let relations = count(&store, "SELECT COUNT(*) FROM relations");
+        assert!(entities > 0 && relations > 0);
+
+        let f16 = FakeOllama::spawn(16);
+        let err = load_extraction_json(&store, Some(&models(&f16)), &json(handbook)).unwrap_err();
+        assert!(matches!(err, Error::ModelUnavailable(_)), "{err:?}");
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM entities"), entities);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM relations"), relations);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM section_vec"), 5);
+        assert_eq!(vec::dim(&store).unwrap(), Some(8), "no rebuild");
+        assert_eq!(
+            pending(&store).unwrap(),
+            5,
+            "the handbook sections stay queued"
+        );
+        assert!(store.get_meta("embeddings_rebuilding").unwrap().is_none());
     }
 
     #[test]
