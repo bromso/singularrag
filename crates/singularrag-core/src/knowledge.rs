@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{ExtractedEntity, Extraction, Models, SectionInput, DESCRIPTION_MAX};
-use crate::store::{vec, Store};
+use crate::store::{lock, vec, Store};
 use crate::time::now_ms;
 use crate::{Error, Result};
 
@@ -170,6 +170,8 @@ pub struct KnowledgeTick {
     pub pending: usize,
     /// The model outage that stopped the tick, if any.
     pub model_error: Option<String>,
+    /// Another process held the indexer lock, so this tick did nothing.
+    pub skipped_locked: bool,
 }
 
 /// `old` extended with `add` (joined with `; `, capped at `DESCRIPTION_MAX` characters)
@@ -413,10 +415,45 @@ fn clear_meta(store: &Store, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Holds the indexer lock for one tick and releases it on every exit path, unless this
+/// process already held it when the tick began (then its owner releases it).
+struct TickLock<'a> {
+    store: &'a Store,
+    pid: u32,
+    release: bool,
+}
+
+impl<'a> TickLock<'a> {
+    /// `None` when another live process holds the lock.
+    fn acquire(store: &'a Store) -> Result<Option<TickLock<'a>>> {
+        let pid = std::process::id();
+        let already = lock::holder(store)? == Some(pid);
+        if !lock::try_acquire(store, pid, now_ms())? {
+            return Ok(None);
+        }
+        Ok(Some(TickLock {
+            store,
+            pid,
+            release: !already,
+        }))
+    }
+}
+
+impl Drop for TickLock<'_> {
+    fn drop(&mut self) {
+        if self.release {
+            let _ = lock::release(self.store, self.pid);
+        }
+    }
+}
+
 /// One background step: embed queued sections, then extract some under `budget`.
 /// A model outage never escapes as an error: it lands in `model_error` and in meta
 /// `models_error`, and the tick stops there. `should_yield` is asked before the embed
 /// batch and before each extraction: `true` (a job is waiting) ends the tick there.
+/// The tick runs under the indexer lock, so two processes on one index never do the
+/// same model work; when another process holds it the tick does nothing and says so
+/// in `skipped_locked`.
 pub fn tick(
     store: &Store,
     models: &Models,
@@ -430,6 +467,11 @@ pub fn tick(
         t.pending = pending(store)?;
         return Ok(t);
     }
+    let Some(_lock) = TickLock::acquire(store)? else {
+        t.skipped_locked = true;
+        t.pending = pending(store)?;
+        return Ok(t);
+    };
     if let Some(d) = swapped_model_dim(store, models)? {
         // A different embedding model at any dimension: the same rebuild a dimension change
         // does, before anything is embedded. The next ticks re-embed with the new model.
@@ -651,6 +693,8 @@ fn extract_step(
         if start.elapsed() >= budget || should_yield() {
             break;
         }
+        // One extraction can outlast `LOCK_STALE_MS`; keep the tick's lock fresh between them.
+        lock::heartbeat(store, std::process::id(), now_ms())?;
         let Some(body) = section_body(conn, symbol_id)? else {
             conn.execute(
                 "DELETE FROM extract_queue WHERE symbol_id = ?1",
@@ -1619,6 +1663,29 @@ mod tests {
         })
         .unwrap();
         assert!(t.embedded > 0 && t.extracted == 1, "{t:?}");
+    }
+
+    #[test]
+    fn a_tick_does_nothing_while_another_process_holds_the_lock() {
+        use crate::store::lock;
+        let (_d, store) = indexed_docs();
+        let f = FakeOllama::spawn(8);
+        let m = models(&f);
+        let before = pending(&store).unwrap();
+        let other = std::process::id().wrapping_add(1);
+        assert!(lock::try_acquire(&store, other, now_ms()).unwrap());
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
+        assert!(f.calls().is_empty(), "no model call: {:?}", f.calls());
+        assert_eq!(t.pending, before, "{t:?}");
+        assert_eq!(t.embedded + t.extracted, 0, "{t:?}");
+        assert!(t.skipped_locked, "{t:?}");
+        lock::release(&store, other).unwrap();
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
+        assert!(t.embedded > 0 && t.extracted > 0, "{t:?}");
+        assert!(
+            lock::try_acquire(&store, other, now_ms()).unwrap(),
+            "the tick released the lock"
+        );
     }
 
     #[test]
