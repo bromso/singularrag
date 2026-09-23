@@ -710,6 +710,13 @@ mod tests {
             .find(|s| s.path == "docs/design.md" && s.name == "Freshness")
             .unwrap();
         assert!(fresh.reasons.body_hit, "{fresh:?}");
+        // No symbol in docs/design.md has a name-based FTS hit for this query, so this
+        // seed can only come from the body hit: a body-only hit still seeds its file.
+        assert!(
+            fresh.reasons.seeds.iter().any(|s| s.starts_with("query:")),
+            "{:?}",
+            fresh.reasons.seeds
+        );
         let sess = ranked.iter().find(|s| s.name == "createSession").unwrap();
         assert!(!sess.reasons.body_hit);
     }
