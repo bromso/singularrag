@@ -230,3 +230,28 @@ fn readme_mcp_json_snippet_is_valid_and_points_at_the_mcp_subcommand() {
         serde_json::json!(["mcp"])
     );
 }
+
+#[test]
+fn init_writes_the_claude_files() {
+    let dir = fixture();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "init",
+            "--host",
+            "claude",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("wrote .claude/settings.local.json")
+                .and(predicate::str::contains("wrote .mcp.json")),
+        );
+    let s = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+    assert!(
+        s.contains("hook read") && s.contains("mcp__singularrag__repo_map"),
+        "{s}"
+    );
+}

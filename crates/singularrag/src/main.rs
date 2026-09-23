@@ -9,6 +9,7 @@ use singularrag_core::map::DEFAULT_BUDGET;
 
 mod actor;
 mod hook;
+mod init;
 mod mcp;
 mod serve;
 
@@ -88,6 +89,14 @@ enum Cmd {
         #[arg(value_enum)]
         event: hook::HookEvent,
     },
+    /// Install the query-first hook and the MCP entry for this repo
+    Init {
+        /// Write .claude/settings.json (shared) instead of .claude/settings.local.json
+        #[arg(long)]
+        project: bool,
+        #[arg(long, value_enum, default_value_t = init::Host::All)]
+        host: init::Host,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -107,6 +116,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let root = cli.repo.unwrap_or(std::env::current_dir()?);
+    if let Cmd::Init { project, host } = cli.cmd {
+        let bin = std::env::current_exe()?;
+        print!("{}", init::run(&root, project, host, &bin)?);
+        return Ok(());
+    }
     // `mcp` returns before the `Engine::open` below, and must: the Engine is `!Sync` and
     // belongs to the actor thread, which opens it lazily at the first job with a session
     // key derived from the client name that MCP `initialize` delivers (spec §2). Opening
@@ -185,6 +199,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Mcp { .. } => unreachable!("handled above before Engine::open"),
         Cmd::Serve { .. } => unreachable!("handled above before Engine::open"),
         Cmd::Hook { .. } => unreachable!("handled above before Engine::open"),
+        Cmd::Init { .. } => unreachable!("handled above before Engine::open"),
     }
     Ok(())
 }
