@@ -1,6 +1,6 @@
 /// Bumped whenever the DDL below changes. The index is derived data: on a mismatch
 /// `Store::init` drops every table and rebuilds from scratch.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -38,6 +38,9 @@ CREATE INDEX IF NOT EXISTS refs_name ON refs(name);
 CREATE INDEX IF NOT EXISTS refs_file ON refs(file_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
   name, name_tokens, signature, path, tokenize='porter unicode61'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(
+  path UNINDEXED, name UNINDEXED, content, tokenize='porter unicode61'
 );
 CREATE TABLE IF NOT EXISTS retrievals (
   id            INTEGER PRIMARY KEY,

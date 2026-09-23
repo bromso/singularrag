@@ -194,15 +194,12 @@ mod tests {
     #[test]
     fn hook_denies_a_read_in_a_second_root() {
         let d = tempfile::tempdir().unwrap();
-        let (app, _notes) = singularrag_core::fixture::write_workspace(d.path());
+        let (_app, notes) = singularrag_core::fixture::write_workspace(d.path());
         let mut e = singularrag_core::engine::Engine::open(d.path(), "hook-test").unwrap();
         e.refresh(std::time::Duration::from_secs(60)).unwrap();
         let session = format!("ws-{}", std::process::id());
         let _ = std::fs::remove_dir_all(marker_dir(&session));
-        // Task 5 switches this to `notes.join("README.md")` once Markdown is indexed;
-        // until then README.md has no `files` row with skipped_reason NULL, so a read
-        // of it would never be denied.
-        let file = app.join("src/auth/session.ts").display().to_string();
+        let file = notes.join("README.md").display().to_string();
         let first = run(
             HookEvent::Read,
             Some(d.path().to_path_buf()),
