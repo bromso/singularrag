@@ -57,7 +57,10 @@ export function EntityList({ entities, onFocusEntity }: { entities: EntitiesPayl
       <ul aria-labelledby="entity-list-heading" className="mt-1 flex flex-col items-start gap-1">
         {top.map((e) => (
           <li key={e.id}>
-            <Button type="button" variant="link" size="sm" className="h-auto px-0 text-foreground" onClick={() => onFocusEntity(e.id)}>{entityAccessibleName(e)}</Button>
+            {/* The description the map's hover box shows, as visible text here too, so the
+                keyboard path carries no less than the mouse path. */}
+            <Button type="button" variant="link" size="sm" className="h-auto px-0 text-foreground" aria-describedby={e.description ? `entity-desc-${e.id}` : undefined} onClick={() => onFocusEntity(e.id)}>{entityAccessibleName(e)}</Button>
+            {e.description && <p id={`entity-desc-${e.id}`} className="text-xs text-muted-foreground">{e.description}</p>}
           </li>
         ))}
       </ul>

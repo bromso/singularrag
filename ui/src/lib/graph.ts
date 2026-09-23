@@ -31,6 +31,22 @@ export function buildGraph(payload: GraphPayload, entities?: EntitiesPayload | n
   return g;
 }
 
+/** The overlay under a selected root (`""` is all roots, returned as is): an entity stays if
+ *  any mention's path has the root as its first segment; its mentions keep only those under
+ *  the root; a relation stays only when both of its ends do. */
+export function filterEntitiesToRoot(p: EntitiesPayload, root: string): EntitiesPayload {
+  if (!root) return p;
+  const under = (path: string) => path.split("/")[0] === root;
+  const mentions = p.mentions.filter((m) => under(m.path));
+  const kept = new Set(mentions.map((m) => m.entity_id));
+  return {
+    ...p,
+    entities: p.entities.filter((e) => kept.has(e.id)),
+    relations: p.relations.filter((r) => kept.has(r.src) && kept.has(r.dst)),
+    mentions,
+  };
+}
+
 function addEntities(g: Graph, { entities, relations, mentions }: EntitiesPayload) {
   for (const e of entities) {
     g.addNode(entityKey(e.id), { kind: "entity", entityId: e.id, label: e.name, entityType: e.type, mentions: e.mentions, description: e.description, x: 0, y: 0, size: 1 });

@@ -3,6 +3,7 @@ import { Toaster, toast } from "sonner";
 import { ApiError, api, setToken, tokenFromFragment } from "@/api/client";
 import { subscribe } from "@/api/events";
 import type { BlastResult, EntitiesPayload, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
+import { filterEntitiesToRoot } from "@/lib/graph";
 import { joinRetrieval } from "@/lib/join";
 import { addToBoundary, boundariesOf, noteFor, removeAgentNote, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
 import { fileStatusOf } from "@/lib/mapStyle";
@@ -276,7 +277,8 @@ export function App() {
     served: rows.filter((r) => graphPaths.has(r.path) && fileStatusOf(r, true) === "served").length,
     cut: rows.filter((r) => graphPaths.has(r.path) && fileStatusOf(r, true) === "cut").length,
   }), [rows, graphPaths]);
-  const mapEntities = overlay === "entities" ? entities : null;
+  // The overlay follows the root filter, as the file nodes do.
+  const mapEntities = useMemo(() => (overlay === "entities" && entities ? filterEntitiesToRoot(entities, root) : null), [overlay, entities, root]);
   const mapLabel = summaryLabel(filteredGraph?.nodes.length ?? 0, detail ? { id: detail.id, ...fileCounts } : null, map.boundary.length, mapEntities?.entities.length);
 
   // Sorted-path JSON, so add-then-remove-in-a-different-order still reads as unchanged.

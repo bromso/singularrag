@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { applyPositions, buildGraph, layoutCacheKey, layoutGraph, loadLayout, saveLayout, separateCoincident } from "./graph";
+import { applyPositions, buildGraph, filterEntitiesToRoot, layoutCacheKey, layoutGraph, loadLayout, saveLayout, separateCoincident } from "./graph";
 import type { EntitiesPayload, GraphPayload } from "@/api/types";
 
 const payload: GraphPayload = {
@@ -56,6 +56,35 @@ describe("buildGraph with entities", () => {
     const g = buildGraph(docs);
     expect(g.order).toBe(2);
     expect(g.nodes().some((n) => n.startsWith("entity:"))).toBe(false);
+  });
+});
+
+describe("filterEntitiesToRoot", () => {
+  const two: EntitiesPayload = {
+    entities: [
+      { id: 1, name: "Ada", type: "person", description: "", mentions: 1 },
+      { id: 2, name: "Engine", type: "system", description: "", mentions: 1 },
+    ],
+    relations: [{ id: 5, src: 1, dst: 2, description: "maintains", symbol_id: 7, path: "a/doc.md", name: "Intro" }],
+    mentions: [
+      { entity_id: 1, symbol_id: 7, path: "a/doc.md", name: "Intro" },
+      { entity_id: 2, symbol_id: 8, path: "b/doc.md", name: "Other" },
+    ],
+    truncated: false,
+  };
+  test("a root keeps entities mentioned under it, and relations only when both ends remain", () => {
+    const f = filterEntitiesToRoot(two, "a");
+    expect(f.entities.map((e) => e.id)).toEqual([1]);
+    expect(f.relations).toEqual([]);
+    expect(f.mentions.map((m) => m.entity_id)).toEqual([1]);
+  });
+  test("a root matches the first path segment exactly, not a prefix of it", () => {
+    expect(filterEntitiesToRoot(two, "").entities).toHaveLength(2);
+    const ab: EntitiesPayload = { ...two, mentions: [{ entity_id: 1, symbol_id: 7, path: "ab/doc.md", name: "Intro" }] };
+    expect(filterEntitiesToRoot(ab, "a").entities).toEqual([]);
+  });
+  test("no root keeps everything, as the same object", () => {
+    expect(filterEntitiesToRoot(two, "")).toBe(two);
   });
 });
 

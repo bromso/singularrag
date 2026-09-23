@@ -20,6 +20,8 @@ const entitiesFixture = {
 };
 // Merged into every `GET /api/status` answer; a test can set knowledge-status flags.
 let statusExtra: Record<string, unknown> = {};
+// When set, `GET /api/entities` answers with it instead of `entitiesFixture`.
+let entitiesOverride: unknown = null;
 let saved: any = null;
 let mapState: any = null;
 // What `GET /api/retrievals` answers; a test can push to it before firing a change event.
@@ -91,6 +93,7 @@ beforeEach(() => {
   treeOverride = null;
   statusGates = null;
   statusExtra = {};
+  entitiesOverride = null;
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
@@ -117,7 +120,7 @@ beforeEach(() => {
     if (url.includes("/api/retrievals?")) return json(retrievalList);
     if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [...detailItems, ...extraRetrievalItems] });
     if (url.endsWith("/api/tree")) return json(treeOverride ?? tree);
-    if (url.endsWith("/api/entities")) return json(entitiesFixture);
+    if (url.endsWith("/api/entities")) return json(entitiesOverride ?? entitiesFixture);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
     // GET /api/map returns a fresh object (new identity) each call, reflecting
     // whatever was last PUT — this both matches how the real server behaves
@@ -770,5 +773,41 @@ describe("App", () => {
     expect(rels.textContent).toBe("Ada Lovelace → Analytical Engine: programmed");
     await user.click(within(ents).getByRole("button", { name: "Ada Lovelace (person)" }));
     expect(within(panel).getByRole("heading", { name: "Ada Lovelace" })).toBeTruthy();
+  });
+
+  test("the empty panel's entity buttons carry the description as visible text and as their description", async () => {
+    render(<App />);
+    const panel = await screen.findByRole("region", { name: "Details" });
+    const list = await within(panel).findByRole("list", { name: "Entities" });
+    const button = within(list).getByRole("button", { name: /^Ada Lovelace/ });
+    const id = button.getAttribute("aria-describedby");
+    expect(id).toBeTruthy();
+    expect(document.getElementById(id!)?.textContent).toBe("Wrote the first program.");
+    expect(within(list).getByText("Wrote the first program.")).toBeTruthy();
+  });
+
+  test("with a root selected the entity overlay keeps only that root's entities, and the label counts them", async () => {
+    statusRootsOverride = [{ name: "app", path: "/repo/app", git_head: "9b1e0d4f" }, { name: "notes", path: "/repo/notes", git_head: "9b1e0d4f" }];
+    treeOverride = [
+      { path: "app/src/a.ts", lang: "typescript", skipped_reason: null, symbols: [{ id: 20, name: "a", kind: "function", line_start: 1, line_end: 2, signature: "a()" }] },
+      { path: "notes/n.md", lang: "markdown", skipped_reason: null, symbols: [{ id: 21, name: "N", kind: "section", line_start: 1, line_end: 2, signature: "# N" }] },
+    ];
+    entitiesOverride = {
+      entities: [{ id: 1, name: "Ada", type: "person", description: "", mentions: 1 }, { id: 2, name: "Engine", type: "system", description: "", mentions: 1 }],
+      relations: [{ id: 1, src: 1, dst: 2, description: "maintains", symbol_id: 21, path: "notes/n.md", name: "N" }],
+      mentions: [{ entity_id: 1, symbol_id: 21, path: "notes/n.md", name: "N" }, { entity_id: 2, symbol_id: 20, path: "app/src/a.ts", name: "a" }],
+      truncated: false,
+    };
+    localStorage.setItem("singularrag.overlay", "entities");
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("app/src/a.ts");
+    await user.click(screen.getByRole("radio", { name: "Map" }));
+    expect(await screen.findByRole("img", { name: /^Map of 2 files and 2 entities\./ })).toBeTruthy();
+    await user.selectOptions(screen.getByLabelText("Root"), "notes");
+    expect(await screen.findByRole("img", { name: /^Map of 1 file and 1 entity\./ })).toBeTruthy();
+    const s = (globalThis as any).__sigma.instances.at(-1);
+    expect(s.graph.hasNode("entity:1")).toBe(true);
+    expect(s.graph.hasNode("entity:2")).toBe(false);
   });
 });

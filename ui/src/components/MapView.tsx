@@ -4,7 +4,7 @@ import { createNodeBorderProgram } from "@sigma/node-border";
 import type Graph from "graphology";
 import { Button } from "@/components/ui/button";
 import type { BlastResult, Boundary, EntitiesPayload, GraphPayload } from "@/api/types";
-import { entityAccessibleName } from "@/lib/entities";
+import { entityAccessibleName, hoverLines } from "@/lib/entities";
 import type { FileRow } from "@/lib/join";
 import { applyPositions, buildGraph, entityKey, layoutGraph, loadLayout, saveLayout, type Positions } from "@/lib/graph";
 import { convexHull, padHull } from "@/lib/hull";
@@ -33,17 +33,19 @@ function useLatest<T>(v: T) { const r = useRef(v); r.current = v; return r; }
  *  and the label size) but fill it from the theme palette. Reads `palRef.current` so a
  *  `prefers-color-scheme` change updates it without reinstalling the setting. */
 function hoverDrawer(palRef: { current: Palette | null }) {
-  return (context: CanvasRenderingContext2D, data: { x: number; y: number; size: number; label?: string | null }, settings: { labelSize: number; labelFont: string; labelWeight: string }) => {
+  return (context: CanvasRenderingContext2D, data: { x: number; y: number; size: number; label?: string | null; kind?: unknown; description?: unknown }, settings: { labelSize: number; labelFont: string; labelWeight: string }) => {
     const pal = palRef.current;
-    if (!pal || typeof data.label !== "string") return;
+    // An entity's description goes under its name (`hoverLines`); a file draws its label alone.
+    const lines = hoverLines(data);
+    if (!pal || lines.length === 0) return;
     const size = settings.labelSize, font = settings.labelFont, weight = settings.labelWeight;
     context.font = `${weight} ${size}px ${font}`;
-    const PADDING = 3;
-    const textWidth = context.measureText(data.label).width;
+    const PADDING = 3, LEADING = size + 2;
+    const textWidth = Math.max(...lines.map((l) => context.measureText(l).width));
     const x = data.x + data.size + 3 - PADDING;
     const boxWidth = Math.round(textWidth + PADDING * 2);
-    const boxHeight = Math.round(size + PADDING * 2);
-    const y = data.y - boxHeight / 2;
+    const boxHeight = Math.round(size + PADDING * 2 + (lines.length - 1) * LEADING);
+    const y = data.y - Math.round(size + PADDING * 2) / 2;
     context.fillStyle = pal.background;
     const rc = context as CanvasRenderingContext2D & { roundRect?: (x: number, y: number, w: number, h: number, r: number) => void };
     if (typeof rc.roundRect === "function") {
@@ -54,7 +56,7 @@ function hoverDrawer(palRef: { current: Palette | null }) {
       context.fillRect(x, y, boxWidth, boxHeight);
     }
     context.fillStyle = pal.label;
-    context.fillText(data.label, data.x + data.size + 3, data.y + size / 3);
+    lines.forEach((l, i) => context.fillText(l, data.x + data.size + 3, data.y + size / 3 + i * LEADING));
   };
 }
 

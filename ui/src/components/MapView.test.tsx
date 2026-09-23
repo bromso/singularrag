@@ -49,6 +49,21 @@ describe("MapView entities", () => {
     // Every edge reduces without throwing, mention and relation alike.
     for (const e of s.graph.edges()) (s.settings.edgeReducer as any)(e, s.graph.getEdgeAttributes(e));
   });
+  test("hovering an entity draws its description under the name; a file draws only its label", async () => {
+    render(<MapView {...props()} entities={entities} />);
+    await act(async () => {});
+    const s = Fake.instances[0];
+    const reduce = s.settings.nodeReducer as any;
+    const draw = s.settings.defaultDrawNodeHover as (c: unknown, d: unknown, st: unknown) => void;
+    const drawn = (node: string) => {
+      const texts: string[] = [];
+      const ctx = { font: "", fillStyle: "", measureText: (t: string) => ({ width: t.length * 6 }), fillText: (t: string) => texts.push(t), fillRect() {}, beginPath() {}, fill() {}, roundRect() {} };
+      draw(ctx, { ...reduce(node, s.graph.getNodeAttributes(node)), x: 10, y: 10 }, { labelSize: 12, labelFont: "sans-serif", labelWeight: "normal" });
+      return texts;
+    };
+    expect(drawn("entity:1")).toEqual(["Ada", "Wrote it."]);
+    expect(drawn("src/a.ts")).toEqual(["src/a.ts"]);
+  });
   test("a focused entity is ringed", async () => {
     render(<MapView {...props()} entities={entities} focusedEntity={2} />);
     await act(async () => {});
