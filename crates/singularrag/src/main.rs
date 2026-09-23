@@ -212,19 +212,14 @@ fn main() -> anyhow::Result<()> {
             entity,
             limit,
         } => {
-            // A one-shot command has no background tick: index, then drain the knowledge
-            // queue here, stopping on a model outage or a tick that moved nothing.
+            // A one-shot command never extracts (knowledge spec §3: the background job runs
+            // only under serve and mcp); it answers from what is already extracted.
             engine.refresh(Duration::from_secs(600))?;
-            if engine.models().is_some() {
-                loop {
-                    let t = engine.knowledge_tick(&|| false)?;
-                    if t.pending == 0
-                        || t.model_error.is_some()
-                        || t.embedded + t.extracted + t.failed == 0
-                    {
-                        break;
-                    }
-                }
+            let pending = engine.extras()?.pending;
+            if pending > 0 {
+                eprintln!(
+                    "entities: {pending} sections not yet extracted; run singularrag serve or mcp to extract them"
+                );
             }
             let r = engine.entities(&EntitiesRequest {
                 query,

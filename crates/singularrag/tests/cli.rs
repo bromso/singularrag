@@ -584,20 +584,17 @@ fn doctor_reports_ollama_and_the_queue() {
 }
 
 #[test]
-fn entities_drains_the_queue_then_prints_the_block() {
+fn entities_answers_from_what_is_extracted_and_never_extracts() {
     let dir = tempfile::tempdir().unwrap();
     singularrag_core::fixture::write_docs_mini(dir.path());
     let f = singularrag_core::fake_ollama::FakeOllama::spawn(32);
-    f.set_extraction("Freshness", serde_json::json!({"entities": [{"name": "STALE header", "type": "concept", "description": "the header when files changed"}, {"name": "createSession", "type": "system", "description": "creates a session"}], "relations": [{"source": "STALE header", "target": "createSession", "description": "refresh runs before session creation"}]}));
-    f.set_extraction("Storage", serde_json::json!({"entities": [{"name": "SessionStore", "type": "system", "description": "keeps sessions"}, {"name": "createSession", "type": "system", "description": "creates a session"}], "relations": []}));
+    f.set_extraction("Freshness", serde_json::json!({"entities": [{"name": "STALE header", "type": "concept", "description": "the header when files changed"}], "relations": []}));
     Command::cargo_bin("singularrag")
         .unwrap()
         .env("SINGULARRAG_OLLAMA_URL", f.url())
         .args([
             "entities",
             "stale header",
-            "--entity",
-            "SessionStore",
             "--limit",
             "5",
             "--repo",
@@ -607,9 +604,21 @@ fn entities_drains_the_queue_then_prints_the_block() {
         .success()
         .stdout(
             predicate::str::starts_with("# singularrag · index ")
-                .and(predicate::str::contains("\nSessionStore (system): keeps sessions\n  ← docs/design.md::Storage (lines "))
-                .and(predicate::str::contains("\nSTALE header (concept): the header when files changed\n  ← docs/design.md::Freshness (lines "))
-                .and(predicate::str::contains("  STALE header → createSession: refresh runs before session creation (docs/design.md::Freshness, lines "))
-                .and(predicate::str::contains("pending").not()),
-        );
+                .and(predicate::str::contains("pending"))
+                .and(predicate::str::contains("STALE header").not()),
+        )
+        .stderr(predicate::str::is_match(
+            r"entities: [1-9][0-9]* sections not yet extracted; run singularrag serve or mcp to extract them",
+        ).unwrap());
+    let generate = f
+        .calls()
+        .iter()
+        .filter(|p| p.as_str() == "/api/generate")
+        .count();
+    assert_eq!(
+        generate,
+        0,
+        "the one-shot CLI never extracts: {:?}",
+        f.calls()
+    );
 }
