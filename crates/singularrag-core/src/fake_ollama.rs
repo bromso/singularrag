@@ -18,6 +18,7 @@ struct State {
     drop_next: AtomicUsize,
     accepted: AtomicUsize,
     down: AtomicBool,
+    generate_delay_ms: AtomicUsize,
     stop: AtomicBool,
 }
 
@@ -87,6 +88,13 @@ impl FakeOllama {
     /// Connections accepted so far, dropped ones included.
     pub fn accepted(&self) -> usize {
         self.state.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Every generate call sleeps this long before answering.
+    pub fn set_generate_delay(&self, delay: std::time::Duration) {
+        self.state
+            .generate_delay_ms
+            .store(delay.as_millis() as usize, Ordering::SeqCst);
     }
 
     pub fn set_down(&self, down: bool) {
@@ -161,6 +169,10 @@ fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
             json!({ "embeddings": vectors })
         }
         ("POST", "/api/generate") => {
+            let delay = st.generate_delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay as u64));
+            }
             if take_one(&st.fail_generate) {
                 json!({"response": "not json {"})
             } else {

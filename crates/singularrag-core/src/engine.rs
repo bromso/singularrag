@@ -203,11 +203,12 @@ impl Engine {
         self.models = std::cell::OnceCell::new();
     }
 
-    /// One background knowledge step under `KNOWLEDGE_TICK_BUDGET`. Without models it
-    /// reports the pending count and does nothing else.
-    pub fn knowledge_tick(&mut self) -> Result<KnowledgeTick> {
+    /// One background knowledge step under `KNOWLEDGE_TICK_BUDGET`, ending early when
+    /// `should_yield` says a job is waiting. Without models it reports the pending count
+    /// and does nothing else.
+    pub fn knowledge_tick(&mut self, should_yield: &dyn Fn() -> bool) -> Result<KnowledgeTick> {
         match self.models() {
-            Some(m) => knowledge::tick(&self.store, m, KNOWLEDGE_TICK_BUDGET),
+            Some(m) => knowledge::tick(&self.store, m, KNOWLEDGE_TICK_BUDGET, should_yield),
             None => Ok(KnowledgeTick {
                 pending: knowledge::pending(&self.store)?,
                 ..KnowledgeTick::default()
@@ -217,13 +218,23 @@ impl Engine {
 
     /// The knowledge layer's header segments: pending sections, a recorded model
     /// outage and an embedding rebuild in progress.
+    ///
+    /// An outage only matters while something waits for the models: with nothing
+    /// pending no tick will run to clear `models_error`, so it is cleared here.
     pub fn extras(&self) -> Result<Extras> {
+        let pending = knowledge::pending(&self.store)?;
+        let outage = self
+            .store
+            .get_meta("models_error")?
+            .is_some_and(|e| !e.is_empty());
+        if outage && pending == 0 {
+            self.store
+                .conn()
+                .execute("DELETE FROM meta WHERE key = 'models_error'", [])?;
+        }
         Ok(Extras {
-            pending: knowledge::pending(&self.store)?,
-            models_unavailable: self
-                .store
-                .get_meta("models_error")?
-                .is_some_and(|e| !e.is_empty()),
+            pending,
+            models_unavailable: outage && pending > 0,
             rebuilding: self.store.get_meta("embeddings_rebuilding")?.as_deref() == Some("1"),
         })
     }
@@ -816,6 +827,26 @@ mod tests {
 
     fn count(e: &Engine, sql: &str) -> i64 {
         e.store().conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_stale_outage_flag_clears_when_nothing_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.refresh(Duration::from_secs(60)).unwrap();
+        e.store()
+            .set_meta("models_error", "connection refused")
+            .unwrap();
+        assert!(e.extras().unwrap().models_unavailable);
+        e.store()
+            .conn()
+            .execute("DELETE FROM extract_queue", [])
+            .unwrap();
+        let r = e.repo_map(&MapRequest::default()).unwrap();
+        let first = r.text.lines().next().unwrap();
+        assert!(!first.contains("models: unavailable"), "{first}");
+        assert_eq!(e.store().get_meta("models_error").unwrap(), None);
     }
 
     #[test]

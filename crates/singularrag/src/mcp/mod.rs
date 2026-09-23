@@ -17,6 +17,7 @@ pub fn run(root: PathBuf, refresh_budget: Duration) -> anyhow::Result<()> {
         session_key: crate::actor::SessionKey::FromHandshake(Arc::clone(&session_key)),
         refresh_budget,
         models_url: None,
+        knowledge_idle: None,
     });
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -183,6 +183,7 @@ pub fn status(store: &Store, f: &Freshness, ws: &Workspace) -> Result<StatusDto>
             git_head: store.get_meta(&key)?.filter(|h| !h.is_empty()),
         });
     }
+    let entities_pending = singularrag_core::knowledge::pending(store)?;
     Ok(StatusDto {
         index_version: store.get_meta("index_version")?.unwrap_or_default(),
         git_head: store.get_meta("git_head")?.filter(|h| !h.is_empty()),
@@ -195,10 +196,12 @@ pub fn status(store: &Store, f: &Freshness, ws: &Workspace) -> Result<StatusDto>
         indexing: f.indexing,
         files: FileCounts { indexed, skipped },
         roots,
-        entities_pending: singularrag_core::knowledge::pending(store)?,
-        models_unavailable: store
-            .get_meta("models_error")?
-            .is_some_and(|e| !e.is_empty()),
+        entities_pending,
+        // Same rule as the header: an outage with nothing pending is not reported.
+        models_unavailable: entities_pending > 0
+            && store
+                .get_meta("models_error")?
+                .is_some_and(|e| !e.is_empty()),
         embeddings_rebuilding: store.get_meta("embeddings_rebuilding")?.as_deref() == Some("1"),
     })
 }

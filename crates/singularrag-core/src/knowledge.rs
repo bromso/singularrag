@@ -407,12 +407,23 @@ fn clear_meta(store: &Store, key: &str) -> Result<()> {
 
 /// One background step: embed queued sections, then extract some under `budget`.
 /// A model outage never escapes as an error: it lands in `model_error` and in meta
-/// `models_error`, and the tick stops there.
-pub fn tick(store: &Store, models: &Models, budget: Duration) -> Result<KnowledgeTick> {
+/// `models_error`, and the tick stops there. `should_yield` is asked before the embed
+/// batch and before each extraction: `true` (a job is waiting) ends the tick there.
+pub fn tick(
+    store: &Store,
+    models: &Models,
+    budget: Duration,
+    should_yield: &dyn Fn() -> bool,
+) -> Result<KnowledgeTick> {
     let start = Instant::now();
     let mut t = KnowledgeTick::default();
+    if should_yield() {
+        // Nothing was asked of the models, so an earlier outage flag stays as it is.
+        t.pending = pending(store)?;
+        return Ok(t);
+    }
     if embed_step(store, models, &mut t)? {
-        extract_step(store, models, &mut t, start, budget)?;
+        extract_step(store, models, &mut t, start, budget, should_yield)?;
     }
     t.pending = pending(store)?;
     if t.model_error.is_none() {
@@ -550,6 +561,7 @@ fn extract_step(
     t: &mut KnowledgeTick,
     start: Instant,
     budget: Duration,
+    should_yield: &dyn Fn() -> bool,
 ) -> Result<()> {
     let conn = store.conn();
     let rows: Vec<(i64, String, String, String)> = {
@@ -565,7 +577,7 @@ fn extract_step(
         rows.collect::<std::result::Result<_, _>>()?
     };
     for (symbol_id, hash, heading, path) in rows {
-        if start.elapsed() >= budget {
+        if start.elapsed() >= budget || should_yield() {
             break;
         }
         let Some(body) = section_body(conn, symbol_id)? else {
@@ -750,12 +762,14 @@ mod tests {
         }));
         let m = models(&f);
         let before = pending(&store).unwrap();
-        let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         assert!(t.embedded >= 3 && t.extracted >= 1, "{t:?}");
         assert!(t.model_error.is_none());
         let mut total = t.extracted;
         while pending(&store).unwrap() > 0 {
-            total += tick(&store, &m, Duration::from_secs(20)).unwrap().extracted;
+            total += tick(&store, &m, Duration::from_secs(20), &|| false)
+                .unwrap()
+                .extracted;
         }
         assert_eq!(total, before, "every queued section was extracted");
         assert_eq!(
@@ -789,7 +803,7 @@ mod tests {
         f.set_extraction("says STALE", serde_json::json!({"entities": [{"name": "Runbook", "type": "document", "description": "ops notes"}], "relations": []}));
         let m = models(&f);
         while pending(&store).unwrap() > 0 {
-            tick(&store, &m, Duration::from_secs(20)).unwrap();
+            tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         }
         let generates = f
             .calls()
@@ -808,7 +822,7 @@ mod tests {
             .unwrap();
         assert!(pending(&store).unwrap() > 0, "the copy queues");
         while pending(&store).unwrap() > 0 {
-            tick(&store, &m, Duration::from_secs(20)).unwrap();
+            tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         }
         assert_eq!(
             f.calls()
@@ -834,7 +848,7 @@ mod tests {
         f.set_extraction("Storage", serde_json::json!({"entities": [{"name": "SessionStore", "type": "system", "description": "keeps sessions"}], "relations": []}));
         let m = models(&f);
         while pending(&store).unwrap() > 0 {
-            tick(&store, &m, Duration::from_secs(20)).unwrap();
+            tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         }
         assert_eq!(
             count(
@@ -862,7 +876,7 @@ mod tests {
             serde_json::json!({"entities": [], "relations": []}),
         );
         while pending(&store).unwrap() > 0 {
-            tick(&store, &m, Duration::from_secs(20)).unwrap();
+            tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         }
         assert_eq!(
             count(
@@ -888,7 +902,7 @@ mod tests {
         let m = models(&f);
         f.fail_next_generate(1000);
         for _ in 0..4 {
-            tick(&store, &m, Duration::from_secs(20)).unwrap();
+            tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         }
         let max_attempts: i64 = count(&store, "SELECT MAX(attempts) FROM extract_queue");
         assert!(max_attempts >= 3, "{max_attempts}");
@@ -897,7 +911,7 @@ mod tests {
             !failed.is_empty() && failed[0].2.contains("not JSON"),
             "{failed:?}"
         );
-        let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         assert!(t.model_error.is_none() || t.extracted == 0);
     }
 
@@ -917,7 +931,7 @@ mod tests {
         );
         let m = models(&f);
         while pending(&store).unwrap() > 0 {
-            tick(&store, &m, Duration::from_secs(20)).unwrap();
+            tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         }
         assert_eq!(
             count(&store, "SELECT COUNT(*) FROM entities WHERE norm_name = ''"),
@@ -954,7 +968,7 @@ mod tests {
         f.set_extraction("Storage", serde_json::json!({"entities": [{"name": "SessionStore", "type": "system", "description": "keeps sessions"}], "relations": []}));
         let m = models(&f);
         while pending(&store).unwrap() > 0 {
-            tick(&store, &m, Duration::from_secs(20)).unwrap();
+            tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         }
         // The new dimension is only seen at the next embedding, so give the queue something.
         std::fs::write(
@@ -969,7 +983,7 @@ mod tests {
             .unwrap();
         let g = FakeOllama::spawn(16);
         let m16 = models(&g);
-        let t = tick(&store, &m16, Duration::from_secs(20)).unwrap();
+        let t = tick(&store, &m16, Duration::from_secs(20), &|| false).unwrap();
         assert!(t.model_error.is_none(), "{t:?}");
         assert_eq!(
             store.get_meta("embeddings_rebuilding").unwrap().as_deref(),
@@ -979,14 +993,14 @@ mod tests {
             count(&store, "SELECT COUNT(*) FROM extract_queue WHERE hash = ''") > 0,
             "the rebuild re-queued without hashes"
         );
-        tick(&store, &m16, Duration::from_secs(20)).unwrap();
+        tick(&store, &m16, Duration::from_secs(20), &|| false).unwrap();
         assert_eq!(
             count(&store, "SELECT COUNT(*) FROM extract_queue WHERE hash = ''"),
             0,
             "hashes recomputed"
         );
         while pending(&store).unwrap() > 0 {
-            tick(&store, &m16, Duration::from_secs(20)).unwrap();
+            tick(&store, &m16, Duration::from_secs(20), &|| false).unwrap();
         }
         assert_eq!(
             g.calls()
@@ -1018,16 +1032,40 @@ mod tests {
         f.set_down(true);
         let m = models(&f);
         let before = pending(&store).unwrap();
-        let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         assert!(
             t.model_error.is_some() && t.embedded == 0 && t.pending == before,
             "{t:?}"
         );
         assert!(store.get_meta("models_error").unwrap().is_some());
         f.set_down(false);
-        let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         assert!(t.model_error.is_none() && t.embedded > 0, "{t:?}");
         assert_eq!(store.get_meta("models_error").unwrap(), None);
+    }
+
+    #[test]
+    fn a_tick_that_must_yield_touches_nothing_and_keeps_the_outage_flag() {
+        let (_d, store) = indexed_docs();
+        let f = FakeOllama::spawn(8);
+        let m = models(&f);
+        store.set_meta("models_error", "earlier outage").unwrap();
+        let before = pending(&store).unwrap();
+        let t = tick(&store, &m, Duration::from_secs(20), &|| true).unwrap();
+        assert!(
+            t.embedded == 0 && t.extracted == 0 && t.pending == before,
+            "{t:?}"
+        );
+        assert!(f.calls().is_empty(), "{:?}", f.calls());
+        assert!(store.get_meta("models_error").unwrap().is_some());
+        // Yielding after the first extraction stops the tick there.
+        let asked = std::cell::Cell::new(0);
+        let t = tick(&store, &m, Duration::from_secs(20), &|| {
+            asked.set(asked.get() + 1);
+            asked.get() > 2
+        })
+        .unwrap();
+        assert!(t.embedded > 0 && t.extracted == 1, "{t:?}");
     }
 
     #[test]
@@ -1035,7 +1073,7 @@ mod tests {
         let (_d, store) = indexed_docs();
         let sections = count(&store, "SELECT COUNT(*) FROM sections_fts");
         let f = FakeOllama::spawn(8);
-        let t = tick(&store, &models(&f), Duration::ZERO).unwrap();
+        let t = tick(&store, &models(&f), Duration::ZERO, &|| false).unwrap();
         assert_eq!(
             t.embedded as i64, sections,
             "every section embedded at 8 dims"
@@ -1048,7 +1086,7 @@ mod tests {
         let g = FakeOllama::spawn(16);
         g.set_extraction("", serde_json::json!({"entities": [{"name": "Thing", "type": "concept", "description": "in every section"}], "relations": []}));
         let m = models(&g);
-        let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         assert!(t.model_error.is_none(), "{t:?}");
         assert_eq!(crate::store::vec::dim(&store).unwrap(), Some(16));
         assert_eq!(
@@ -1061,7 +1099,7 @@ mod tests {
             "re-queued"
         );
         while pending(&store).unwrap() > 0 {
-            let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+            let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
             assert!(t.model_error.is_none(), "{t:?}");
         }
         let mut q = vec![0.0f32; 16];
@@ -1096,11 +1134,11 @@ mod tests {
         let sections = count(&store, "SELECT COUNT(*) FROM sections_fts");
         let f = FakeOllama::spawn(8);
         let m = models(&f);
-        tick(&store, &m, Duration::ZERO).unwrap();
+        tick(&store, &m, Duration::ZERO, &|| false).unwrap();
         f.set_extraction("Freshness", serde_json::json!({"entities": [{"name": "STALE header", "type": "concept", "description": "says files changed"}], "relations": []}));
         f.corrupt_next_embed(1);
         let t = loop {
-            let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+            let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
             if t.model_error.is_some() {
                 break t;
             }
@@ -1121,7 +1159,7 @@ mod tests {
         );
         assert_eq!(count(&store, &format!("SELECT COUNT(*) FROM extraction_cache c JOIN extract_queue q ON q.hash = c.hash WHERE q.symbol_id = {fresh}")), 1, "cached anyway");
         while pending(&store).unwrap() > 0 {
-            tick(&store, &m, Duration::from_secs(20)).unwrap();
+            tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         }
         let generates = f
             .calls()
