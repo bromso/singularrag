@@ -1384,6 +1384,34 @@ mod tests {
     }
 
     #[test]
+    fn find_symbol_finds_a_heading_and_trace_path_walks_a_mention() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let mut e = Engine::open(dir.path(), "t").unwrap();
+        let f = e
+            .find_symbol(&FindRequest {
+                name: "freshness".into(),
+                kind: None,
+                limit: 5,
+            })
+            .unwrap();
+        assert!(
+            f.text.contains("docs/design.md") && f.text.contains("## Freshness"),
+            "{}",
+            f.text
+        );
+        let t = e
+            .trace_path(&TraceRequest {
+                from_path: "docs/design.md".into(),
+                from_symbol: "design".into(),
+                to_path: "src/auth/session.ts".into(),
+                to_symbol: "createSession".into(),
+            })
+            .unwrap();
+        assert!(t.text.contains("# 1 hop"), "{}", t.text);
+    }
+
+    #[test]
     fn open_on_a_named_workspace_prefixes_map_paths_and_rejects_unknown_prefixes() {
         let d = tempfile::tempdir().unwrap();
         crate::fixture::write_workspace(d.path());

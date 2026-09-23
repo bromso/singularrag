@@ -317,6 +317,26 @@ mod tests {
     }
 
     #[test]
+    fn a_section_renders_under_its_document_with_its_heading_line() {
+        let s = ScoredSymbol {
+            symbol_id: 1,
+            file_id: 1,
+            path: "docs/design.md".into(),
+            name: "Freshness".into(),
+            kind: "section".into(),
+            line_start: 5,
+            line_end: 8,
+            signature: "## Freshness".into(),
+            score: 1.0,
+            reasons: Reasons::default(),
+        };
+        assert_eq!(
+            render(&[s], 1, &[]),
+            "docs/design.md:\n    5  ## Freshness\n"
+        );
+    }
+
+    #[test]
     fn freshness_header_keeps_a_composed_multi_root_head_whole() {
         let h = freshness_header("abcdef123", Some("app:9b1e0d4 notes:none"), 0);
         assert_eq!(

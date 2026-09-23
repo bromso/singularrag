@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { reasonsToSentences } from "./reasons";
 
-const base = { score: 0.11, file_rank: 0.2, seeds: [], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false, note_hit: false };
+const base = { score: 0.11, file_rank: 0.2, seeds: [], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false, note_hit: false, body_hit: false };
 
 describe("reasonsToSentences", () => {
   test("rank and score always come first", () => {
@@ -26,7 +26,11 @@ describe("reasonsToSentences", () => {
     expect(reasonsToSentences(base, 4, 0.02)).toEqual(["Ranked 4th, score 0.02."]);
   });
   test("a note match has its own sentence", () => {
-    const r = { score: 1, file_rank: 1, seeds: ["note"], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false, note_hit: true };
+    const r = { score: 1, file_rank: 1, seeds: ["note"], referenced_by: [], pinned: false, fts_hit: false, query_ident_match: false, note_hit: true, body_hit: false };
     expect(reasonsToSentences(r, 1, 1)).toContain("Matches a note.");
+  });
+  test("a body match has its own sentence", () => {
+    const r = { ...base, body_hit: true };
+    expect(reasonsToSentences(r, 1, 1)).toContain("Matches the text of the section.");
   });
 });
