@@ -99,6 +99,9 @@ pub struct ExtractedRelation {
 pub struct Models {
     cfg: ModelsConfig,
     http: reqwest::blocking::Client,
+    /// A timed-out request is sent once more. Off for the background tick, which runs on
+    /// the actor thread: a retry would hold a waiting tool call for a second timeout.
+    retry_on_timeout: bool,
 }
 
 fn unavailable(e: impl std::fmt::Display) -> Error {
@@ -202,11 +205,29 @@ pub fn split_parts(text: &str) -> Vec<String> {
 
 impl Models {
     pub fn new(cfg: ModelsConfig) -> Models {
+        Models::with_timeout(cfg, TIMEOUT)
+    }
+
+    /// `new` with another per-request timeout (tests use a short one).
+    pub fn with_timeout(cfg: ModelsConfig, timeout: Duration) -> Models {
         let http = reqwest::blocking::Client::builder()
-            .timeout(TIMEOUT)
+            .timeout(timeout)
             .build()
             .expect("reqwest client");
-        Models { cfg, http }
+        Models {
+            cfg,
+            http,
+            retry_on_timeout: true,
+        }
+    }
+
+    /// The same client without the retry on a timeout, for the background tick.
+    pub fn tick_client(&self) -> Models {
+        Models {
+            cfg: self.cfg.clone(),
+            http: self.http.clone(),
+            retry_on_timeout: false,
+        }
     }
     pub fn config(&self) -> &ModelsConfig {
         &self.cfg
@@ -220,7 +241,8 @@ impl Models {
         self.send(path, Some(body))
     }
 
-    /// One retry on connect or timeout errors; a non-2xx status or a non-JSON body is unavailable.
+    /// One retry on connect errors, and on timeouts unless `retry_on_timeout` is off; a
+    /// non-2xx status or a non-JSON body is unavailable.
     fn send(&self, path: &str, body: Option<&serde_json::Value>) -> Result<serde_json::Value> {
         let url = format!("{}{}", self.cfg.ollama.trim_end_matches('/'), path);
         let mut last = None;
@@ -241,7 +263,9 @@ impl Models {
                     }
                     return resp.json().map_err(|e| unavailable(format!("{path}: {e}")));
                 }
-                Err(e) if e.is_connect() || e.is_timeout() => last = Some(e),
+                Err(e) if e.is_connect() || (e.is_timeout() && self.retry_on_timeout) => {
+                    last = Some(e)
+                }
                 Err(e) => return Err(unavailable(format!("{path}: {e}"))),
             }
         }

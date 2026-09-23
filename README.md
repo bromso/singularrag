@@ -177,7 +177,7 @@ ollama pull nomic-embed-text
 ollama pull qwen2.5:7b-instruct
 ```
 
-With Ollama running, indexing picks the queue up on its own: `serve` and `mcp` embed and extract document sections in the background, a few at a time, under a time budget, so nothing blocks a tool call. `index` never talks to a model, and no one-shot command extracts: `entities` answers from what the background job has already extracted and says on stderr how many sections are still waiting. `query`, `entities` and `eval` embed the query text once (one `/api/embed` call, the query only, never file contents) when the index already holds embeddings from that background job; `eval --no-models` turns that off. Before the index has any embeddings the seed is simply skipped; when Ollama is down the seed is skipped and the header says `models: unavailable`.
+With Ollama running, indexing picks the queue up on its own: `serve` and `mcp` embed and extract document sections in the background, a few at a time, under a time budget; a tool call may wait for one in-flight extraction, up to the 30 s model timeout, while the background job is running. `index` never talks to a model, and no one-shot command extracts: `entities` answers from what the background job has already extracted and says on stderr how many sections are still waiting. `query`, `entities` and `eval` embed the query text once (one `/api/embed` call, the query only, never file contents) when the index already holds embeddings from that background job; `eval --no-models` turns that off. Before the index has any embeddings the seed is simply skipped; when Ollama is down the seed is skipped and the header says `models: unavailable`.
 
 Configure it in `.singularrag/workspace.toml`, all optional:
 

@@ -472,6 +472,8 @@ pub fn tick(
         t.pending = pending(store)?;
         return Ok(t);
     };
+    // No retry on a timeout: one slow section holds the actor for one timeout at most.
+    let models = &models.tick_client();
     if let Some(d) = swapped_model_dim(store, models)? {
         // A different embedding model at any dimension: the same rebuild a dimension change
         // does, before anything is embedded. The next ticks re-embed with the new model.
@@ -1663,6 +1665,31 @@ mod tests {
         })
         .unwrap();
         assert!(t.embedded > 0 && t.extracted == 1, "{t:?}");
+    }
+
+    #[test]
+    fn a_tick_makes_one_generate_attempt_when_it_times_out() {
+        let (_d, store) = indexed_docs();
+        let f = FakeOllama::spawn(8);
+        let m = Models::with_timeout(
+            ModelsConfig {
+                ollama: f.url(),
+                ..Default::default()
+            },
+            Duration::from_millis(300),
+        );
+        f.set_generate_delay(Duration::from_millis(800));
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
+        assert!(t.model_error.is_some(), "a timeout is an outage: {t:?}");
+        // The fake answers one request at a time: a retry would be read once the first
+        // delayed answer is written, so wait past that before counting.
+        std::thread::sleep(Duration::from_millis(2000));
+        let generate = f
+            .calls()
+            .iter()
+            .filter(|p| p.as_str() == "/api/generate")
+            .count();
+        assert_eq!(generate, 1, "no retry on a timeout inside a tick");
     }
 
     #[test]
