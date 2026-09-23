@@ -6,6 +6,7 @@
 pub mod blast;
 pub mod changed;
 pub mod config;
+pub mod doc;
 pub mod engine;
 pub mod error;
 pub mod eval;

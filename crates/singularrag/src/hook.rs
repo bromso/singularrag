@@ -164,7 +164,7 @@ mod tests {
                 &input(
                     &session,
                     dir.path(),
-                    &dir.path().join("README.md").display().to_string()
+                    &dir.path().join(".env").display().to_string()
                 )
             ),
             ALLOW_JSON,

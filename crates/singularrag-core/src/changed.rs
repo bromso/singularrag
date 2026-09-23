@@ -628,10 +628,8 @@ mod tests {
                 .any(|s| s.path == "app/src/auth/session.ts" && s.name == "createSession"),
             "{c:?}"
         );
-        // Task 5 switches this to: assert notes/new.md appears as a document symbol.
-        // Markdown is not indexed today, so it is neither a changed symbol nor a
-        // "no symbol touched" file — it never entered the index at all.
-        assert!(!c.symbols.iter().any(|s| s.path == "notes/new.md"), "{c:?}");
+        // Markdown is indexed: the new file's heading is a changed symbol.
+        assert!(c.symbols.iter().any(|s| s.path == "notes/new.md"), "{c:?}");
         assert!(
             !c.files_without_symbols
                 .contains(&"notes/new.md".to_string()),

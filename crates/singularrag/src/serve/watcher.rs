@@ -221,7 +221,7 @@ mod tests {
             !seen[1].index_version.is_empty(),
             "the payload is a full status"
         );
-        assert_eq!(seen[1].files.indexed, 4);
+        assert_eq!(seen[1].files.indexed, 5, "four .ts files and README.md");
         assert!(seen[1].indexed_at_ms.is_some());
     }
 

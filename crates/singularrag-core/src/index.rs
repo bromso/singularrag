@@ -263,6 +263,9 @@ impl<'a> Indexer<'a> {
         delete_symbols_for(&tx, file_id)?;
 
         for t in &tags {
+            if t.name.is_empty() {
+                continue;
+            }
             if t.is_definition {
                 tx.execute(
                     "INSERT INTO symbols(file_id, name, kind, line_start, line_end, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -404,7 +407,7 @@ mod tests {
             reason("src/config.ts").as_deref(),
             Some("secret-like content")
         );
-        assert_eq!(reason("README.md").as_deref(), Some("unsupported-language"));
+        assert_eq!(reason("README.md"), None, "Markdown is indexed");
         assert_eq!(reason("src/auth/session.ts"), None);
         assert_eq!(
             count(
@@ -482,7 +485,7 @@ mod tests {
         let cfg = MapConfig::default();
         let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(None).unwrap();
-        assert_eq!(stats.indexed, 2, "{stats:?}");
+        assert_eq!(stats.indexed, 3, "two .rs files and Cargo.toml: {stats:?}");
         assert_eq!(stats.remaining, 0);
 
         let reason: Option<String> = store
@@ -493,7 +496,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(reason.as_deref(), Some("unsupported-language"));
+        assert_eq!(reason, None, "TOML is indexed");
         assert_eq!(
             count(
                 &store,
