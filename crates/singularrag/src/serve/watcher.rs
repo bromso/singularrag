@@ -150,12 +150,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
         Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1).unwrap();
         let (handle, _join, _died) = spawn(EngineConfig {
             root: dir.path().to_path_buf(),
             session_key: SessionKey::Fixed("serve".into()),
             refresh_budget: singularrag_core::engine::REFRESH_BUDGET,
         });
+        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1, handle.clone())
+            .unwrap();
         (dir, state, handle)
     }
 

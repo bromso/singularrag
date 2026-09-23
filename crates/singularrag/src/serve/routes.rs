@@ -197,6 +197,53 @@ pub struct BlastDto {
     pub truncated: Option<&'static str>,
 }
 
+#[derive(Deserialize)]
+pub struct QueryBody {
+    pub query: String,
+    pub budget: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct QueryDto {
+    pub retrieval_id: i64,
+    pub served: usize,
+    pub cut: usize,
+}
+
+/// Runs `repo_map` through the process's own actor, so the retrieval is recorded under
+/// the actor's existing session key (`serve`, labelled `UI` — spec §6) rather than a
+/// second key.
+pub async fn query(
+    State(s): State<AppState>,
+    Json(b): Json<QueryBody>,
+) -> Result<Json<QueryDto>, ApiError> {
+    let q = b.query.trim();
+    if q.is_empty() || q.chars().count() > 2000 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({ "error": "query must be 1 to 2000 characters", "field": "query" }),
+        ));
+    }
+    let req = singularrag_core::engine::MapRequest {
+        query: Some(q.to_string()),
+        focus_files: vec![],
+        budget_tokens: singularrag_core::map::clamp_budget(
+            b.budget.unwrap_or(singularrag_core::map::DEFAULT_BUDGET),
+        ),
+    };
+    match s.handle.map(req).await {
+        Ok(r) => Ok(Json(QueryDto {
+            retrieval_id: r.retrieval_id,
+            served: r.served,
+            cut: r.total.saturating_sub(r.served),
+        })),
+        Err(e) => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({ "error": e }),
+        )),
+    }
+}
+
 pub async fn blast(
     State(s): State<AppState>,
     Query(q): Query<BlastQuery>,
@@ -231,5 +278,75 @@ pub async fn blast(
             files: b.files,
             truncated: b.truncated,
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn query_records_a_ui_retrieval_and_validates_input() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(dir.path());
+        let (handle, _join, _died) = crate::actor::spawn(crate::actor::EngineConfig {
+            root: dir.path().to_path_buf(),
+            session_key: crate::actor::SessionKey::Fixed("serve".into()),
+            refresh_budget: std::time::Duration::from_secs(5),
+        });
+        handle.refresh().await.unwrap();
+        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1, handle.clone())
+            .unwrap();
+        let token = state.token.to_string();
+        let app = crate::serve::router(state);
+        let post = |body: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/query")
+                .header("host", "127.0.0.1:1")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
+        };
+        let res = tower::ServiceExt::oneshot(
+            app.clone(),
+            post(r#"{"query":"STALE header","budget":2048}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            v["retrieval_id"].as_i64().unwrap() >= 1 && v["served"].as_u64().unwrap() >= 1,
+            "{v}"
+        );
+        let res = tower::ServiceExt::oneshot(app.clone(), post(r#"{"query":""}"#))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 422);
+        let list = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/api/retrievals")
+                .header("host", "127.0.0.1:1")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(list.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v[0]["session_label"], "UI");
+        assert_eq!(v[0]["query"], "STALE header");
+        handle.shutdown();
     }
 }
