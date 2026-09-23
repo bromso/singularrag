@@ -17,20 +17,20 @@ use singularrag_core::engine::{
 
 use crate::actor::EngineHandle;
 
-pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this repository. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show. Use find_symbol to locate a name, trace_path to see how two symbols connect, and changed to see what a diff touches and who references it. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background.";
+pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this workspace: code symbols and document sections (specs, notes, READMEs, config keys) together. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show, and read the section the map points at rather than the whole file. Use find_symbol to locate a name or a heading, trace_path to see how two symbols connect (a note that mentions a symbol counts), and changed to see what a diff touches and who references it. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background.";
 
 // Only read by the unit test below, which asserts the router's reported description
 // equals these constants (see the note on the `#[tool_router]` impl block); the macro
 // itself needs a string literal, not a path to these, so they're otherwise unused outside
 // `#[cfg(test)]`.
 #[allow(dead_code)]
-pub const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the symbols most relevant to a task, each with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature`, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
+pub const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
 
 #[allow(dead_code)]
-pub const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module. `limit` defaults to 10, max 50.";
+pub const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module, section, document, element, rule, key. `limit` defaults to 10, max 50.";
 
 #[allow(dead_code)]
-pub const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is repo-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs.";
+pub const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is workspace-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs.";
 
 #[allow(dead_code)]
 pub const TRACE_PATH_DESCRIPTION: &str = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files.";
@@ -80,7 +80,7 @@ impl From<MapArgs> for MapRequest {
 pub struct FindArgs {
     /// Symbol name: exact, prefix, or split words.
     pub name: String,
-    /// One of: function, class, method, type, const, module.
+    /// One of: function, class, method, type, const, module, section, document, element, rule, key.
     pub kind: Option<String>,
     /// Max hits. Default 10, max 50.
     pub limit: Option<u32>,
@@ -169,7 +169,7 @@ impl SingularragServer {
     // literal and the constant fails the test.
     #[tool(
         name = "repo_map",
-        description = "Token-budgeted map of the symbols most relevant to a task, each with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are repo-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature`, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment."
+        description = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment."
     )]
     async fn repo_map(
         &self,
@@ -180,7 +180,7 @@ impl SingularragServer {
 
     #[tool(
         name = "find_symbol",
-        description = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module. `limit` defaults to 10, max 50."
+        description = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module, section, document, element, rule, key. `limit` defaults to 10, max 50."
     )]
     async fn find_symbol(
         &self,
@@ -191,7 +191,7 @@ impl SingularragServer {
 
     #[tool(
         name = "annotate",
-        description = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is repo-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs."
+        description = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is workspace-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs."
     )]
     async fn annotate(
         &self,

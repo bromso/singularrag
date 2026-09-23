@@ -1,0 +1,79 @@
+# Fixed on first run. Never edit an existing question; add new ids instead.
+# Authored against this repository (singularrag) at branch documents-v0. Every gold entry is
+# `path::name` where `name` is a heading's text (a `section`) or a code symbol, as printed
+# by `singularrag find <name>` on this repo.
+# `crates/singularrag-core/src/engine.rs` is skipped as secret-like content (its tests hold a
+# fixture key), so gold that would name it names the next layer instead: `index.rs::refresh`
+# for the refresh, the MCP handler `mcp/server.rs::repo_map` for the map response.
+
+[[question]]
+id = "D1"
+category = "locate-doc"
+query = "how fresh is the index and what does the STALE header promise"
+gold = ["docs/superpowers/specs/2026-09-19-singularrag-design.md::8. Freshness"]
+
+[[question]]
+id = "D2"
+category = "locate-doc"
+query = "what does the query-first hook deny and when does it allow"
+gold = ["docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::2. The query-first hook"]
+
+[[question]]
+id = "D3"
+category = "locate-doc"
+query = "which conditions does the tier-two run compare and how is a session launched"
+gold = ["docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::3. Run config", "docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::4. Session"]
+
+[[question]]
+id = "D4"
+category = "locate-doc"
+query = "when do embeddings or LSP get built, what is the gate"
+gold = ["docs/superpowers/specs/2026-09-19-singularrag-design.md::Gates for deferred features (eval-driven, §12)"]
+
+[[question]]
+id = "D5"
+category = "doc-to-code"
+query = "the code that implements the freshness refresh described in the design spec"
+gold = ["docs/superpowers/specs/2026-09-19-singularrag-design.md::8. Freshness", "crates/singularrag-core/src/index.rs::refresh_with", "crates/singularrag-core/src/index.rs::refresh"]
+
+[[question]]
+id = "D6"
+category = "doc-to-code"
+query = "where is the hook decision implemented that the workflow spec describes"
+gold = ["docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::2. The query-first hook", "crates/singularrag/src/hook.rs::run"]
+
+[[question]]
+id = "D7"
+category = "doc-to-code"
+query = "the harness code for parsing the stream and scoring a session"
+gold = ["docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::5. Parsing and scoring", "crates/singularrag-bench/src/stream.rs::parse_stream", "crates/singularrag-bench/src/score.rs::score"]
+
+[[question]]
+id = "D8"
+category = "doc-to-code"
+query = "how the map fits a token budget as the design describes"
+gold = ["crates/singularrag-core/src/map.rs::fit", "crates/singularrag-core/src/map.rs::render"]
+
+[[question]]
+id = "D9"
+category = "code-to-doc"
+query = "which spec section describes what singularrag init installs"
+gold = ["docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md::3. `singularrag init`", "crates/singularrag/src/init.rs::run"]
+
+[[question]]
+id = "D10"
+category = "code-to-doc"
+query = "where is the verdict rule for whether singularrag earns its place written down"
+gold = ["docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md::7. Summary and verdict", "crates/singularrag-bench/src/summary.rs::render"]
+
+[[question]]
+id = "D11"
+category = "code-to-doc"
+query = "the README section that tells a user how to connect Claude Code"
+gold = ["README.md::Claude Code", "README.md::Connect an agent"]
+
+[[question]]
+id = "D12"
+category = "code-to-doc"
+query = "what the agent sees in a repo_map response"
+gold = ["README.md::What the agent sees", "crates/singularrag/src/mcp/server.rs::repo_map"]

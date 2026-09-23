@@ -2,6 +2,7 @@ export type Reasons = {
   score: number; file_rank: number; seeds: string[];
   referenced_by: { path: string; count: number }[];
   pinned: boolean; fts_hit: boolean; query_ident_match: boolean; note_hit: boolean;
+  body_hit: boolean;
 };
 export type Item = { rank: number; symbol_id: number; path: string; name: string; line_start: number; score: number; served: boolean; reasons: Reasons };
 export type RetrievalSummary = {
@@ -22,9 +23,11 @@ export type MapDoc = MapConfig & { version: number };
 export type Status = {
   index_version: string; git_head: string | null; indexed_at_ms: number | null; stale_count: number;
   lock_timeout: boolean; foreign_indexing: boolean; indexing: boolean; files: { indexed: number; skipped: number };
+  roots: { name: string; path: string; git_head: string | null }[];
 };
 export type GraphNode = { path: string; symbols: number; lang: string | null };
 export type GraphEdge = { src: number; dst: number; weight: number; names: number };
 export type GraphPayload = { index_version: string; nodes: GraphNode[]; edges: GraphEdge[] };
 export type BlastFile = { path: string; depth: number; via: string };
 export type BlastResult = { root: { path: string; symbol: string }; files: BlastFile[]; truncated: null | "depth" | "files" };
+export type QueryResult = { retrieval_id: number; served: number; cut: number };

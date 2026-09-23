@@ -12,6 +12,7 @@ const mockStatus: Status = {
   foreign_indexing: false,
   indexing: false,
   files: { indexed: 10, skipped: 2 },
+  roots: [{ name: "", path: "/repo", git_head: "abc123" }],
 };
 
 describe("tokenFromFragment", () => {

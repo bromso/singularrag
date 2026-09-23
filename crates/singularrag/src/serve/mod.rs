@@ -12,7 +12,7 @@ pub mod watcher;
 use std::path::PathBuf;
 
 use axum::http::{header, HeaderValue};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/map", get(routes::get_map).put(routes::put_map))
         .route("/graph", get(routes::graph))
         .route("/blast", get(routes::blast))
+        .route("/query", post(routes::query))
         .route("/events", get(events::sse))
         // Before the layers, so an unknown /api path is answered *inside* them: it gets
         // the host and token checks and the no-store header, instead of falling out to
@@ -98,7 +99,7 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("startup refresh failed: {e}"))?;
 
-        let state = AppState::new(root, port)?;
+        let state = AppState::new(root, port, handle.clone())?;
         watcher::apply(&state, startup_stats);
 
         let url = format!("http://127.0.0.1:{port}/#token={}", state.token);

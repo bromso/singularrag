@@ -12,6 +12,7 @@ import { FreshnessBadge, freshnessText } from "@/components/FreshnessBadge";
 import { LiveRegion } from "@/components/LiveRegion";
 import { MapErrorBoundary } from "@/components/MapErrorBoundary";
 import { MapView } from "@/components/MapView";
+import { QueryPanel } from "@/components/QueryPanel";
 import { RepoTree, type TreeRow } from "@/components/RepoTree";
 import { RetrievalsRail } from "@/components/RetrievalsRail";
 import { SkippedSheet } from "@/components/SkippedSheet";
@@ -35,6 +36,7 @@ export function App() {
   const [map, setMap] = useState<MapConfig>(emptyMap);
   const [focused, setFocused] = useState<TreeRow | null>(null);
   const [filter, setFilter] = useState("");
+  const [root, setRoot] = useState("");
   const [blast, setBlast] = useState<BlastResult | null>(null);
   const [blastLoading, setBlastLoading] = useState(false);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
@@ -119,6 +121,41 @@ export function App() {
   }, [selected]);
 
   const rows = useMemo(() => joinRetrieval(tree, detail?.items ?? null), [tree, detail]);
+  const filteredRows = useMemo(() => (root ? rows.filter((r) => r.path.startsWith(`${root}/`)) : rows), [rows, root]);
+  // The map's own node/edge set, not just the tree rows: `GraphEdge.src`/`dst` are
+  // indices into `graph.nodes`, so dropping nodes outside the selected root means
+  // re-indexing every surviving edge (and dropping edges that touched a dropped node).
+  const filteredGraph = useMemo(() => {
+    if (!graph || !root) return graph;
+    const prefix = `${root}/`;
+    const remap = new Map<number, number>();
+    const nodes = graph.nodes.filter((n, i) => {
+      if (!n.path.startsWith(prefix)) return false;
+      remap.set(i, remap.size);
+      return true;
+    });
+    const edges = graph.edges
+      .filter((e) => remap.has(e.src) && remap.has(e.dst))
+      .map((e) => ({ ...e, src: remap.get(e.src)!, dst: remap.get(e.dst)! }));
+    return { ...graph, nodes, edges };
+  }, [graph, root]);
+
+  // A query submitted from the panel becomes a new UI retrieval; refetch the list from
+  // the server (rather than optimistically inserting) so it lands with whatever fields
+  // the server fills in, then select it so the rail and detail panel jump to it.
+  const onQueryDone = useCallback((id: number) => {
+    api.retrievals().then(setRetrievals).catch((e: unknown) => toastError(e));
+    setSelected(id);
+  }, []);
+
+  // A change of root can strand the currently focused/expanded row on a path that's no
+  // longer shown — clear it rather than leave the detail panel pointing at a hidden file.
+  useEffect(() => {
+    if (!root) return;
+    const prefix = `${root}/`;
+    setFocused((f) => (f && !f.path.startsWith(prefix) ? null : f));
+    setExpandedPath((p) => (p && !p.startsWith(prefix) ? null : p));
+  }, [root]);
 
   // A row's action button only selected the row, which row focus had already done, so it
   // did nothing a screen-reader user could notice (I10). Move DOM focus to the panel it
@@ -165,14 +202,14 @@ export function App() {
   const toggleExpand = (path: string) => setExpandedPath((p) => (p === path ? null : path));
 
   const onSelectNode = useCallback((path: string, symbol?: string) => {
-    const file = rows.find((r) => r.path === path);
+    const file = filteredRows.find((r) => r.path === path);
     if (!file) return;
     if (symbol) {
       const s = file.symbols.find((x) => x.symbol.name === symbol);
       if (s) { setFocused({ kind: "symbol", path, file, symbol: s }); return; }
     }
     setFocused({ kind: "file", path, file });
-  }, [rows]);
+  }, [filteredRows]);
 
   // `MapView`'s treegrid target may be freshly (re)mounted this same tick — a real
   // rAF never fires in a hidden/background tab (and happy-dom does not schedule it
@@ -184,14 +221,15 @@ export function App() {
     setTimeout(() => (document.querySelector('[role="treegrid"]') as HTMLElement | null)?.focus(), 0);
   };
 
-  // Counted over the graph's own file set, not every tree row: an excluded file is a
-  // row (the tree still lists it) but not a graph node, and must not be counted.
-  const graphPaths = useMemo(() => new Set((graph?.nodes ?? []).map((n) => n.path)), [graph]);
+  // Counted over the (root-filtered) graph's own file set, not every tree row: an
+  // excluded file is a row (the tree still lists it) but not a graph node, and a file
+  // outside the selected root isn't on the map either — neither must be counted.
+  const graphPaths = useMemo(() => new Set((filteredGraph?.nodes ?? []).map((n) => n.path)), [filteredGraph]);
   const fileCounts = useMemo(() => ({
     served: rows.filter((r) => graphPaths.has(r.path) && fileStatusOf(r, true) === "served").length,
     cut: rows.filter((r) => graphPaths.has(r.path) && fileStatusOf(r, true) === "cut").length,
   }), [rows, graphPaths]);
-  const mapLabel = summaryLabel(graph?.nodes.length ?? 0, detail ? { id: detail.id, ...fileCounts } : null, map.boundary.length);
+  const mapLabel = summaryLabel(filteredGraph?.nodes.length ?? 0, detail ? { id: detail.id, ...fileCounts } : null, map.boundary.length);
 
   // Sorted-path JSON, so add-then-remove-in-a-different-order still reads as unchanged.
   const excludeKey = (exclude: MapConfig["exclude"]) => JSON.stringify(exclude.map((t) => t.path).slice().sort());
@@ -229,19 +267,31 @@ export function App() {
         <FreshnessBadge status={status} />
         <SkippedSheet skipped={skipped} />
         <ViewToggle value={view} onChange={changeView} />
+        {status && status.roots.length > 1 && (
+          <label className="text-sm">
+            Root
+            <select value={root} onChange={(e) => setRoot(e.target.value)} className="ml-2 rounded border bg-background px-2 py-1">
+              <option value="">All roots</option>
+              {status.roots.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}
+            </select>
+          </label>
+        )}
         <label className="ml-auto text-sm">
           Filter
           <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} className="ml-2 rounded border bg-background px-2 py-1" placeholder="path or symbol" />
         </label>
       </header>
-      <RetrievalsRail retrievals={retrievals} selected={selected} onSelect={setSelected}
-        onMore={() => api.retrievals(retrievals[retrievals.length - 1]?.id).then((more) => setRetrievals((rs) => [...rs, ...more]))} />
+      <div className="flex min-h-0 flex-col">
+        <QueryPanel onDone={onQueryDone} announce={announce} />
+        <RetrievalsRail retrievals={retrievals} selected={selected} onSelect={setSelected}
+          onMore={() => api.retrievals(retrievals[retrievals.length - 1]?.id).then((more) => setRetrievals((rs) => [...rs, ...more]))} />
+      </div>
       <main className={view === "tree" ? "min-h-0 overflow-auto" : "relative min-h-0 overflow-hidden"}>
         {view === "tree" ? (
-          <RepoTree rows={rows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
+          <RepoTree rows={filteredRows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
         ) : (
           <MapErrorBoundary onSwitchToTable={switchToTable}>
-            <MapView payload={graph} rows={rows} hasRetrieval={detail !== null}
+            <MapView payload={filteredGraph} rows={filteredRows} hasRetrieval={detail !== null}
               focusedPath={focused?.path ?? null} focusedSymbol={focused?.kind === "symbol" ? focused.symbol.symbol.name : null}
               expandedPath={expandedPath} blast={blast} boundaries={map.boundary} ariaLabel={mapLabel}
               onSelectNode={onSelectNode} onToggleExpand={toggleExpand} onSwitchToTable={switchToTable} onLayoutReady={onLayoutReady} />

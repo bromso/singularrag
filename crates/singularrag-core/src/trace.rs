@@ -219,15 +219,20 @@ mod tests {
     use crate::fixture::write_ts_mini;
     use crate::index::Indexer;
     use crate::store::Store;
+    use crate::workspace::Workspace;
 
     fn indexed() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
         (dir, store)
     }
 

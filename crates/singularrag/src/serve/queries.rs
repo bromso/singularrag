@@ -4,6 +4,7 @@
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use singularrag_core::store::Store;
+use singularrag_core::workspace::Workspace;
 use singularrag_core::Result;
 
 use super::state::Freshness;
@@ -12,6 +13,13 @@ use super::state::Freshness;
 pub struct FileCounts {
     pub indexed: i64,
     pub skipped: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RootDto {
+    pub name: String,
+    pub path: String,
+    pub git_head: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -24,6 +32,7 @@ pub struct StatusDto {
     pub foreign_indexing: bool,
     pub indexing: bool,
     pub files: FileCounts,
+    pub roots: Vec<RootDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,7 +152,7 @@ pub fn max_retrieval_id(store: &Store) -> Result<i64> {
         })?)
 }
 
-pub fn status(store: &Store, f: &Freshness) -> Result<StatusDto> {
+pub fn status(store: &Store, f: &Freshness, ws: &Workspace) -> Result<StatusDto> {
     let conn = store.conn();
     let indexed: i64 = conn.query_row(
         "SELECT COUNT(*) FROM files WHERE skipped_reason IS NULL",
@@ -155,6 +164,19 @@ pub fn status(store: &Store, f: &Freshness) -> Result<StatusDto> {
         [],
         |r| r.get(0),
     )?;
+    let mut roots = Vec::with_capacity(ws.roots.len());
+    for r in &ws.roots {
+        let key = if r.name.is_empty() {
+            "git_head".to_string()
+        } else {
+            format!("git_head:{}", r.name)
+        };
+        roots.push(RootDto {
+            name: r.name.clone(),
+            path: r.path.display().to_string(),
+            git_head: store.get_meta(&key)?.filter(|h| !h.is_empty()),
+        });
+    }
     Ok(StatusDto {
         index_version: store.get_meta("index_version")?.unwrap_or_default(),
         git_head: store.get_meta("git_head")?.filter(|h| !h.is_empty()),
@@ -166,6 +188,7 @@ pub fn status(store: &Store, f: &Freshness) -> Result<StatusDto> {
         foreign_indexing: f.foreign_indexing,
         indexing: f.indexing,
         files: FileCounts { indexed, skipped },
+        roots,
     })
 }
 
@@ -471,18 +494,34 @@ mod tests {
 
     #[test]
     fn status_merges_meta_and_freshness() {
-        let (_d, ro) = seeded();
+        let (d, ro) = seeded();
         let f = crate::serve::state::Freshness {
             stale_count: 3,
             foreign_indexing: true,
             ..Default::default()
         };
-        let s = status(&ro, &f).unwrap();
+        let ws = Workspace::single(d.path()).unwrap();
+        let s = status(&ro, &f, &ws).unwrap();
         assert_eq!(s.index_version.len(), 12);
         assert_eq!(s.stale_count, 3);
         assert!(s.foreign_indexing);
         assert!(s.files.indexed >= 4);
         assert!(s.files.skipped >= 2);
+    }
+
+    #[test]
+    fn status_lists_the_roots() {
+        let d = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_workspace(d.path());
+        let mut e = singularrag_core::engine::Engine::open(d.path(), "t").unwrap();
+        e.refresh(std::time::Duration::from_secs(60)).unwrap();
+        let ws = e.workspace().clone();
+        let s = status(e.store(), &crate::serve::state::Freshness::default(), &ws).unwrap();
+        assert_eq!(
+            s.roots.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["app", "notes"]
+        );
+        assert!(s.roots[0].git_head.is_none());
     }
 
     #[test]

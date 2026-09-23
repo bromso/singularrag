@@ -42,6 +42,8 @@ Decision: singularrag is a separate repo with its own stack. Reasons: the job is
 - Metrics (churn, complexity, coverage), ER or architecture diagrams, React Flow, bklit.
 - Windows is not a target for v0 but nothing chosen blocks it.
 
+*Amended 2026-09-23 (documents design, `docs/superpowers/specs/2026-09-23-singularrag-documents-design.md`).* "One source type: code" becomes code and text documents: Markdown, HTML, CSS, JSON, YAML, TOML and plain text. Later specs add further sources (PDF, office files, video) on the same anchor columns. The multi-repo non-goal narrows to what it was about: several local roots may share one workspace (§6); a team server, remote access and sync stay out.
+
 ## 6. v0 scope: smallest valuable slice
 
 One binary, `singularrag`, with:
@@ -54,6 +56,8 @@ One binary, `singularrag`, with:
 Languages: TypeScript, TSX, JavaScript, Rust. Repo-local `.singularrag/map.toml` for annotations (committed) and `.singularrag/index.db` (gitignored).
 
 Done when: the twelve eval questions run in both tiers, the loop (retrieve, see served/cut/reasons, pin or exclude, retrieve again with a changed result) works end to end in the browser, and the a11y checklist in §11 passes.
+
+*Amended 2026-09-23 (documents design, `docs/superpowers/specs/2026-09-23-singularrag-documents-design.md`).* `--repo` names a workspace: any directory holding `.singularrag/`, with an optional read-only `.singularrag/workspace.toml` of `[[root]]` entries (`name`, `path`). Without the file the directory is its only root and every path is bare, as before; with roots every path is `<name>/<relative>`, `map.toml` paths carry the prefix, and the freshness header shows one HEAD per root. Documents are indexed with the code and appear in the map under their file header, one row per served section with its anchor line and heading line (`docs/design.md:` then `  108  ## 8. Freshness`).
 
 ## 7. Architecture
 
@@ -105,6 +109,8 @@ Sources: [Aider repo map design](https://aider.chat/2023/10/22/repomap.html), [d
 - **SCIP/LSP edges** when tier-one recall on *trace* and *blast radius* questions is below 0.7 and inspection attributes misses to name ambiguity.
 - **Local embeddings** when *locate* questions phrased in natural language score below 0.6 in tier one and FTS5 synonyms/split tokens don't recover it. If added: fastembed + sqlite-vec, and the reason field gains a "semantic match to <query terms>" entry so it stays drawable.
 
+*Amended 2026-09-23 (documents design, `docs/superpowers/specs/2026-09-23-singularrag-documents-design.md`).* Index model: `files.lang` gains `markdown`, `html`, `css`, `json`, `yaml`, `toml` and `text`; `symbols.kind` gains `section`, `document`, `element`, `rule` and `key`. `line_start` and `line_end` are anchors: lines for every format so far, reused by later specs for pages, slides, sheets and seconds, with `lang` telling the renderer which. A new FTS5 table, `sections_fts(path, name, content)`, porter-stemmed, holds one row per section, document or element with code fences and HTML tags stripped; config values are never indexed. A document's mentions (single-identifier code spans, wiki links, relative links) are `refs` rows, so a document gets edges to the code it names. Ranking: a `sections_fts` hit seeds its file with the same boost as a `symbols_fts` hit, and the reasons gain `body_hit` ("Matches the text of the section"). Schema version 3. Recorded deviation: document structure is extracted by walking each format's tree-sitter tree directly rather than through a tags query as for code, because heading-level folding and key depth cannot be expressed in a tags query; the output has the same shape (symbols and refs rows).
+
 ## 8. Freshness
 
 - Every tool call: gitignore-aware stat walk (`ignore` crate) comparing mtime and size to `files`; changed or new files re-parsed inline; deleted files removed. Tree-sitter parses in milliseconds per file; the walk on a 5k-file repo is tens of milliseconds.
@@ -149,6 +155,8 @@ src/auth/session.ts:12  function  createSession(user: User, ttl: number): Sessio
 
 A third tool, `annotate` (2026-09-21, `docs/superpowers/specs/2026-09-21-singularrag-annotate-design.md` §3), writes the agent's note on a file or symbol into `map.toml`. Two graph tools (2026-09-21, `docs/superpowers/specs/2026-09-21-singularrag-workflow-design.md` §4 and §5): `trace_path` returns the shortest reference chain between two `path::name` symbols, up to 6 hops; `changed` returns the symbols a git diff touches and the files that reference each. Five tools in all; `init` and `hook` are CLI subcommands, not tools. No other tools, resources or prompts. Host config: one stdio MCP entry each for Claude Code, Codex CLI and Copilot CLI, documented in the README.
 
+*Amended 2026-09-23 (documents design, `docs/superpowers/specs/2026-09-23-singularrag-documents-design.md`).* The tools serve document sections alongside code: `repo_map` ranks them in one list with no per-kind share; `find_symbol` matches section headings, element ids, CSS selectors, config keys and document stems; `trace_path` walks mention edges; `changed` maps a document hunk to its section; `annotate` targets a section like a symbol; the hook denies a first Read of an indexed document like a source file. `INSTRUCTIONS` and the `repo_map` description say the map also lists document sections (specs, notes, configs) and that the agent should read the section the map points at. No new tool.
+
 ## 10. UI (served by `singularrag serve`)
 
 React, shadcn/ui, Sigma.js (graphology). Built with Bun in `ui/`, embedded in the binary via `rust-embed`, served by axum. JSON over HTTP for reads, SSE for live retrievals, a small JSON API for annotation writes that land in `map.toml`.
@@ -160,6 +168,8 @@ Views:
 Plus a freshness badge (HEAD, stale count, last indexed) and a skipped-files list with reasons.
 
 Not in v0: charts, arranged diagrams, multi-repo switcher, theming beyond shadcn defaults.
+
+*Amended 2026-09-23 (documents design, `docs/superpowers/specs/2026-09-23-singularrag-documents-design.md`).* Documents perspective: the treegrid shows a text kind badge per symbol row (`section`, `element`, `rule`, `key`, `document`) and, in a multi-root workspace, a root filter over the first path segment; the status line shows the roots; the skipped sheet lists document skips with their reasons. Knowledge-graph perspective: the Sigma map colours document nodes by group (docs, config, styles) and draws mention edges like reference edges. Retrieval perspective: a query panel above the retrievals rail (a labelled text field, a budget select of 1024, 2048 or 4096, a submit button) calls `POST /api/query {query, budget}`, which runs `repo_map` under the actor's session key `serve` (labelled "UI"), records the retrieval and returns its id; the rail selects it and a live region announces "N served, M cut". The endpoint sits behind the per-run token and origin check, accepts a query of at most 2,000 characters and clamps the budget.
 
 ## 11. Security and accessibility requirements
 
@@ -208,6 +218,8 @@ Exact wording and gold sets are fixed in `eval/questions.toml` before the first 
 *Amended 2026-09-20 by plan 4 (`docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md`): placement questions are scored by gold recall in tier two as well, not by the 0 to 2 rubric; their gold sets exist and tier one already scores them that way. "Correctness not worse" is mean recall at least the baseline's minus 0.02; "tokens" is input + output + cache creation + cache read.*
 
 *Amended 2026-09-21 after two full runs (`eval/README.md`): the rule is now paired over question × repeat, condition minus baseline, with two-sided 95% intervals. Correctness: the recall interval lies above 0. Efficiency: the tool-call interval lies below 0 and mean tokens exceed the baseline's by at most 10%. Why: the −25% bar measured whether the agent stops reading files, and no map tool did that, Serena included; what the tool is for is recall the agent lacks at no material context cost, and three repeats are noisy enough (per-session tokens ranged 27k to 150k) that point thresholds pass or fail on luck. Under the new rule run 1 fails all three tests and round 2 passes all three, which is the check that the rule was not fitted to the last run.*
+
+*Amended 2026-09-23 (documents design, `docs/superpowers/specs/2026-09-23-singularrag-documents-design.md`).* A second tier-one set, `eval/questions-docs.toml`, runs against this repository as the corpus: twelve questions in three categories (`locate-doc`, `doc-to-code`, `code-to-doc`), gold named `path::name` with a section's heading text as the name, exactly as `singularrag find` prints it. The hono set does not move. The gate for the documents design: hono recall at 4096 within 0.02 of its value before the branch, and the docs set at or above 0.6 at 4096. Results are in `eval/README.md` under "Tier one on documents".
 
 ## 13. Stack decisions
 

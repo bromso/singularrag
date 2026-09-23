@@ -87,7 +87,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
         singularrag_core::store::Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1).unwrap();
+        let (state, _handle) = crate::serve::state::test_state(dir.path(), 1);
         let mut rx = state.events.subscribe();
         let _poller = spawn_poller(state.clone());
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -127,7 +127,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
         singularrag_core::store::Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1).unwrap();
+        let (state, _handle) = crate::serve::state::test_state(dir.path(), 1);
         let mut rx = state.events.subscribe();
         let _poller = spawn_poller(state.clone());
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;

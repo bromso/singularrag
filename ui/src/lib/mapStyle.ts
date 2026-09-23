@@ -1,12 +1,13 @@
 import type { ItemStatus } from "./status";
 import type { FileRow } from "./join";
+import type { LangGroup } from "./langGroup";
 
-export type Palette = { served: string; cut: string; untouched: string; focus: string; edge: string; edgeDim: string; label: string; background: string };
-export type NodeCtx = { status: ItemStatus | null; focused: boolean; blastDepth: number | null; blastActive: boolean; symbols: number; hovered: boolean; zoomRatio: number };
+export type Palette = { served: string; cut: string; untouched: string; focus: string; edge: string; edgeDim: string; label: string; background: string; docs: string; config: string; styles: string };
+export type NodeCtx = { status: ItemStatus | null; focused: boolean; blastDepth: number | null; blastActive: boolean; symbols: number; hovered: boolean; zoomRatio: number; group: LangGroup };
 export type NodeStyle = { size: number; color: string; borderColor?: string; type: "circle" | "border"; label: string | null; zIndex: number };
 export type EdgeCtx = { touchesFocused: boolean; blastActive: boolean; touchesBlast: boolean };
 
-const DEFAULTS: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff" };
+const DEFAULTS: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff", docs: "#7c3aed", config: "#0e7490", styles: "#be185d" };
 
 export const nodeSize = (symbols: number) => Math.min(4 + Math.sqrt(Math.max(0, symbols)) * 1.5, 14);
 
@@ -25,7 +26,7 @@ export function nodeStyle(path: string, ctx: NodeCtx, pal: Palette): NodeStyle {
     s = { size: base, color: pal.background, borderColor: pal.cut, type: "border", label: `${path} · cut`, zIndex: 2 };
   } else if (ctx.status === "untouched") {
     const show = ctx.hovered || ctx.zoomRatio < 0.5;
-    s = { size: Math.max(2, base * 0.6), color: pal.untouched, type: "circle", label: show ? path : null, zIndex: 0 };
+    s = { size: Math.max(2, base * 0.6), color: pal[ctx.group === "code" ? "untouched" : ctx.group], type: "circle", label: show ? path : null, zIndex: 0 };
   } else {
     s = { size: base, color: pal.edge, type: "circle", label: path, zIndex: 1 };
   }
@@ -54,5 +55,6 @@ export function readPalette(el: HTMLElement): Palette {
     served: v("--map-served", DEFAULTS.served), cut: v("--map-cut", DEFAULTS.cut), untouched: v("--map-untouched", DEFAULTS.untouched),
     focus: v("--map-focus", DEFAULTS.focus), edge: v("--map-edge", DEFAULTS.edge), edgeDim: v("--map-edge-dim", DEFAULTS.edgeDim),
     label: v("--map-label", DEFAULTS.label), background: v("--map-bg", DEFAULTS.background),
+    docs: v("--map-docs", DEFAULTS.docs), config: v("--map-config", DEFAULTS.config), styles: v("--map-styles", DEFAULTS.styles),
   };
 }

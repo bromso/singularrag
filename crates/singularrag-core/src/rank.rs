@@ -37,6 +37,7 @@ pub struct Reasons {
     pub fts_hit: bool,
     pub query_ident_match: bool,
     pub note_hit: bool,
+    pub body_hit: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,6 +122,23 @@ fn fts_symbol_ids(store: &Store, terms: &[String]) -> Result<Vec<i64>> {
     Ok(ids)
 }
 
+/// Symbol ids whose section text matches a query term (prefix, porter-stemmed).
+pub fn fts_body_ids(store: &Store, terms: &[String]) -> Result<Vec<i64>> {
+    let mut ids = Vec::new();
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT rowid FROM sections_fts WHERE sections_fts MATCH ?1")?;
+    for t in terms {
+        let q = format!("content: \"{}\"*", t.replace('"', "\"\""));
+        for row in stmt.query_map([q], |r| r.get::<_, i64>(0))? {
+            ids.push(row?);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
 /// Directories whose files are tests or benchmarks, whatever the language.
 const SUPPORT_DIRS: [&str; 7] = [
     "__tests__",
@@ -132,9 +150,13 @@ const SUPPORT_DIRS: [&str; 7] = [
     "benchmarks",
 ];
 
-/// A test, spec or benchmark file: it ranks as a referrer but is never served as a map
+/// A test, spec or benchmark source file (never a document): it ranks as a referrer but is never served as a map
 /// row, and `map.toml`'s `exclude` is still the way to drop a file from the graph.
 pub fn is_support_file(path: &str) -> bool {
+    // Documents are never support files (documents spec §5).
+    if crate::lang::Language::from_path(path).is_some_and(|l| l.is_document()) {
+        return false;
+    }
     let file = path.rsplit('/').next().unwrap_or(path);
     if file.contains(".test.") || file.contains(".spec.") {
         return true;
@@ -197,11 +219,15 @@ pub fn rank_symbols(
 
     let fts_ids = fts_symbol_ids(store, &terms)?;
     let is_fts_hit = |id: i64| fts_ids.binary_search(&id).is_ok();
+    // `fts_names` stays symbol-name hits only: a body hit must not turn the query
+    // multiplier on for an edge name.
     let fts_names: HashSet<String> = symbols
         .iter()
         .filter(|s| is_fts_hit(s.id))
         .map(|s| s.name.clone())
         .collect();
+    let body_ids = fts_body_ids(store, &terms)?;
+    let is_body_hit = |id: i64| body_ids.binary_search(&id).is_ok();
 
     let g: FileGraph = build_graph(store, config, &terms, &fts_names)?;
     let n = g.nodes.len();
@@ -212,7 +238,7 @@ pub fn rank_symbols(
 
     let fts_files: HashSet<i64> = symbols
         .iter()
-        .filter(|s| is_fts_hit(s.id))
+        .filter(|s| is_fts_hit(s.id) || is_body_hit(s.id))
         .map(|s| s.file_id)
         .collect();
 
@@ -278,7 +304,7 @@ pub fn rank_symbols(
     for s in &symbols {
         let fi = g.index_of[&s.file_id];
         *group_size.entry((fi, s.name.clone())).or_default() += 1;
-        if is_fts_hit(s.id) {
+        if is_fts_hit(s.id) || is_body_hit(s.id) {
             *fts_in_file.entry(fi).or_default() += 1;
         }
     }
@@ -299,7 +325,8 @@ pub fn rank_symbols(
                 .map(|d| d / siblings)
                 .unwrap_or(fr * UNREFERENCED_FRACTION);
             let fts_hit = is_fts_hit(s.id);
-            if fts_hit {
+            let body_hit = is_body_hit(s.id);
+            if fts_hit || body_hit {
                 score += fr / *fts_in_file.get(&fi).unwrap_or(&1) as f64;
             }
             let path = &g.nodes[fi].path;
@@ -341,6 +368,7 @@ pub fn rank_symbols(
                     fts_hit,
                     query_ident_match: query_ident_match(&s.name, &terms, &fts_names),
                     note_hit,
+                    body_hit,
                 },
             }
         })
@@ -362,6 +390,7 @@ mod tests {
     use crate::fixture::write_ts_mini;
     use crate::index::Indexer;
     use crate::store::Store;
+    use crate::workspace::Workspace;
 
     #[test]
     fn pagerank_sums_to_one_and_prefers_sinks() {
@@ -391,10 +420,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
         (dir, store)
     }
 
@@ -443,10 +476,14 @@ mod tests {
             "export function page(): void {\n  Child(\"a\");\n  Only(\"b\");\n}\n",
         );
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
         let ranked = rank_symbols(&store, &MapConfig::default(), None, &[]).unwrap();
 
         let children: Vec<&ScoredSymbol> = ranked.iter().filter(|s| s.name == "Child").collect();
@@ -571,6 +608,10 @@ mod tests {
         ] {
             assert!(!is_support_file(p), "{p}");
         }
+        // Documents are never support files (documents spec §5).
+        assert!(!is_support_file("docs/test/guide.md"));
+        assert!(!is_support_file("api.spec.md"));
+        assert!(is_support_file("src/a.test.ts"));
     }
 
     #[test]
@@ -631,6 +672,86 @@ mod tests {
         assert!(
             !note_matches("onboard", &["onboarding".into()]),
             "whole words only"
+        );
+    }
+
+    #[test]
+    fn a_body_hit_seeds_the_file_and_marks_the_section() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = crate::workspace::Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let ranked = rank_symbols(
+            &store,
+            &MapConfig::default(),
+            Some("what does the STALE header mean"),
+            &[],
+        )
+        .unwrap();
+        let top: Vec<String> = ranked
+            .iter()
+            .take(3)
+            .map(|s| format!("{}::{}", s.path, s.name))
+            .collect();
+        assert!(
+            top.contains(&"docs/runbook.md::When the header says STALE".to_string()),
+            "{top:?}"
+        );
+        // The runbook's heading matches `symbols_fts` (its name), not `sections_fts`:
+        // the sentence with "STALE" and "header" is the *runbook's* prose, but under a
+        // different heading it would live in that section's body. Here it is the
+        // heading itself that carries the words, so this hit is `fts_hit`, not
+        // `body_hit`; `docs/design.md::Freshness`'s body is the one that says "the
+        // STALE header" in prose, so that is where `body_hit` is asserted.
+        let hit = ranked
+            .iter()
+            .find(|s| s.name == "When the header says STALE")
+            .unwrap();
+        assert!(hit.reasons.fts_hit);
+        assert!(hit.reasons.seeds.iter().any(|s| s.starts_with("query:")));
+        let fresh = ranked
+            .iter()
+            .find(|s| s.path == "docs/design.md" && s.name == "Freshness")
+            .unwrap();
+        assert!(fresh.reasons.body_hit, "{fresh:?}");
+        // No symbol in docs/design.md has a name-based FTS hit for this query, so this
+        // seed can only come from the body hit: a body-only hit still seeds its file.
+        assert!(
+            fresh.reasons.seeds.iter().any(|s| s.starts_with("query:")),
+            "{:?}",
+            fresh.reasons.seeds
+        );
+        let sess = ranked.iter().find(|s| s.name == "createSession").unwrap();
+        assert!(!sess.reasons.body_hit);
+    }
+
+    #[test]
+    fn a_mention_gives_the_document_an_edge_to_the_code() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = crate::workspace::Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let ranked =
+            rank_symbols(&store, &MapConfig::default(), Some("createSession"), &[]).unwrap();
+        let sess = ranked
+            .iter()
+            .find(|s| s.path == "src/auth/session.ts" && s.name == "createSession")
+            .unwrap();
+        assert!(
+            sess.reasons
+                .referenced_by
+                .iter()
+                .any(|r| r.path == "docs/design.md"),
+            "{:?}",
+            sess.reasons.referenced_by
         );
     }
 }

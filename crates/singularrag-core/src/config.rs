@@ -444,6 +444,40 @@ impl MapConfig {
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
+
+    /// In a named workspace every authored path starts with a root name (documents spec
+    /// §2). `names` empty means an unnamed workspace, where any relative path is fine.
+    pub fn check_roots(&self, names: &[&str]) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let check = |field: String, p: &str| -> Result<()> {
+            let first = p.split('/').next().unwrap_or("");
+            if names.contains(&first) {
+                Ok(())
+            } else {
+                Err(Error::Config(format!(
+                    "map.toml: {field} {p:?} does not start with a root name ({})",
+                    names.join(", ")
+                )))
+            }
+        };
+        for (i, t) in self.pin.iter().enumerate() {
+            check(format!("pin[{i}].path"), &t.path)?;
+        }
+        for (i, t) in self.exclude.iter().enumerate() {
+            check(format!("exclude[{i}].path"), &t.path)?;
+        }
+        for (i, n) in self.note.iter().enumerate() {
+            check(format!("note[{i}].path"), &n.path)?;
+        }
+        for (i, b) in self.boundary.iter().enumerate() {
+            for (j, p) in b.paths.iter().enumerate() {
+                check(format!("boundary[{i}].paths[{j}]"), p)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -557,6 +591,26 @@ extra_patterns = ["*.snap"]
             .unwrap_err();
         assert_eq!(err.field, "deny.extra_patterns");
         assert!(err.message.contains("*.lock"));
+    }
+
+    #[test]
+    fn check_roots_accepts_root_prefixes_and_rejects_unknown_ones() {
+        let cfg = MapConfig::parse(
+            "[[pin]]\npath = \"app/src/a.ts\"\n[[exclude]]\npath = \"vault/old/\"\n",
+        )
+        .unwrap();
+        cfg.check_roots(&["app", "vault"]).unwrap();
+        cfg.check_roots(&[]).unwrap();
+        let bad = MapConfig::parse("[[pin]]\npath = \"src/a.ts\"\n").unwrap();
+        let e = bad.check_roots(&["app", "vault"]).unwrap_err().to_string();
+        assert!(e.contains("pin[0].path") && e.contains("app, vault"), "{e}");
+        let note = MapConfig::parse("[[note]]\npath = \"x/a.md\"\ntext = \"t\"\n").unwrap();
+        assert!(note.check_roots(&["app"]).is_err());
+        let boundary =
+            MapConfig::parse("[[boundary]]\nname = \"b\"\npaths = [\"app/src/\", \"nope/\"]\n")
+                .unwrap();
+        let e = boundary.check_roots(&["app"]).unwrap_err().to_string();
+        assert!(e.contains("boundary[0].paths[1]"), "{e}");
     }
 
     #[test]
