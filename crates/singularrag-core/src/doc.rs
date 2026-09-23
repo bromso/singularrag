@@ -262,6 +262,50 @@ fn collect_kind(n: Node, kind: &str, out: &mut Vec<(usize, usize)>) {
     }
 }
 
+/// Level of a heading-bearing sibling: a `setext_heading`, or a `section` whose first
+/// child is a heading. `None` for anything else.
+fn sibling_level(k: Node) -> Option<usize> {
+    match k.kind() {
+        "setext_heading" => Some(heading_level(k)),
+        "section" => k
+            .child(0)
+            .filter(|h| h.kind() == "atx_heading" || h.kind() == "setext_heading")
+            .map(heading_level),
+        _ => None,
+    }
+}
+
+/// Where a heading at `level` ends among `kids[from..]`: the start of the next sibling
+/// heading at the same or a higher level, else `default`.
+fn heading_end(kids: &[Node], from: usize, level: usize, default: usize) -> usize {
+    kids[from.min(kids.len())..]
+        .iter()
+        .find(|k| sibling_level(**k).is_some_and(|l| l <= level))
+        .map_or(default, |k| k.start_byte())
+}
+
+/// Ranges of the tagged headings among `kids[from..]` that start before `end`: each
+/// later setext heading up to its own end, each `section` up to `MAX_HEADING_LEVEL`.
+fn nested_ranges(kids: &[Node], from: usize, end: usize, parent_end: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (j, k) in kids.iter().enumerate().skip(from) {
+        if k.start_byte() >= end {
+            break;
+        }
+        match (k.kind(), sibling_level(*k)) {
+            ("setext_heading", Some(l)) => out.push((
+                k.start_byte(),
+                heading_end(kids, j + 1, l, parent_end).min(end),
+            )),
+            ("section", Some(l)) if l <= MAX_HEADING_LEVEL => {
+                out.push((k.start_byte(), k.end_byte().min(end)))
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn walk_sections(
     n: Node,
     source: &str,
@@ -274,12 +318,9 @@ fn walk_sections(
     for (i, &child) in kids.iter().enumerate() {
         // tree-sitter-md opens no `section` for a setext heading that follows other
         // content: it sits among its section's children, so it spans to the next
-        // heading sibling or the end of the enclosing node.
+        // sibling heading of its level or higher, or the end of the enclosing node.
         if child.kind() == "setext_heading" && !(i == 0 && n.kind() == "section") {
-            let end = kids[i + 1..]
-                .iter()
-                .find(|k| matches!(k.kind(), "setext_heading" | "section"))
-                .map_or(n.end_byte(), |k| k.start_byte());
+            let end = heading_end(&kids, i + 1, heading_level(child), n.end_byte());
             let name = heading_text(child, source);
             if name.is_empty() {
                 continue;
@@ -291,6 +332,7 @@ fn walk_sections(
             own.push((child.start_byte(), end));
             let mut cuts: Vec<(usize, usize)> = fences.to_vec();
             cuts.push((child.start_byte(), child.end_byte()));
+            cuts.extend(nested_ranges(&kids, i + 1, end, n.end_byte()));
             d.bodies.push((
                 idx,
                 blank(&source[child.start_byte()..end], child.start_byte(), &cuts),
@@ -316,14 +358,17 @@ fn walk_sections(
             continue;
         }
         let sig = truncate(source[h.byte_range()].lines().next().unwrap_or(""));
-        let t = tag(
-            &name,
-            "section",
-            source,
-            child.start_byte(),
-            child.end_byte(),
-            sig,
-        );
+        // A section opened by a setext heading also holds its later setext siblings
+        // (tree-sitter-md nests none of them), so it ends at the next heading of its
+        // level or higher inside it. The whole node stays owned for the document body.
+        let end = if h.kind() == "setext_heading" {
+            let mut cc = child.walk();
+            let inner: Vec<Node> = child.children(&mut cc).collect();
+            heading_end(&inner, 1, level, child.end_byte())
+        } else {
+            child.end_byte()
+        };
+        let t = tag(&name, "section", source, child.start_byte(), end, sig);
         let idx = d.tags.len();
         d.tags.push(t);
         own.push((child.start_byte(), child.end_byte()));
@@ -335,7 +380,7 @@ fn walk_sections(
         cuts.push((h.start_byte(), h.end_byte()));
         d.bodies.push((
             idx,
-            blank(&source[child.byte_range()], child.start_byte(), &cuts),
+            blank(&source[child.start_byte()..end], child.start_byte(), &cuts),
         ));
     }
 }
@@ -528,7 +573,7 @@ fn key_text(n: Node, source: &str) -> String {
 /// The innermost value node: YAML wraps values in `flow_node`/`block_node`.
 fn unwrap_value(n: Node) -> Node {
     let mut v = n;
-    while matches!(v.kind(), "flow_node" | "block_node") {
+    while matches!(v.kind(), "flow_node" | "block_node" | "plain_scalar") {
         match v.child(0) {
             Some(c) => v = c,
             None => break,
@@ -815,6 +860,33 @@ mod tests {
     }
 
     #[test]
+    fn setext_siblings_end_at_the_next_heading_of_their_level() {
+        let src = "Alpha\n=====\n\na\n\nBeta\n====\n\nb\n\nGamma\n-----\n\nc\n";
+        let d = extract(Language::Markdown, src, "setext").unwrap();
+        let span = |n: &str| {
+            let t = find(&d, "section", n);
+            (t.line_start, t.line_end)
+        };
+        assert_eq!(span("Alpha"), (1, 5));
+        assert_eq!(span("Beta"), (6, 14), "Gamma is an h2 under Beta");
+        assert_eq!(span("Gamma"), (11, 14));
+        let body = |name: &str| {
+            let i = d.tags.iter().position(|t| t.name == name).unwrap();
+            d.bodies
+                .iter()
+                .find(|(j, _)| *j == i)
+                .map(|(_, b)| b.clone())
+                .unwrap_or_default()
+        };
+        assert!(!body("Alpha").contains('b'), "{:?}", body("Alpha"));
+        assert!(
+            body("Beta").contains('b') && !body("Beta").contains('c'),
+            "{:?}",
+            body("Beta")
+        );
+    }
+
+    #[test]
     fn html_headings_ids_code_and_hrefs() {
         let src = "<html><body><h1>Title</h1><div id=\"main\"><p>Hi <code>foo</code> <a href=\"../docs/x.md\">x</a> <a href=\"https://e.io/z.md\">z</a></p></div><h2 id=\"s\">Sec</h2></body></html>";
         let d = extract(Language::Html, src, "page").unwrap();
@@ -907,6 +979,11 @@ mod tests {
             find(&d, "key", "scripts.deep").signature,
             "scripts.deep: object"
         );
+        let d = extract(Language::Yaml, "n: 3\nf: 1.5\nb: true\ns: hi\n", "scalars").unwrap();
+        assert_eq!(find(&d, "key", "n").signature, "n: number");
+        assert_eq!(find(&d, "key", "f").signature, "f: number");
+        assert_eq!(find(&d, "key", "b").signature, "b: bool");
+        assert_eq!(find(&d, "key", "s").signature, "s: string");
 
         let toml = "name = \"x\"\n[scripts]\nbuild = \"tsc\"\n[scripts.deep]\nmore = 1\n[[bin]]\nname = \"a\"\n";
         let d = extract(Language::Toml, toml, "Cargo").unwrap();
