@@ -445,3 +445,33 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
         }
     }
 }
+
+#[test]
+fn doctor_reports_ollama_and_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_docs_mini(dir.path());
+    let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["--repo", dir.path().to_str().unwrap(), "index"])
+        .assert()
+        .success();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .env("SINGULARRAG_OLLAMA_URL", f.url())
+        .args(["--repo", dir.path().to_str().unwrap(), "doctor"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ollama: ok")
+                .and(predicate::str::contains("qwen2.5:7b-instruct: pulled"))
+                .and(predicate::str::contains("pending:")),
+        );
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .env("SINGULARRAG_OLLAMA_URL", "http://127.0.0.1:9")
+        .args(["--repo", dir.path().to_str().unwrap(), "doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ollama: unreachable"));
+}

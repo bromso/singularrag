@@ -8,7 +8,9 @@ use rusqlite::params;
 
 use crate::config::MapConfig;
 use crate::index::{IndexStats, Indexer};
-use crate::map::{self, CUT_RECORDED};
+use crate::knowledge::{self, KnowledgeTick};
+use crate::map::{self, Extras, CUT_RECORDED};
+use crate::models::Models;
 use crate::rank::{rank_symbols, ScoredSymbol};
 use crate::store::{lock, Store};
 use crate::time::now_ms;
@@ -40,7 +42,17 @@ pub struct Engine {
     heartbeats: std::cell::Cell<usize>,
     last_heartbeat_ms: std::cell::Cell<i64>,
     refresh_budget: Duration,
+    /// The workspace's `[models]`, with `set_models_url` applied.
+    models_cfg: crate::models::ModelsConfig,
+    /// Built on first use: a `reqwest::blocking::Client` owns a runtime that must not be
+    /// dropped inside an async context, and most Engines never talk to a model.
+    /// `None` inside when the config names no Ollama URL.
+    models: std::cell::OnceCell<Option<Models>>,
+    models_enabled: bool,
 }
+
+/// The background knowledge tick's time budget per call.
+pub const KNOWLEDGE_TICK_BUDGET: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 pub struct MapRequest {
@@ -153,6 +165,7 @@ impl Engine {
         let config = MapConfig::load(&root)?;
         config.check_roots(&ws.names())?;
         let config_mtime = map_toml_mtime(&root);
+        let models_cfg = ws.models.clone();
         Ok(Engine {
             root,
             ws,
@@ -164,6 +177,54 @@ impl Engine {
             heartbeats: std::cell::Cell::new(0),
             last_heartbeat_ms: std::cell::Cell::new(0),
             refresh_budget: REFRESH_BUDGET,
+            models_cfg,
+            models: std::cell::OnceCell::new(),
+            models_enabled: true,
+        })
+    }
+
+    /// The model client, or `None` when models are disabled or unconfigured.
+    pub fn models(&self) -> Option<&Models> {
+        if !self.models_enabled {
+            return None;
+        }
+        self.models
+            .get_or_init(|| models_for(&self.models_cfg))
+            .as_ref()
+    }
+
+    pub fn set_models_enabled(&mut self, enabled: bool) {
+        self.models_enabled = enabled;
+    }
+
+    /// Point the model client at `url` (tests, and callers that override the workspace).
+    pub fn set_models_url(&mut self, url: &str) {
+        self.models_cfg.ollama = url.to_string();
+        self.models = std::cell::OnceCell::new();
+    }
+
+    /// One background knowledge step under `KNOWLEDGE_TICK_BUDGET`. Without models it
+    /// reports the pending count and does nothing else.
+    pub fn knowledge_tick(&mut self) -> Result<KnowledgeTick> {
+        match self.models() {
+            Some(m) => knowledge::tick(&self.store, m, KNOWLEDGE_TICK_BUDGET),
+            None => Ok(KnowledgeTick {
+                pending: knowledge::pending(&self.store)?,
+                ..KnowledgeTick::default()
+            }),
+        }
+    }
+
+    /// The knowledge layer's header segments: pending sections, a recorded model
+    /// outage and an embedding rebuild in progress.
+    pub fn extras(&self) -> Result<Extras> {
+        Ok(Extras {
+            pending: knowledge::pending(&self.store)?,
+            models_unavailable: self
+                .store
+                .get_meta("models_error")?
+                .is_some_and(|e| !e.is_empty()),
+            rebuilding: self.store.get_meta("embeddings_rebuilding")?.as_deref() == Some("1"),
         })
     }
 
@@ -300,7 +361,13 @@ impl Engine {
         )?;
         let text = format!(
             "{}\n{}{}\n",
-            map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+            map::header(
+                &version,
+                head.as_deref(),
+                stats.remaining,
+                &self.extras()?,
+                retrieval_id,
+            ),
             body,
             map::footer(served, ranked.len(), cut_recorded)
         );
@@ -369,7 +436,13 @@ impl Engine {
         )?;
         let text = format!(
             "{}\n{}",
-            map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+            map::header(
+                &version,
+                head.as_deref(),
+                stats.remaining,
+                &self.extras()?,
+                retrieval_id,
+            ),
             crate::find::render_find(hits, &self.config.note)
         );
         Ok(FindResponse {
@@ -486,7 +559,7 @@ impl Engine {
         Ok(AnnotateResponse {
             text: format!(
                 "{}\n{line}\n",
-                map::freshness_header(&version, head.as_deref(), stats.remaining)
+                map::freshness_line(&version, head.as_deref(), stats.remaining, &self.extras()?,)
             ),
             removed,
             notes_on_file,
@@ -581,7 +654,13 @@ impl Engine {
             retrieval_id,
             text: format!(
                 "{}\n{body}",
-                map::header(&version, head.as_deref(), stats.remaining, retrieval_id)
+                map::header(
+                    &version,
+                    head.as_deref(),
+                    stats.remaining,
+                    &self.extras()?,
+                    retrieval_id,
+                )
             ),
             hops: trace.as_ref().map(|t| t.hops.len()).unwrap_or(0),
             found: trace.is_some(),
@@ -628,7 +707,13 @@ impl Engine {
             retrieval_id,
             text: format!(
                 "{}\n{}",
-                map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+                map::header(
+                    &version,
+                    head.as_deref(),
+                    stats.remaining,
+                    &self.extras()?,
+                    retrieval_id,
+                ),
                 crate::changed::render_changed(&c)
             ),
             symbols: c.symbols.len(),
@@ -702,6 +787,14 @@ impl Engine {
 /// mtime of the repo's `map.toml`, or `None` when it does not exist (or cannot be
 /// stat'ed). Filesystem mtime granularity bounds this: two writes inside one tick
 /// look identical, as they do to the indexer's own stat walk.
+fn models_for(cfg: &crate::models::ModelsConfig) -> Option<Models> {
+    if cfg.ollama.trim().is_empty() {
+        None
+    } else {
+        Some(Models::new(cfg.clone()))
+    }
+}
+
 fn map_toml_mtime(root: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(root.join(crate::config::MAP_FILE))
         .and_then(|m| m.modified())

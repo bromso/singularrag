@@ -291,6 +291,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             session_key: crate::actor::SessionKey::Fixed("serve".into()),
             refresh_budget: std::time::Duration::from_secs(5),
+            models_url: None,
         });
         handle.refresh().await.unwrap();
         let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1, handle.clone())

@@ -10,6 +10,7 @@ const base: Status = {
   stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false,
   files: { indexed: 10, skipped: 2 },
   roots: [{ name: "", path: "/repo", git_head: "abc123" }],
+  entities_pending: 0, models_unavailable: false, embeddings_rebuilding: false,
 };
 
 describe("freshnessText", () => {

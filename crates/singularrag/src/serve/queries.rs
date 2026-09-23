@@ -33,6 +33,12 @@ pub struct StatusDto {
     pub indexing: bool,
     pub files: FileCounts,
     pub roots: Vec<RootDto>,
+    /// Sections waiting for the knowledge tick.
+    pub entities_pending: usize,
+    /// The last knowledge tick hit a model outage.
+    pub models_unavailable: bool,
+    /// A dimension change is re-embedding every section.
+    pub embeddings_rebuilding: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,6 +195,11 @@ pub fn status(store: &Store, f: &Freshness, ws: &Workspace) -> Result<StatusDto>
         indexing: f.indexing,
         files: FileCounts { indexed, skipped },
         roots,
+        entities_pending: singularrag_core::knowledge::pending(store)?,
+        models_unavailable: store
+            .get_meta("models_error")?
+            .is_some_and(|e| !e.is_empty()),
+        embeddings_rebuilding: store.get_meta("embeddings_rebuilding")?.as_deref() == Some("1"),
     })
 }
 
@@ -531,6 +542,25 @@ mod tests {
             vec!["app", "notes"]
         );
         assert!(s.roots[0].git_head.is_none());
+    }
+
+    #[test]
+    fn status_reports_the_knowledge_queue() {
+        let d = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(d.path());
+        let mut e = singularrag_core::engine::Engine::open(d.path(), "t").unwrap();
+        e.refresh(std::time::Duration::from_secs(60)).unwrap();
+        let ws = e.workspace().clone();
+        let f = crate::serve::state::Freshness::default();
+        let s = status(e.store(), &f, &ws).unwrap();
+        assert!(s.entities_pending > 0);
+        assert!(!s.models_unavailable && !s.embeddings_rebuilding);
+        e.store()
+            .set_meta("models_error", "connection refused")
+            .unwrap();
+        e.store().set_meta("embeddings_rebuilding", "1").unwrap();
+        let s = status(e.store(), &f, &ws).unwrap();
+        assert!(s.models_unavailable && s.embeddings_rebuilding);
     }
 
     #[test]

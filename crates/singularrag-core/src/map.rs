@@ -121,9 +121,29 @@ pub fn fit(items: &[ScoredSymbol], budget: usize, notes: &[Note]) -> usize {
     lo
 }
 
+/// The knowledge layer's state as it shows on the first line of a tool response:
+/// each segment appears only when it has something to say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Extras {
+    pub pending: usize,
+    pub models_unavailable: bool,
+    pub rebuilding: bool,
+}
+
 /// `# singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh`: the first line of every tool
-/// response, with or without a retrieval id.
+/// response, with or without a retrieval id, before any extras.
 pub fn freshness_header(index_version: &str, git_head: Option<&str>, stale: usize) -> String {
+    freshness_line(index_version, git_head, stale, &Extras::default())
+}
+
+/// The freshness header plus `· entities: N pending`, `· models: unavailable` and
+/// `· embeddings: rebuilding`, in that order, each only when it applies.
+pub fn freshness_line(
+    index_version: &str,
+    git_head: Option<&str>,
+    stale: usize,
+    extras: &Extras,
+) -> String {
     let idx: String = index_version.chars().take(6).collect();
     let head = match git_head {
         Some(h) if h.contains(':') => h.to_string(),
@@ -135,18 +155,29 @@ pub fn freshness_header(index_version: &str, git_head: Option<&str>, stale: usiz
     } else {
         format!("STALE: {stale} files changed since index")
     };
-    format!("# singularrag · index {idx} · HEAD {head} · {fresh}")
+    let mut line = format!("# singularrag · index {idx} · HEAD {head} · {fresh}");
+    if extras.pending > 0 {
+        line.push_str(&format!(" · entities: {} pending", extras.pending));
+    }
+    if extras.models_unavailable {
+        line.push_str(" · models: unavailable");
+    }
+    if extras.rebuilding {
+        line.push_str(" · embeddings: rebuilding");
+    }
+    line
 }
 
 pub fn header(
     index_version: &str,
     git_head: Option<&str>,
     stale: usize,
+    extras: &Extras,
     retrieval_id: i64,
 ) -> String {
     format!(
         "{} · retrieval r_{retrieval_id:06}",
-        freshness_header(index_version, git_head, stale)
+        freshness_line(index_version, git_head, stale, extras)
     )
 }
 
@@ -291,11 +322,17 @@ mod tests {
     #[test]
     fn header_and_footer_format() {
         assert_eq!(
-            header("7f3a2c9d1e0b", Some("9b1e0d4f5a6b7c8d"), 0, 123),
+            header(
+                "7f3a2c9d1e0b",
+                Some("9b1e0d4f5a6b7c8d"),
+                0,
+                &Extras::default(),
+                123
+            ),
             "# singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh · retrieval r_000123"
         );
         assert_eq!(
-            header("7f3a2c9d1e0b", None, 4, 7),
+            header("7f3a2c9d1e0b", None, 4, &Extras::default(), 7),
             "# singularrag · index 7f3a2c · HEAD none · STALE: 4 files changed since index · retrieval r_000007"
         );
         assert_eq!(
@@ -307,6 +344,27 @@ mod tests {
             "# 42 of 310 symbols shown · 268 more ranked below budget · 25 recorded · widen with a larger budget or a focus file"
         );
         assert_eq!(footer(5, 5, 0), "# 5 of 5 symbols shown");
+    }
+
+    #[test]
+    fn header_extras_render_in_order() {
+        let x = Extras {
+            pending: 12,
+            models_unavailable: true,
+            rebuilding: false,
+        };
+        assert_eq!(freshness_line("abcdef12", Some("9b1e0d4f00"), 0, &x), "# singularrag · index abcdef · HEAD 9b1e0d4 · fresh · entities: 12 pending · models: unavailable");
+        let r = Extras {
+            pending: 0,
+            models_unavailable: false,
+            rebuilding: true,
+        };
+        assert!(freshness_line("abcdef12", None, 3, &r)
+            .ends_with("STALE: 3 files changed since index · embeddings: rebuilding"));
+        assert_eq!(
+            header("abcdef12", None, 0, &Extras::default(), 7),
+            "# singularrag · index abcdef · HEAD none · fresh · retrieval r_000007"
+        );
     }
 
     #[test]

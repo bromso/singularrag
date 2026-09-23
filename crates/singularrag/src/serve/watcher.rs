@@ -155,6 +155,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             session_key: SessionKey::Fixed("serve".into()),
             refresh_budget: singularrag_core::engine::REFRESH_BUDGET,
+            models_url: None,
         });
         let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1, handle.clone())
             .unwrap();

@@ -81,6 +81,7 @@ pub fn test_state(dir: &std::path::Path, port: u16) -> (AppState, crate::actor::
         root: dir.to_path_buf(),
         session_key: crate::actor::SessionKey::Fixed("serve".into()),
         refresh_budget: singularrag_core::engine::REFRESH_BUDGET,
+        models_url: None,
     });
     let state = AppState::new(dir.to_path_buf(), port, handle.clone()).unwrap();
     (state, handle)

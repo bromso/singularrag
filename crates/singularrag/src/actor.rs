@@ -13,6 +13,7 @@ use singularrag_core::engine::{
     FindResponse, MapRequest, MapResponse, TraceRequest, TraceResponse,
 };
 use singularrag_core::index::IndexStats;
+use singularrag_core::knowledge::KnowledgeTick;
 use tokio::sync::oneshot;
 
 /// Errors are stringified at the actor boundary: replies must be `Send + 'static`,
@@ -39,6 +40,9 @@ pub enum Job {
     Annotate(AnnotateRequest, oneshot::Sender<Reply<AnnotateResponse>>),
     Trace(TraceRequest, oneshot::Sender<Reply<TraceResponse>>),
     Changed(ChangedRequest, oneshot::Sender<Reply<ChangedResponse>>),
+    /// One knowledge tick now. The loop ticks on its own; this is for tests.
+    #[allow(dead_code)]
+    Knowledge(oneshot::Sender<Reply<KnowledgeTick>>),
     /// One budgeted refresh with no retrieval recorded and no drain armed: the file
     /// watcher's job, not a tool response. Constructed by `serve::watcher` through
     /// `EngineHandle::refresh`, and exercised directly by the actor's unit tests.
@@ -68,7 +72,14 @@ pub struct EngineConfig {
     pub root: PathBuf,
     pub session_key: SessionKey,
     pub refresh_budget: Duration,
+    /// Overrides the workspace's Ollama URL (tests point it at a fake). `None` lets the
+    /// workspace config and `SINGULARRAG_OLLAMA_URL` apply.
+    pub models_url: Option<String>,
 }
+
+/// How long the loop waits for a job before ticking the knowledge queue again, while
+/// sections are pending (or the last tick hit a model outage).
+const KNOWLEDGE_IDLE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -114,6 +125,11 @@ impl EngineHandle {
     #[allow(dead_code)]
     pub async fn set_refresh_budget(&self, budget: Duration) -> Reply<()> {
         self.ask(|tx| Job::SetRefreshBudget(budget, tx)).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn knowledge_tick(&self) -> Reply<KnowledgeTick> {
+        self.ask(Job::Knowledge).await
     }
 
     #[allow(dead_code)]
@@ -171,6 +187,9 @@ struct Actor {
     /// Backlog the current drain is working against: the `stale_count` that armed it,
     /// then each chunk's `remaining`. A chunk that does not shrink it made no progress.
     drain_remaining: usize,
+    /// True while sections wait for the knowledge tick: the loop then waits on
+    /// `recv_timeout(KNOWLEDGE_IDLE)` instead of blocking forever.
+    knowledge_pending: bool,
 }
 
 impl Actor {
@@ -194,6 +213,9 @@ impl Actor {
             let opened = Engine::open(&self.config.root, &key)
                 .map(|mut e| {
                     e.set_refresh_budget(self.config.refresh_budget);
+                    if let Some(url) = &self.config.models_url {
+                        e.set_models_url(url);
+                    }
                     e
                 })
                 .map_err(|e| e.to_string());
@@ -215,7 +237,32 @@ impl Actor {
         self.drain_remaining = if self.drain_pending { stale_count } else { 0 };
     }
 
+    /// Re-reads the pending count after a job that may have queued sections.
+    fn refresh_knowledge_pending(&mut self) {
+        if let Some(Ok(e)) = &self.engine {
+            if let Ok(x) = e.extras() {
+                self.knowledge_pending = x.pending > 0;
+            }
+        }
+    }
+
+    /// One knowledge tick. An outage keeps the queue armed so the idle timeout retries.
+    fn knowledge_tick_once(&mut self) -> Reply<KnowledgeTick> {
+        let out = self
+            .engine()
+            .and_then(|e| e.knowledge_tick().map_err(|e| e.to_string()));
+        match &out {
+            Ok(t) => self.knowledge_pending = t.pending > 0 || t.model_error.is_some(),
+            Err(e) => tracing::warn!("knowledge tick failed: {e}"),
+        }
+        out
+    }
+
     fn handle(&mut self, job: Job) -> bool {
+        let refreshes = matches!(
+            job,
+            Job::Map(..) | Job::Find(..) | Job::Trace(..) | Job::Changed(..) | Job::Refresh(..)
+        );
         match job {
             Job::Map(req, reply) => {
                 let out = self
@@ -291,7 +338,14 @@ impl Actor {
                     chunks: self.drain_chunks,
                 }));
             }
+            Job::Knowledge(reply) => {
+                let out = self.knowledge_tick_once();
+                let _ = reply.send(out);
+            }
             Job::Shutdown => return false,
+        }
+        if refreshes {
+            self.refresh_knowledge_pending();
         }
         true
     }
@@ -348,6 +402,7 @@ fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
         drain_chunks: 0,
         drain_pending: false,
         drain_remaining: 0,
+        knowledge_pending: false,
     };
     loop {
         if actor.drain_pending {
@@ -362,13 +417,30 @@ fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
                 Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => {
                     actor.drain_pending = actor.drain_chunk();
+                    if !actor.drain_pending {
+                        let _ = actor.knowledge_tick_once();
+                    }
                     continue;
                 }
             }
         }
-        // Nothing to drain: block. `drain_pending` only ever changes inside this loop
-        // (in `handle`), so there is nothing a timeout could wake up to notice — the
-        // old 20 ms poll just woke the thread fifty times a second to find that out.
+        if actor.knowledge_pending {
+            match rx.recv_timeout(KNOWLEDGE_IDLE) {
+                Ok(job) => {
+                    if !actor.handle(job) {
+                        return;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = actor.knowledge_tick_once();
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            continue;
+        }
+        // Nothing to drain and nothing queued for the knowledge tick: block.
+        // `drain_pending` and `knowledge_pending` only change inside this loop, so there
+        // is nothing a timeout could wake up to notice.
         match rx.recv() {
             Ok(job) => {
                 if !actor.handle(job) {
@@ -401,6 +473,7 @@ mod tests {
                 "test-client".into(),
             )))),
             refresh_budget: budget,
+            models_url: None,
         }
     }
 
@@ -569,6 +642,7 @@ mod tests {
             root: std::path::PathBuf::from("/nonexistent/singularrag-test-root"),
             session_key: SessionKey::FromHandshake(Arc::new(Mutex::new(None))),
             refresh_budget: REFRESH_BUDGET,
+            models_url: None,
         };
         let (handle, _join, _died) = spawn(cfg);
         let err = handle.map(MapRequest::default()).await.unwrap_err();
@@ -619,6 +693,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             session_key: SessionKey::Fixed("serve".into()),
             refresh_budget: REFRESH_BUDGET,
+            models_url: None,
         });
         handle.map(MapRequest::default()).await.unwrap();
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
@@ -664,5 +739,85 @@ mod tests {
         assert!(stats.lock_timeout);
         assert_eq!(stats.indexed, 0);
         lock::release(&store, foreign).unwrap();
+    }
+
+    fn models_config(root: &std::path::Path, url: String) -> EngineConfig {
+        EngineConfig {
+            models_url: Some(url),
+            ..config(root, REFRESH_BUDGET)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_actor_ticks_the_queue_between_jobs_and_the_header_counts_down() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(dir.path());
+        let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+        let (handle, join, _died) = spawn(models_config(dir.path(), f.url()));
+        let first = handle
+            .map(MapRequest {
+                query: Some("stale".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            first.text.contains("entities: ") && first.text.contains(" pending"),
+            "{}",
+            first.text.lines().next().unwrap()
+        );
+        for _ in 0..10 {
+            handle.knowledge_tick().await.unwrap();
+        }
+        let later = handle
+            .map(MapRequest {
+                query: Some("stale".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !later.text.contains("pending"),
+            "{}",
+            later.text.lines().next().unwrap()
+        );
+        handle.shutdown();
+        join.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_model_outage_mid_tick_leaves_the_queue_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(dir.path());
+        let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+        let (handle, join, _died) = spawn(models_config(dir.path(), f.url()));
+        let stale = || MapRequest {
+            query: Some("stale".into()),
+            ..Default::default()
+        };
+        handle.map(stale()).await.unwrap();
+        let t = handle.knowledge_tick().await.unwrap();
+        assert!(t.embedded > 0);
+        f.set_down(true);
+        let t = handle.knowledge_tick().await.unwrap();
+        assert!(t.model_error.is_some() && t.extracted == 0, "{t:?}");
+        let m = handle.map(stale()).await.unwrap();
+        assert!(
+            m.text.contains("models: unavailable") && m.text.contains("pending"),
+            "{}",
+            m.text.lines().next().unwrap()
+        );
+        f.set_down(false);
+        for _ in 0..10 {
+            handle.knowledge_tick().await.unwrap();
+        }
+        let m = handle.map(stale()).await.unwrap();
+        assert!(
+            !m.text.contains("models: unavailable") && !m.text.contains("pending"),
+            "{}",
+            m.text.lines().next().unwrap()
+        );
+        handle.shutdown();
+        join.join().unwrap();
     }
 }

@@ -24,6 +24,7 @@ export type Status = {
   index_version: string; git_head: string | null; indexed_at_ms: number | null; stale_count: number;
   lock_timeout: boolean; foreign_indexing: boolean; indexing: boolean; files: { indexed: number; skipped: number };
   roots: { name: string; path: string; git_head: string | null }[];
+  entities_pending: number; models_unavailable: boolean; embeddings_rebuilding: boolean;
 };
 export type GraphNode = { path: string; symbols: number; lang: string | null };
 export type GraphEdge = { src: number; dst: number; weight: number; names: number };

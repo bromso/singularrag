@@ -88,6 +88,7 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
         root: root.clone(),
         session_key: crate::actor::SessionKey::Fixed("serve".into()),
         refresh_budget: singularrag_core::engine::REFRESH_BUDGET,
+        models_url: None,
     });
 
     let result = rt.block_on(async {

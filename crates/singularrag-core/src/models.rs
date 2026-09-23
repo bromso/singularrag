@@ -95,6 +95,7 @@ pub struct ExtractedRelation {
     pub description: String,
 }
 
+#[derive(Debug)]
 pub struct Models {
     cfg: ModelsConfig,
     http: reqwest::blocking::Client,
