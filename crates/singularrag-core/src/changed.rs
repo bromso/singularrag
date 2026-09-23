@@ -153,15 +153,10 @@ pub fn changed(
          WHERE f.path = ?1 AND f.skipped_reason IS NULL AND s.line_start <= ?3 AND s.line_end >= ?2
          ORDER BY s.line_start",
     )?;
-    // A file with no symbols to touch is either indexed (skipped_reason IS NULL) or a
-    // recognised-but-not-yet-parsed type ("unsupported-language", e.g. Markdown before
-    // Task 5's document extraction): both are worth reporting as "no symbol touched".
-    // A denylisted, secret-like, binary or oversize file stays invisible here as
-    // elsewhere.
     let indexed: Vec<String> = {
-        let mut q = store.conn().prepare(
-            "SELECT path FROM files WHERE skipped_reason IS NULL OR skipped_reason = 'unsupported-language'",
-        )?;
+        let mut q = store
+            .conn()
+            .prepare("SELECT path FROM files WHERE skipped_reason IS NULL")?;
         let rows = q
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -633,12 +628,14 @@ mod tests {
                 .any(|s| s.path == "app/src/auth/session.ts" && s.name == "createSession"),
             "{c:?}"
         );
-        // Task 5 switches this to: c.symbols.iter().any(|s| s.path == "notes/new.md")
-        // once document extraction produces a `document` symbol for Markdown files.
+        // Task 5 switches this to: assert notes/new.md appears as a document symbol.
+        // Markdown is not indexed today, so it is neither a changed symbol nor a
+        // "no symbol touched" file — it never entered the index at all.
+        assert!(!c.symbols.iter().any(|s| s.path == "notes/new.md"), "{c:?}");
         assert!(
-            c.files_without_symbols
+            !c.files_without_symbols
                 .contains(&"notes/new.md".to_string()),
-            "untracked in the second root: {c:?}"
+            "{c:?}"
         );
     }
 
