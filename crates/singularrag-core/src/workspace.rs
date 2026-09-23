@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::models::ModelsConfig;
 use crate::{Error, Result};
 
 pub const WORKSPACE_FILE: &str = ".singularrag/workspace.toml";
@@ -24,12 +25,36 @@ pub struct Workspace {
     pub dir: PathBuf,
     /// In file order; one unnamed root when no file declares any.
     pub roots: Vec<Root>,
+    /// `[models]`, folded onto the defaults, then `SINGULARRAG_OLLAMA_URL`.
+    pub models: ModelsConfig,
 }
 
 #[derive(Deserialize)]
 struct WorkspaceFile {
     #[serde(default)]
     root: Vec<RootEntry>,
+    models: Option<ModelsEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelsEntry {
+    ollama: Option<String>,
+    extract: Option<String>,
+    embed: Option<String>,
+    api: Option<String>,
+}
+
+impl ModelsEntry {
+    fn fold(self) -> ModelsConfig {
+        let d = ModelsConfig::default();
+        ModelsConfig {
+            ollama: self.ollama.unwrap_or(d.ollama),
+            extract: self.extract.unwrap_or(d.extract),
+            embed: self.embed.unwrap_or(d.embed),
+            api: self.api.or(d.api),
+        }
+        .with_env()
+    }
 }
 
 #[derive(Deserialize)]
@@ -57,6 +82,7 @@ impl Workspace {
                 path: dir.clone(),
             }],
             dir,
+            models: ModelsConfig::default().with_env(),
         })
     }
 
@@ -70,8 +96,12 @@ impl Workspace {
         };
         let parsed: WorkspaceFile =
             toml::from_str(&text).map_err(|e| Error::Config(format!("{}: {e}", file.display())))?;
+        let models = parsed
+            .models
+            .map(ModelsEntry::fold)
+            .unwrap_or_else(|| ws.models.clone());
         if parsed.root.is_empty() {
-            return Ok(ws);
+            return Ok(Workspace { models, ..ws });
         }
         let mut roots: Vec<Root> = Vec::with_capacity(parsed.root.len());
         for (i, r) in parsed.root.iter().enumerate() {
@@ -122,7 +152,11 @@ impl Workspace {
                 }
             }
         }
-        Ok(Workspace { dir: ws.dir, roots })
+        Ok(Workspace {
+            dir: ws.dir,
+            roots,
+            models,
+        })
     }
 
     pub fn is_named(&self) -> bool {
@@ -307,5 +341,23 @@ mod tests {
         write_roots(d.path(), "[[root]\nname = 1\n");
         let e = Workspace::open(d.path()).unwrap_err().to_string();
         assert!(e.contains("workspace.toml"), "{e}");
+    }
+
+    #[test]
+    fn models_table_is_optional_with_defaults_and_env_override() {
+        let d = ws_dir();
+        assert_eq!(
+            Workspace::open(d.path()).unwrap().models,
+            crate::models::ModelsConfig::default()
+        );
+        write_roots(
+            d.path(),
+            "[models]\nextract = \"llama3.2:3b\"\napi = \"anthropic\"\n",
+        );
+        let ws = Workspace::open(d.path()).unwrap();
+        assert_eq!(ws.models.extract, "llama3.2:3b");
+        assert_eq!(ws.models.embed, "nomic-embed-text");
+        assert_eq!(ws.models.api.as_deref(), Some("anthropic"));
+        assert!(!ws.is_named(), "a models table alone does not name roots");
     }
 }

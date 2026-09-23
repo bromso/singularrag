@@ -9,6 +9,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
+sqlite-vec = "=0.1.6"
 tree-sitter = "0.27"
 tree-sitter-tags = "0.27"
 tree-sitter-typescript = "0.23"

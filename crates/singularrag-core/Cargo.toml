@@ -9,6 +9,7 @@ description = "Repo map with retrieval provenance for coding agents (engine)"
 [dependencies]
 chrono = { workspace = true }
 rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-tags = { workspace = true }
 tree-sitter-typescript = { workspace = true }

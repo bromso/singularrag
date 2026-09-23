@@ -1,7 +1,7 @@
 //! singularrag engine: index a repo, rank symbols, render a budgeted map,
 //! and record what was served and cut so a human can see it.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod blast;
 pub mod changed;
