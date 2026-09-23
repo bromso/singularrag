@@ -12,7 +12,7 @@ pub enum Host {
     All,
 }
 
-pub const AGENTS_SNIPPET: &str = "This repository has a singularrag map. Call repo_map with your task before reading files; use find_symbol for a name, trace_path for how two symbols connect, and changed for what a diff touches.";
+pub const AGENTS_SNIPPET: &str = "This repository has a singularrag map. Call repo_map with your task before reading files; use find_symbol for a name, trace_path for how two symbols connect, changed for what a diff touches, and entities for what the documents say about a person, system or concept.";
 
 fn hook_entry(matcher: &str, command: String) -> Value {
     json!({ "matcher": matcher, "hooks": [ { "type": "command", "command": command } ] })
