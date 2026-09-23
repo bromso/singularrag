@@ -269,6 +269,43 @@ fn mcp_help_names_all_five_tools() {
 }
 
 #[test]
+fn changed_in_a_named_workspace_prefixes_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, _) = singularrag_core::fixture::write_workspace(dir.path());
+    let git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&app)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "."]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "base",
+    ]);
+    std::fs::write(
+        app.join("src/util/log.ts"),
+        "export function log(msg: string): void {\n  // changed\n  console.log(msg);\n}\n",
+    )
+    .unwrap();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["--repo", dir.path().to_str().unwrap(), "changed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("app/src/util/log.ts::log"));
+}
+
+#[test]
 fn readme_cli_block_lists_the_new_subcommands() {
     let readme =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();

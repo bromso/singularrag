@@ -592,8 +592,7 @@ impl Engine {
 
     pub fn changed(&mut self, req: &ChangedRequest) -> Result<ChangedResponse> {
         let stats = self.refresh(self.refresh_budget)?;
-        let c =
-            crate::changed::changed(&self.store, &self.config, &self.root, req.base.as_deref())?;
+        let c = crate::changed::changed(&self.store, &self.config, &self.ws, req.base.as_deref())?;
         let ranked: Vec<ScoredSymbol> = c
             .symbols
             .iter()

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 use singularrag_core::store::Store;
+use singularrag_core::workspace::Workspace;
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -28,6 +29,7 @@ pub enum ServerEvent {
 #[derive(Clone)]
 pub struct AppState {
     pub root: PathBuf,
+    pub ws: Workspace,
     pub port: u16,
     pub token: Arc<str>,
     pub read: Arc<Mutex<Store>>,
@@ -38,10 +40,12 @@ pub struct AppState {
 impl AppState {
     pub fn new(root: PathBuf, port: u16) -> anyhow::Result<AppState> {
         let root = root.canonicalize()?;
+        let ws = Workspace::open(&root)?;
         let read = Store::open_read_only(&root.join(singularrag_core::engine::DB_FILE))?;
         let (events, _) = broadcast::channel(64);
         Ok(AppState {
             root,
+            ws,
             port,
             token: crate::serve::auth::generate_token().into(),
             read: Arc::new(Mutex::new(read)),

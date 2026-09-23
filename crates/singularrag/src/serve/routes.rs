@@ -39,7 +39,7 @@ fn locked<T>(
 
 pub async fn status(State(s): State<AppState>) -> Result<Json<queries::StatusDto>, ApiError> {
     let f = s.freshness.read().map(|g| g.clone()).unwrap_or_default();
-    Ok(Json(locked(&s, |store| queries::status(store, &f))?))
+    Ok(Json(locked(&s, |store| queries::status(store, &f, &s.ws))?))
 }
 
 #[derive(Deserialize)]
