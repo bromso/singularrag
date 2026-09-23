@@ -27,17 +27,6 @@ pub fn heartbeat(store: &Store, pid: u32, now_ms: i64) -> Result<()> {
     Ok(())
 }
 
-/// The pid holding the lock row, stale or not.
-pub fn holder(store: &Store) -> Result<Option<u32>> {
-    use rusqlite::OptionalExtension;
-    Ok(store
-        .conn()
-        .query_row("SELECT pid FROM indexer_lock WHERE id = 1", [], |r| {
-            r.get(0)
-        })
-        .optional()?)
-}
-
 pub fn release(store: &Store, pid: u32) -> Result<()> {
     store
         .conn()

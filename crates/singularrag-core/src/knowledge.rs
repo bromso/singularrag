@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{ExtractedEntity, Extraction, Models, SectionInput, DESCRIPTION_MAX};
-use crate::store::{lock, vec, Store};
+use crate::store::{vec, Store};
 use crate::time::now_ms;
 use crate::{Error, Result};
 
@@ -170,8 +170,6 @@ pub struct KnowledgeTick {
     pub pending: usize,
     /// The model outage that stopped the tick, if any.
     pub model_error: Option<String>,
-    /// Another process held the indexer lock, so this tick did nothing.
-    pub skipped_locked: bool,
 }
 
 /// `old` extended with `add` (joined with `; `, capped at `DESCRIPTION_MAX` characters)
@@ -415,35 +413,69 @@ fn clear_meta(store: &Store, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Holds the indexer lock for one tick and releases it on every exit path, unless this
-/// process already held it when the tick began (then its owner releases it).
-struct TickLock<'a> {
-    store: &'a Store,
-    pid: u32,
-    release: bool,
+/// A claim older than this is abandoned (its process died mid-tick) and may be taken over.
+/// A tick's budget plus one model timeout per step stays well under it.
+pub const CLAIM_STALE_MS: i64 = 120_000;
+
+/// Queue rows the embed step works: no section vector yet.
+const CLAIM_EMBED: &str =
+    "NOT EXISTS (SELECT 1 FROM section_embeddings e WHERE e.symbol_id = q.symbol_id)";
+/// Queue rows the extract step works: embedded, attempts left.
+const CLAIM_EXTRACT: &str = "EXISTS (SELECT 1 FROM section_embeddings e WHERE e.symbol_id = q.symbol_id) AND q.attempts < 3";
+const _: () = assert!(MAX_ATTEMPTS == 3, "CLAIM_EXTRACT spells MAX_ATTEMPTS out");
+
+/// Claims up to `limit` unclaimed (or stale-claimed) queue rows matching `filter`, oldest
+/// first, stamping them `claimed_at_ms = now`. One UPDATE that re-checks the claim
+/// predicate, so two processes ticking on one index never claim the same row. Returns the
+/// claimed ids, oldest first.
+fn claim_rows(conn: &Connection, filter: &str, limit: usize, now: i64) -> Result<Vec<i64>> {
+    const FREE: &str = "(claimed_at_ms IS NULL OR claimed_at_ms < ?1 - ?2)";
+    let mut stmt = conn.prepare(&format!(
+        "UPDATE extract_queue SET claimed_at_ms = ?1
+         WHERE symbol_id IN (SELECT q.symbol_id FROM extract_queue q WHERE {filter} AND {FREE}
+                             ORDER BY q.queued_at_ms, q.symbol_id LIMIT ?3)
+           AND {FREE}
+         RETURNING symbol_id, queued_at_ms"
+    ))?;
+    let mut rows: Vec<(i64, i64)> = stmt
+        .query_map(params![now, CLAIM_STALE_MS, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    rows.sort_by_key(|&(id, queued)| (queued, id));
+    Ok(rows.into_iter().map(|(id, _)| id).collect())
 }
 
-impl<'a> TickLock<'a> {
-    /// `None` when another live process holds the lock.
-    fn acquire(store: &'a Store) -> Result<Option<TickLock<'a>>> {
-        let pid = std::process::id();
-        let already = lock::holder(store)? == Some(pid);
-        if !lock::try_acquire(store, pid, now_ms())? {
-            return Ok(None);
-        }
-        Ok(Some(TickLock {
-            store,
-            pid,
-            release: !already,
-        }))
+/// Rows this tick claimed; whatever is still queued when it drops is unclaimed (if the
+/// claim is still ours), so a failed, skipped or embedded-only row is worked next tick.
+struct Claim<'a> {
+    conn: &'a Connection,
+    ids: Vec<i64>,
+    at: i64,
+}
+
+impl Claim<'_> {
+    fn id_list(&self) -> String {
+        self.ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
-impl Drop for TickLock<'_> {
+impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        if self.release {
-            let _ = lock::release(self.store, self.pid);
+        if self.ids.is_empty() {
+            return;
         }
+        let _ = self.conn.execute(
+            &format!(
+                "UPDATE extract_queue SET claimed_at_ms = NULL WHERE claimed_at_ms = ?1 AND symbol_id IN ({})",
+                self.id_list()
+            ),
+            [self.at],
+        );
     }
 }
 
@@ -451,9 +483,8 @@ impl Drop for TickLock<'_> {
 /// A model outage never escapes as an error: it lands in `model_error` and in meta
 /// `models_error`, and the tick stops there. `should_yield` is asked before the embed
 /// batch and before each extraction: `true` (a job is waiting) ends the tick there.
-/// The tick runs under the indexer lock, so two processes on one index never do the
-/// same model work; when another process holds it the tick does nothing and says so
-/// in `skipped_locked`.
+/// Each step claims its queue rows before any model call (`claim_rows`), so two processes
+/// on one index never do the same model work; no lock is held.
 pub fn tick(
     store: &Store,
     models: &Models,
@@ -467,11 +498,6 @@ pub fn tick(
         t.pending = pending(store)?;
         return Ok(t);
     }
-    let Some(_lock) = TickLock::acquire(store)? else {
-        t.skipped_locked = true;
-        t.pending = pending(store)?;
-        return Ok(t);
-    };
     // No retry on a timeout: one slow section holds the actor for one timeout at most.
     let models = &models.tick_client();
     if let Some(d) = swapped_model_dim(store, models)? {
@@ -622,13 +648,19 @@ fn embed_sections(
 /// Returns `false` when a model outage or a dimension rebuild ended the tick.
 fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<bool> {
     let conn = store.conn();
+    let at = now_ms();
+    let claim = Claim {
+        conn,
+        ids: claim_rows(conn, CLAIM_EMBED, EMBED_PER_TICK, at)?,
+        at,
+    };
     let rows: Vec<(i64, String)> = {
-        let mut stmt = conn.prepare(
-            "SELECT q.symbol_id, q.hash FROM extract_queue q
-             WHERE NOT EXISTS (SELECT 1 FROM section_embeddings e WHERE e.symbol_id = q.symbol_id)
-             ORDER BY q.queued_at_ms, q.symbol_id LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([EMBED_PER_TICK as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT q.symbol_id, q.hash FROM extract_queue q WHERE q.symbol_id IN ({})
+             ORDER BY q.queued_at_ms, q.symbol_id",
+            claim.id_list()
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
     if rows.is_empty() {
@@ -679,24 +711,26 @@ fn extract_step(
     should_yield: &dyn Fn() -> bool,
 ) -> Result<()> {
     let conn = store.conn();
+    let at = now_ms();
+    let claim = Claim {
+        conn,
+        ids: claim_rows(conn, CLAIM_EXTRACT, EXTRACT_PER_TICK, at)?,
+        at,
+    };
     let rows: Vec<(i64, String, String, String)> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT q.symbol_id, q.hash, s.name, f.path FROM extract_queue q
-             JOIN section_embeddings e ON e.symbol_id = q.symbol_id
              JOIN symbols s ON s.id = q.symbol_id JOIN files f ON f.id = s.file_id
-             WHERE q.attempts < ?1 ORDER BY q.queued_at_ms, q.symbol_id LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![MAX_ATTEMPTS, EXTRACT_PER_TICK as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?;
+             WHERE q.symbol_id IN ({}) ORDER BY q.queued_at_ms, q.symbol_id",
+            claim.id_list()
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
     for (symbol_id, hash, heading, path) in rows {
         if start.elapsed() >= budget || should_yield() {
             break;
         }
-        // One extraction can outlast `LOCK_STALE_MS`; keep the tick's lock fresh between them.
-        lock::heartbeat(store, std::process::id(), now_ms())?;
         let Some(body) = section_body(conn, symbol_id)? else {
             conn.execute(
                 "DELETE FROM extract_queue WHERE symbol_id = ?1",
@@ -1707,27 +1741,84 @@ mod tests {
         assert_eq!(generate, 1, "no retry on a timeout inside a tick");
     }
 
+    fn claimed(store: &Store) -> i64 {
+        count(
+            store,
+            "SELECT COUNT(*) FROM extract_queue WHERE claimed_at_ms IS NOT NULL",
+        )
+    }
+
     #[test]
-    fn a_tick_does_nothing_while_another_process_holds_the_lock() {
+    fn two_handles_claim_disjoint_rows_oldest_first() {
+        let (d, a) = indexed_docs();
+        let b = Store::open(&d.path().join(".singularrag/index.db")).unwrap();
+        let oldest: Vec<i64> = {
+            let mut stmt = a
+                .conn()
+                .prepare("SELECT symbol_id FROM extract_queue ORDER BY queued_at_ms, symbol_id")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert!(oldest.len() >= 3, "{oldest:?}");
+        let now = now_ms();
+        let first = claim_rows(a.conn(), CLAIM_EMBED, 2, now).unwrap();
+        let second = claim_rows(b.conn(), CLAIM_EMBED, 2, now).unwrap();
+        assert_eq!(first, oldest[..2].to_vec(), "the oldest rows go first");
+        assert_eq!(
+            second,
+            oldest[2..oldest.len().min(4)].to_vec(),
+            "the other handle, same instant, gets the next rows"
+        );
+        // Everything claimed by the first handle: a tick on the second does no model work.
+        claim_rows(a.conn(), CLAIM_EMBED, 100, now).unwrap();
+        let f = FakeOllama::spawn(8);
+        let t = tick(&b, &models(&f), Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!(t.embedded + t.extracted, 0, "{t:?}");
+        assert!(f.calls().is_empty(), "{:?}", f.calls());
+    }
+
+    #[test]
+    fn a_tick_neither_takes_nor_waits_for_the_indexer_lock() {
         use crate::store::lock;
+        let (_d, store) = indexed_docs();
+        let other = std::process::id().wrapping_add(1);
+        assert!(lock::try_acquire(&store, other, now_ms()).unwrap());
+        let f = FakeOllama::spawn(8);
+        let t = tick(&store, &models(&f), Duration::from_secs(20), &|| false).unwrap();
+        assert!(t.embedded > 0 && t.extracted > 0, "{t:?}");
+        assert!(
+            !lock::try_acquire(&store, std::process::id(), now_ms()).unwrap(),
+            "the other process still holds the lock: the tick never touched it"
+        );
+    }
+
+    #[test]
+    fn a_claim_older_than_the_stale_limit_is_reclaimable() {
+        let (d, a) = indexed_docs();
+        let b = Store::open(&d.path().join(".singularrag/index.db")).unwrap();
+        let then = now_ms() - CLAIM_STALE_MS - 1;
+        let all = claim_rows(a.conn(), CLAIM_EMBED, 100, then).unwrap();
+        assert!(!all.is_empty());
+        let f = FakeOllama::spawn(8);
+        let t = tick(&b, &models(&f), Duration::ZERO, &|| false).unwrap();
+        assert_eq!(t.embedded, all.len(), "stale claims are taken over: {t:?}");
+        assert_eq!(claimed(&b), 0, "the tick unclaims what it leaves queued");
+    }
+
+    #[test]
+    fn a_section_that_fails_is_unclaimed() {
         let (_d, store) = indexed_docs();
         let f = FakeOllama::spawn(8);
         let m = models(&f);
-        let before = pending(&store).unwrap();
-        let other = std::process::id().wrapping_add(1);
-        assert!(lock::try_acquire(&store, other, now_ms()).unwrap());
+        f.fail_next_generate(100);
         let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
-        assert!(f.calls().is_empty(), "no model call: {:?}", f.calls());
-        assert_eq!(t.pending, before, "{t:?}");
-        assert_eq!(t.embedded + t.extracted, 0, "{t:?}");
-        assert!(t.skipped_locked, "{t:?}");
-        lock::release(&store, other).unwrap();
+        assert!(t.failed > 0, "{t:?}");
+        assert_eq!(claimed(&store), 0, "failed rows are retried next tick");
+        f.set_down(true);
         let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
-        assert!(t.embedded > 0 && t.extracted > 0, "{t:?}");
-        assert!(
-            lock::try_acquire(&store, other, now_ms()).unwrap(),
-            "the tick released the lock"
-        );
+        assert!(t.model_error.is_some(), "{t:?}");
+        assert_eq!(claimed(&store), 0, "an outage unclaims too");
     }
 
     #[test]

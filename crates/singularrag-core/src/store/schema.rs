@@ -104,8 +104,10 @@ CREATE TABLE IF NOT EXISTS extract_queue (
   symbol_id    INTEGER PRIMARY KEY,
   hash         TEXT NOT NULL,
   attempts     INTEGER NOT NULL DEFAULT 0,
-  last_error   TEXT,
-  queued_at_ms INTEGER NOT NULL
+  last_error    TEXT,
+  queued_at_ms  INTEGER NOT NULL,
+  -- set while a tick works the row (knowledge::claim_rows); NULL when free
+  claimed_at_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS section_embeddings (
   symbol_id INTEGER PRIMARY KEY,
