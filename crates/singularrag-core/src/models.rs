@@ -211,43 +211,54 @@ impl Models {
         &self.cfg
     }
 
+    fn get(&self, path: &str) -> Result<serde_json::Value> {
+        self.send(path, None)
+    }
+
     fn post(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+        self.send(path, Some(body))
+    }
+
+    /// One retry on connect or timeout errors; a non-2xx status or a non-JSON body is unavailable.
+    fn send(&self, path: &str, body: Option<&serde_json::Value>) -> Result<serde_json::Value> {
         let url = format!("{}{}", self.cfg.ollama.trim_end_matches('/'), path);
         let mut last = None;
         for _ in 0..2 {
-            match self.http.post(&url).json(body).send() {
+            let req = match body {
+                Some(b) => self.http.post(&url).json(b),
+                None => self.http.get(&url),
+            };
+            match req.send() {
                 Ok(resp) => {
                     let status = resp.status();
-                    let v: serde_json::Value = resp.json().map_err(unavailable)?;
                     if !status.is_success() {
-                        return Err(unavailable(format!("{path}: HTTP {status}: {v}")));
+                        let text = resp.text().unwrap_or_default();
+                        return Err(unavailable(format!(
+                            "{path}: HTTP {status}: {}",
+                            clean(&text, 200)
+                        )));
                     }
-                    return Ok(v);
+                    return resp.json().map_err(|e| unavailable(format!("{path}: {e}")));
                 }
                 Err(e) if e.is_connect() || e.is_timeout() => last = Some(e),
-                Err(e) => return Err(unavailable(e)),
+                Err(e) => return Err(unavailable(format!("{path}: {e}"))),
             }
         }
-        Err(unavailable(last.map(|e| e.to_string()).unwrap_or_default()))
+        Err(unavailable(format!(
+            "{path}: {}",
+            last.map(|e| e.to_string()).unwrap_or_default()
+        )))
     }
 
     pub fn tags(&self) -> Result<Vec<String>> {
-        let url = format!("{}/api/tags", self.cfg.ollama.trim_end_matches('/'));
-        let v: serde_json::Value = self
-            .http
-            .get(&url)
-            .send()
-            .map_err(unavailable)?
-            .json()
-            .map_err(unavailable)?;
-        Ok(v["models"]
+        let v = self.get("/api/tags")?;
+        let models = v["models"]
             .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|m| m["name"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default())
+            .ok_or_else(|| unavailable("tags: no models field"))?;
+        Ok(models
+            .iter()
+            .filter_map(|m| m["name"].as_str().map(str::to_string))
+            .collect())
     }
 
     pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -268,12 +279,16 @@ impl Models {
                 )));
             }
             for e in arr {
-                let vec: Vec<f32> = e
+                let vec = e
                     .as_array()
                     .ok_or_else(|| unavailable("embed: vector is not an array"))?
                     .iter()
-                    .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                    .collect();
+                    .map(|x| {
+                        x.as_f64()
+                            .map(|f| f as f32)
+                            .ok_or_else(|| unavailable("embed: vector element is not a number"))
+                    })
+                    .collect::<Result<Vec<f32>>>()?;
                 out.push(vec);
             }
         }
@@ -438,6 +453,8 @@ mod tests {
             ]
         );
         f.set_down(true);
+        let e = m.tags().unwrap_err();
+        assert!(matches!(e, crate::Error::ModelUnavailable(_)), "{e}");
         let e = m.embed(&["x".into()]).unwrap_err();
         assert!(matches!(e, crate::Error::ModelUnavailable(_)));
         let e = m
@@ -468,5 +485,67 @@ mod tests {
             "http://10.0.0.1:1"
         );
         std::env::remove_var("SINGULARRAG_OLLAMA_URL");
+    }
+
+    #[test]
+    fn a_corrupt_embedding_is_model_unavailable() {
+        let f = FakeOllama::spawn(8);
+        let m = models(&f);
+        f.corrupt_next_embed(1);
+        let e = m.embed(&["a".into(), "b".into()]).unwrap_err();
+        match e {
+            crate::Error::ModelUnavailable(msg) => {
+                assert!(msg.contains("vector element is not a number"), "{msg}")
+            }
+            other => panic!("expected ModelUnavailable, got {other}"),
+        }
+        assert!(
+            m.embed(&["a".into()]).is_ok(),
+            "only the next response is corrupt"
+        );
+    }
+
+    #[test]
+    fn a_refused_port_is_model_unavailable_quickly() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let m = Models::new(ModelsConfig {
+            ollama: format!("http://127.0.0.1:{port}"),
+            ..ModelsConfig::default()
+        });
+        let t = std::time::Instant::now();
+        let e = m.embed(&["x".into()]).unwrap_err();
+        assert!(matches!(e, crate::Error::ModelUnavailable(_)), "{e}");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_dropped_connection_is_retried_only_when_it_is_a_connect_error() {
+        let f = FakeOllama::spawn(8);
+        let m = models(&f);
+        f.drop_next_n_connections(1);
+        let before = f.accepted();
+        let r = m.embed(&["x".into()]);
+        let accepted = f.accepted() - before;
+        match r {
+            Ok(_) => assert_eq!(
+                accepted, 2,
+                "success means the drop was a connect error and was retried"
+            ),
+            Err(e) => {
+                assert!(matches!(e, crate::Error::ModelUnavailable(_)), "{e}");
+                assert_eq!(
+                    accepted, 1,
+                    "failure means no retry: the drop was not a connect error"
+                );
+            }
+        }
     }
 }

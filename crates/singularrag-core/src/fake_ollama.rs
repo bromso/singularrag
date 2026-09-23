@@ -14,6 +14,9 @@ struct State {
     extractions: Mutex<Vec<(String, Value)>>,
     calls: Mutex<Vec<String>>,
     fail_generate: AtomicUsize,
+    corrupt_embed: AtomicUsize,
+    drop_next: AtomicUsize,
+    accepted: AtomicUsize,
     down: AtomicBool,
     stop: AtomicBool,
 }
@@ -41,7 +44,8 @@ impl FakeOllama {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
-                if st.down.load(Ordering::SeqCst) {
+                st.accepted.fetch_add(1, Ordering::SeqCst);
+                if st.down.load(Ordering::SeqCst) || take_one(&st.drop_next) {
                     drop(stream);
                     continue;
                 }
@@ -70,6 +74,21 @@ impl FakeOllama {
         self.state.fail_generate.store(n, Ordering::SeqCst);
     }
 
+    /// The next `n` embed responses carry a `null` inside the first vector.
+    pub fn corrupt_next_embed(&self, n: usize) {
+        self.state.corrupt_embed.store(n, Ordering::SeqCst);
+    }
+
+    /// The next `n` connections are accepted and closed without reading the request.
+    pub fn drop_next_n_connections(&self, n: usize) {
+        self.state.drop_next.store(n, Ordering::SeqCst);
+    }
+
+    /// Connections accepted so far, dropped ones included.
+    pub fn accepted(&self) -> usize {
+        self.state.accepted.load(Ordering::SeqCst)
+    }
+
     pub fn set_down(&self, down: bool) {
         self.state.down.store(down, Ordering::SeqCst);
     }
@@ -87,6 +106,12 @@ impl Drop for FakeOllama {
             let _ = t.join();
         }
     }
+}
+
+/// Decrement a "next n" counter; true when it was above zero.
+fn take_one(n: &AtomicUsize) -> bool {
+    n.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok()
 }
 
 fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
@@ -127,14 +152,16 @@ fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
                 Value::String(s) => vec![s.clone()],
                 _ => Vec::new(),
             };
-            json!({"embeddings": inputs.iter().map(|t| embed(t, dim)).collect::<Vec<_>>()})
+            let mut vectors: Vec<Value> = inputs.iter().map(|t| json!(embed(t, dim))).collect();
+            if take_one(&st.corrupt_embed) {
+                if let Some(v) = vectors.first_mut() {
+                    v[0] = Value::Null;
+                }
+            }
+            json!({ "embeddings": vectors })
         }
         ("POST", "/api/generate") => {
-            let failing = st
-                .fail_generate
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok();
-            if failing {
+            if take_one(&st.fail_generate) {
                 json!({"response": "not json {"})
             } else {
                 let prompt = req["prompt"].as_str().unwrap_or("");
