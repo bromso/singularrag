@@ -290,6 +290,28 @@ What changed in the sessions, run 1 → round 2, singularrag condition:
 
 Where the rule stood: the tool-call axis needed 8.0 per session and sat at 8.6, one call every other session. The token axis needed 65.4k and sat at 92.7k; with cached input at parity, that requires roughly three fewer turns per session, which means answering locate and trace questions from the map with no confirming read at all.
 
+### Run 3 2026-09-23 (12 questions × alone/singularrag/singularrag+hook × 3 repeats = 108 sessions)
+
+The first run with the hook condition (workflow design §8) and with documents in the map (documents design). Claude Code 2.1.280, model `claude-opus-5-5[1m]`; the two earlier runs were 2.1.261 with `claude-opus-5[1m]`, so the baseline moved under us (below). Full tables in `runs/20260923T175126Z-docs-hook/summary.md`.
+
+| condition | sessions | failed | hook denials | mean recall | mean tokens | mean tool calls | total cost |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| alone | 36 | 0 | 0 | 0.50 | 24917 | 3.4 | $1.82 |
+| singularrag | 36 | 0 | 0 | 0.63 | 46704 | 4.0 | $2.96 |
+| singularrag+hook | 36 | 0 | 1 | 0.60 | 45432 | 3.7 | $2.77 |
+
+**Verdict: neither condition earns its place.** singularrag: recall +0.13 [+0.04, +0.22], tool calls +0.6 [−0.2, +1.3], tokens +87.4% [+64.6%, +110.3%]. With the hook: recall +0.10 [+0.00, +0.19], tool calls +0.2 [−0.5, +0.9], tokens +82.3%.
+
+What the records say:
+
+- **The baseline changed model and got cheap.** `alone` went from 87k tokens and 10.7 tool calls (round 2, Opus 5) to 25k and 3.4 (Opus 5.5): the agent greps three times and answers. Recall fell 0.52 → 0.50. Every relative threshold in the rule is now measured against a session a third the size.
+- **The map did not get bigger with documents.** Mean `repo_map` result 6.5k characters (round 2: 13.5k); the agent chose budgets of 2048 (23 calls) and 3000 (7). Non-code file headers are 13 to 15% of the headers served. Documents are not the token story.
+- **The token delta is per-turn re-reading, not the map's size.** Per session, singularrag adds about 1.8k prompt tokens on the first turn (five tool descriptions plus `INSTRUCTIONS`) and a 1.6 to 2k-token map result, and both are re-read as cache input on each of the roughly six turns: 6 × (1.8k + 2k) ≈ 22k, which is the whole +21.8k. `cache_read` is 39k against 21k; `cache_creation` 6.3k against 3.1k. Against a 25k baseline that is +87%; the same absolute cost against round 2's 87k baseline would have read as +25%.
+- **The hook is inert with this agent.** One denial in 36 sessions: `repo_map` was the first tool in 29 of 36 sessions in both singularrag conditions and `find_symbol` in 4 more; Reads (0.4 to 0.6 per session) come after the map. The instruction text already makes the agent query first; the hook has nothing to deny. Recall with the hook is within noise of without (0.60 vs 0.63).
+- **Where recall comes from:** L2 (0.44 → 1.00), T1 (0.50 → 0.92 / 1.00), B2, P3. Losses: P1 with the hook (0.25 → 0.08, one symbol), B3 flat at 0.20 for everyone.
+
+What this points at: (1) the rule's efficiency bar is unmeetable by construction against a three-call baseline, since any tool adds its descriptions and one result to every turn's cache read; the honest measure is absolute tokens per session (+22k here) against absolute recall gained (+0.13), or tokens per correct symbol; (2) the cheapest cut is the prompt overhead the agent pays on every turn whether it uses the tool or not: five long tool descriptions and `INSTRUCTIONS` (about 1.8k tokens); (3) the hook condition can be dropped from future runs unless a model that reads first shows up; (4) rerun rounds on one pinned model and Claude Code version only, and record both in the verdict line.
+
 ### The rule, amended 2026-09-21
 
 The −25% bar measured whether the agent stops reading files, and no map tool did that, Serena included. What the tool is for is recall the agent lacks, at no material context cost. Three repeats are also noisy: per-session tokens ranged 27k to 150k, so point thresholds pass or fail on luck. The rule is now paired over question × repeat (condition minus baseline, two-sided 95% intervals): correctness when the recall interval lies above 0; efficiency when the tool-call interval lies below 0 and mean tokens exceed the baseline's by at most 10%. `singularrag-bench score` prints the three measurements under every verdict.
