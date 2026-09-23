@@ -325,6 +325,7 @@ impl<'a> Indexer<'a> {
                 "INSERT INTO sections_fts(rowid, path, name, content) VALUES (?1, ?2, ?3, ?4)",
                 params![id, e.rel_path, tags[*i].name, body],
             )?;
+            crate::knowledge::queue_section(&tx, id, body)?;
         }
         for (name, line) in &mentions {
             tx.execute(
@@ -375,9 +376,10 @@ impl<'a> Indexer<'a> {
     }
 }
 
-/// Deletes a file's symbols, refs and FTS rows (but not the `files` row itself),
-/// so the caller can either re-insert fresh ones or leave the file skipped.
+/// Deletes a file's symbols, refs, FTS rows and knowledge rows (but not the `files` row
+/// itself), so the caller can either re-insert fresh ones or leave the file skipped.
 fn delete_symbols_for(conn: &Connection, file_id: i64) -> Result<()> {
+    crate::knowledge::delete_for_symbols(conn, file_id)?;
     conn.execute(
         "DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
         [file_id],

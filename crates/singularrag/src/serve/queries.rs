@@ -322,7 +322,16 @@ pub fn skipped(store: &Store) -> Result<Vec<SkippedFile>> {
             reason: r.get(1)?,
         })
     })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    let mut out: Vec<SkippedFile> = rows.collect::<std::result::Result<_, _>>()?;
+    out.extend(
+        singularrag_core::knowledge::failed_sections(store)?
+            .into_iter()
+            .map(|(path, name, error)| SkippedFile {
+                path: format!("{path}::{name}"),
+                reason: format!("extraction failed: {error}"),
+            }),
+    );
+    Ok(out)
 }
 
 /// The ranking's file graph, projected for drawing: excluded files absent, self-edges

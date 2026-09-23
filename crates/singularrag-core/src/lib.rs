@@ -15,6 +15,7 @@ pub mod find;
 pub mod fixture;
 pub mod graph;
 pub mod index;
+pub mod knowledge;
 pub mod lang;
 pub mod map;
 pub mod models;
