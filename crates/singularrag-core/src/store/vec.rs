@@ -30,11 +30,11 @@ pub fn ensure_tables(store: &Store, dim_now: usize) -> Result<bool> {
     match dim(store)? {
         Some(d) if d == dim_now => {
             let exists: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'section_vec'",
-                [],
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (?1, ?2, ?3)",
+                TABLES,
                 |r| r.get(0),
             )?;
-            if exists > 0 {
+            if exists == TABLES.len() as i64 {
                 return Ok(false);
             }
         }
@@ -135,6 +135,33 @@ mod tests {
             2
         );
         assert_eq!(from_blob(&to_blob(&[1.5, -2.0])), vec![1.5, -2.0]);
+    }
+
+    #[test]
+    fn missing_vector_tables_are_recreated_at_the_same_dimension() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(ensure_tables(&store, 3).unwrap());
+        insert(&store, "section_vec", 1, &[1.0, 0.0, 0.0]).unwrap();
+        store.conn().execute_batch("DROP TABLE entity_vec").unwrap();
+        assert!(
+            ensure_tables(&store, 3).unwrap(),
+            "a missing table is recreated"
+        );
+        let n: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'entity_vec'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            knn(&store, "section_vec", &[1.0, 0.0, 0.0], 5)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
