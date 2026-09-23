@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use singularrag_core::engine::{ChangedRequest, Engine, FindRequest, MapRequest, TraceRequest};
+use singularrag_core::engine::{
+    ChangedRequest, Engine, EntitiesRequest, FindRequest, MapRequest, TraceRequest,
+    ENTITIES_LIMIT_DEFAULT,
+};
 use singularrag_core::map::DEFAULT_BUDGET;
 
 mod actor;
@@ -77,7 +80,17 @@ enum Cmd {
         #[arg(long)]
         base: Option<String>,
     },
-    /// Serve the repo_map, find_symbol, trace_path, changed and annotate tools to an agent over stdio (MCP)
+    /// What the corpus says about an entity and how it connects (what the entities tool returns)
+    Entities {
+        /// A name or a question
+        query: String,
+        /// Entity names you already know; repeatable
+        #[arg(long = "entity", value_name = "NAME")]
+        entity: Vec<String>,
+        #[arg(long, default_value_t = ENTITIES_LIMIT_DEFAULT)]
+        limit: usize,
+    },
+    /// Serve the repo_map, find_symbol, trace_path, changed, annotate and entities tools to an agent over stdio (MCP)
     Mcp {
         /// Inline refresh budget in milliseconds (spec §8). Tests lower it.
         #[arg(long, default_value_t = 2000, hide = true)]
@@ -188,6 +201,32 @@ fn main() -> anyhow::Result<()> {
                 from_symbol,
                 to_path,
                 to_symbol,
+            })?;
+            print!("{}", r.text);
+        }
+        Cmd::Entities {
+            query,
+            entity,
+            limit,
+        } => {
+            // A one-shot command has no background tick: index, then drain the knowledge
+            // queue here, stopping on a model outage or a tick that moved nothing.
+            engine.refresh(Duration::from_secs(600))?;
+            if engine.models().is_some() {
+                loop {
+                    let t = engine.knowledge_tick(&|| false)?;
+                    if t.pending == 0
+                        || t.model_error.is_some()
+                        || t.embedded + t.extracted + t.failed == 0
+                    {
+                        break;
+                    }
+                }
+            }
+            let r = engine.entities(&EntitiesRequest {
+                query,
+                entities: entity,
+                limit,
             })?;
             print!("{}", r.text);
         }

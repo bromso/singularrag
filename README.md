@@ -91,7 +91,7 @@ Results land in `eval/runs/<timestamp>-<label>/` with one record and raw stream 
 
 ## What the agent sees
 
-Five tools. `repo_map` returns something like:
+Six tools. `repo_map` returns something like:
 
 ```
 # singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh · retrieval r_000123
@@ -112,6 +112,8 @@ Documents rank alongside code: a Markdown or HTML heading is a `section` row sho
 
 `annotate` lets the agent leave a one-paragraph note on a file or symbol; it lands in `map.toml`, shows in the next map with an `(agent)` tag, and the developer can delete it from the page.
 
+`entities` answers what the documents say about a person, system or concept: its type and description, its relations, and the sections that state them (descriptions are extracted by the local model, not verified).
+
 `trace_path` answers how two symbols connect; `changed` lists what your uncommitted (or branch) changes touch and who references each symbol. `singularrag init` installs a Claude Code hook that refuses the first file read of a session until the map has been consulted, once per session.
 
 ## CLI
@@ -122,6 +124,7 @@ singularrag query "text"     # print the map the agent would get
 singularrag find NAME        # look a symbol up
 singularrag path FROM TO     # the shortest reference chain between two path::symbol
 singularrag changed          # the symbols a diff touches and who references them (--base REF)
+singularrag entities "text"  # what the documents say about a person, system or concept (--entity NAME, --limit N)
 singularrag init             # install the query-first hook and the MCP entry for this repo
 singularrag eval             # tier-one recall against eval/questions.toml
 singularrag serve            # open the map UI on localhost

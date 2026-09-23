@@ -10,8 +10,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use singularrag_core::engine::{
-    AnnotateRequest, AnnotateResponse, ChangedRequest, ChangedResponse, Engine, FindRequest,
-    FindResponse, MapRequest, MapResponse, TraceRequest, TraceResponse,
+    AnnotateRequest, AnnotateResponse, ChangedRequest, ChangedResponse, Engine, EntitiesRequest,
+    EntitiesResponse, FindRequest, FindResponse, MapRequest, MapResponse, TraceRequest,
+    TraceResponse,
 };
 use singularrag_core::index::IndexStats;
 use singularrag_core::knowledge::KnowledgeTick;
@@ -43,6 +44,7 @@ pub enum Job {
     Annotate(AnnotateRequest, oneshot::Sender<Reply<AnnotateResponse>>),
     Trace(TraceRequest, oneshot::Sender<Reply<TraceResponse>>),
     Changed(ChangedRequest, oneshot::Sender<Reply<ChangedResponse>>),
+    Entities(EntitiesRequest, oneshot::Sender<Reply<EntitiesResponse>>),
     /// One knowledge tick now. The loop ticks on its own; this is for tests.
     #[allow(dead_code)]
     Knowledge(oneshot::Sender<Reply<KnowledgeTick>>),
@@ -122,6 +124,10 @@ impl EngineHandle {
 
     pub async fn changed(&self, req: ChangedRequest) -> Reply<ChangedResponse> {
         self.ask(|tx| Job::Changed(req, tx)).await
+    }
+
+    pub async fn entities(&self, req: EntitiesRequest) -> Reply<EntitiesResponse> {
+        self.ask(|tx| Job::Entities(req, tx)).await
     }
 
     // One budgeted refresh with no retrieval recorded. The watcher's job; see the
@@ -305,6 +311,7 @@ impl Actor {
                 | Job::Annotate(..)
                 | Job::Trace(..)
                 | Job::Changed(..)
+                | Job::Entities(..)
                 | Job::Refresh(..)
         );
         match job {
@@ -348,6 +355,15 @@ impl Actor {
                 let out = self
                     .engine()
                     .and_then(|e| e.changed(&req).map_err(|e| e.to_string()));
+                if let Ok(r) = &out {
+                    self.note(r.stale_count, r.lock_timeout);
+                }
+                let _ = reply.send(out);
+            }
+            Job::Entities(req, reply) => {
+                let out = self
+                    .engine()
+                    .and_then(|e| e.entities(&req).map_err(|e| e.to_string()));
                 if let Ok(r) = &out {
                     self.note(r.stale_count, r.lock_timeout);
                 }

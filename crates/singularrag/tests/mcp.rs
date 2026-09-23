@@ -13,6 +13,7 @@ const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and d
 const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module, section, document, element, rule, key. `limit` defaults to 10, max 50.";
 const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is workspace-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs.";
 const TRACE_PATH_DESCRIPTION: &str = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files.";
+const ENTITIES_DESCRIPTION: &str = "What the corpus knows about a person, system, concept or event, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something.";
 const CHANGED_DESCRIPTION: &str = "What a change touches: the symbols whose lines a diff modifies and the files that reference each. `base` is a git ref; omitted means the working tree against HEAD. Use it before editing to see the blast radius and after editing to check it.";
 
 #[derive(Clone)]
@@ -42,6 +43,20 @@ async fn connect_with_log(
     extra: &[&str],
     log: &str,
 ) -> rmcp::service::RunningService<rmcp::RoleClient, TestClient> {
+    connect_with_env(repo, extra, log, &[]).await
+}
+
+/// `env` is set on the child on top of `RUST_LOG`.
+async fn connect_with_env(
+    repo: &Path,
+    extra: &[&str],
+    log: &str,
+    env: &[(&str, &str)],
+) -> rmcp::service::RunningService<rmcp::RoleClient, TestClient> {
+    let env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     let bin = env!("CARGO_BIN_EXE_singularrag");
     let repo = repo.to_path_buf();
     let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
@@ -52,6 +67,9 @@ async fn connect_with_log(
             c.arg(e);
         }
         c.env("RUST_LOG", &log);
+        for (k, v) in &env {
+            c.env(k, v);
+        }
         // A panic before `client.cancel()` must not leave a `singularrag mcp` child
         // running for the rest of the machine's day.
         c.kill_on_drop(true);
@@ -72,37 +90,121 @@ fn text_of(r: &rmcp::model::CallToolResult) -> String {
 /// nothing but JSON-RPC reached stdout, because the client could not have parsed a single
 /// message otherwise.
 #[tokio::test]
-async fn lists_exactly_the_five_tools_with_spec_descriptions() {
+async fn lists_exactly_the_six_tools_with_spec_descriptions() {
     let dir = tempfile::tempdir().unwrap();
     write_ts_mini(dir.path());
     let client = connect_with_log(dir.path(), &[], "debug").await;
     let info = client.peer_info().expect("server info");
     let server_info = info.server_info.as_ref().expect("server_info present");
     assert_eq!(server_info.name, "singularrag");
-    assert!(info
-        .instructions
-        .as_deref()
-        .unwrap_or("")
-        .starts_with("singularrag gives you a ranked map"));
+    let instructions = info.instructions.as_deref().unwrap_or("");
+    assert!(instructions.starts_with("singularrag gives you a ranked map"));
+    assert!(
+        instructions.contains("Use entities to learn what the corpus says about a person, system or concept and how it connects; prose queries to repo_map work in plain language.")
+            && instructions.ends_with("Entity descriptions are extracted text, not verified facts."),
+        "{instructions}"
+    );
     let mut tools = client.list_all_tools().await.unwrap();
     tools.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 6);
     assert_eq!(tools[0].name, "annotate");
     assert_eq!(tools[0].description.as_deref(), Some(ANNOTATE_DESCRIPTION));
     assert_eq!(tools[1].name, "changed");
     assert_eq!(tools[1].description.as_deref(), Some(CHANGED_DESCRIPTION));
-    assert_eq!(tools[2].name, "find_symbol");
+    assert_eq!(tools[2].name, "entities");
+    assert_eq!(tools[2].description.as_deref(), Some(ENTITIES_DESCRIPTION));
+    assert_eq!(tools[3].name, "find_symbol");
     assert_eq!(
-        tools[2].description.as_deref(),
+        tools[3].description.as_deref(),
         Some(FIND_SYMBOL_DESCRIPTION)
     );
-    assert_eq!(tools[3].name, "repo_map");
-    assert_eq!(tools[3].description.as_deref(), Some(REPO_MAP_DESCRIPTION));
-    assert_eq!(tools[4].name, "trace_path");
+    assert_eq!(tools[4].name, "repo_map");
+    assert_eq!(tools[4].description.as_deref(), Some(REPO_MAP_DESCRIPTION));
+    assert_eq!(tools[5].name, "trace_path");
     assert_eq!(
-        tools[4].description.as_deref(),
+        tools[5].description.as_deref(),
         Some(TRACE_PATH_DESCRIPTION)
     );
+    client.cancel().await.unwrap();
+}
+
+/// The knowledge queue is drained in-process first (warm-up ticks against the fake), so
+/// the server only has to embed the query; the test still waits until `repo_map`'s
+/// header shows nothing pending before asking.
+#[tokio::test]
+async fn entities_answers_over_the_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_docs_mini(dir.path());
+    let f = singularrag_core::fake_ollama::FakeOllama::spawn(32);
+    f.set_extraction("Freshness", serde_json::json!({"entities": [{"name": "STALE header", "type": "concept", "description": "the header when files changed"}, {"name": "createSession", "type": "system", "description": "creates a session"}], "relations": [{"source": "STALE header", "target": "createSession", "description": "refresh runs before session creation"}]}));
+    f.set_extraction("Storage", serde_json::json!({"entities": [{"name": "SessionStore", "type": "system", "description": "keeps sessions"}, {"name": "createSession", "type": "system", "description": "creates a session"}], "relations": []}));
+    // On its own thread: the Engine's blocking HTTP client must not be dropped inside
+    // the async runtime.
+    let (root, url) = (dir.path().to_path_buf(), f.url());
+    std::thread::spawn(move || {
+        let mut e = singularrag_core::engine::Engine::open(&root, "warm-up").unwrap();
+        e.set_models_url(&url);
+        e.refresh(std::time::Duration::from_secs(60)).unwrap();
+        for _ in 0..20 {
+            if e.knowledge_tick(&|| false).unwrap().pending == 0 {
+                break;
+            }
+        }
+    })
+    .join()
+    .unwrap();
+    let url = f.url();
+    let client = connect_with_env(
+        dir.path(),
+        &[],
+        "warn",
+        &[("SINGULARRAG_OLLAMA_URL", url.as_str())],
+    )
+    .await;
+    let mut header = String::new();
+    for _ in 0..30 {
+        let map = client
+            .call_tool(CallToolRequestParams::new("repo_map").with_arguments(object!({})))
+            .await
+            .unwrap();
+        header = text_of(&map).lines().next().unwrap_or("").to_string();
+        if !header.contains("pending") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(!header.contains("pending"), "{header}");
+
+    let r = client
+        .call_tool(
+            CallToolRequestParams::new("entities")
+                .with_arguments(object!({ "query": "stale header" })),
+        )
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+    let t = text_of(&r);
+    assert!(t.starts_with("# singularrag · index "), "{t}");
+    assert!(
+        t.contains("\nSTALE header (concept): the header when files changed\n  ← docs/design.md::Freshness (lines "),
+        "{t}"
+    );
+    assert!(
+        t.contains("  STALE header → createSession: refresh runs before session creation (docs/design.md::Freshness, lines "),
+        "{t}"
+    );
+    let named = client
+        .call_tool(CallToolRequestParams::new("entities").with_arguments(
+            object!({ "query": "who keeps things", "entities": ["SessionStore"], "limit": 1 }),
+        ))
+        .await
+        .unwrap();
+    let t = text_of(&named);
+    assert!(
+        t.contains("\nSessionStore (system): keeps sessions\n  ← docs/design.md::Storage (lines "),
+        "{t}"
+    );
+    assert!(t.ends_with("# 1 entity · 0 relations · 1 section\n"), "{t}");
     client.cancel().await.unwrap();
 }
 

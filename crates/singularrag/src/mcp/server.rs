@@ -1,4 +1,4 @@
-//! The rmcp handler: five tools, server info, and the session key from clientInfo.
+//! The rmcp handler: six tools, server info, and the session key from clientInfo.
 //! All engine work goes through the actor; handlers only await a reply.
 
 use std::sync::{Arc, Mutex};
@@ -12,12 +12,13 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
 use singularrag_core::engine::{
-    AnnotateRequest, ChangedRequest, FindRequest, MapRequest, TraceRequest,
+    AnnotateRequest, ChangedRequest, EntitiesRequest, FindRequest, MapRequest, TraceRequest,
+    ENTITIES_LIMIT_DEFAULT,
 };
 
 use crate::actor::EngineHandle;
 
-pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this workspace: code symbols and document sections (specs, notes, READMEs, config keys) together. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show, and read the section the map points at rather than the whole file. Use find_symbol to locate a name or a heading, trace_path to see how two symbols connect (a note that mentions a symbol counts), and changed to see what a diff touches and who references it. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background.";
+pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this workspace: code symbols and document sections (specs, notes, READMEs, config keys) together. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show, and read the section the map points at rather than the whole file. Use find_symbol to locate a name or a heading, trace_path to see how two symbols connect (a note that mentions a symbol counts), and changed to see what a diff touches and who references it. Use entities to learn what the corpus says about a person, system or concept and how it connects; prose queries to repo_map work in plain language. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background. Entity descriptions are extracted text, not verified facts.";
 
 // Only read by the unit test below, which asserts the router's reported description
 // equals these constants (see the note on the `#[tool_router]` impl block); the macro
@@ -34,6 +35,9 @@ pub const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or 
 
 #[allow(dead_code)]
 pub const TRACE_PATH_DESCRIPTION: &str = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files.";
+
+#[allow(dead_code)]
+pub const ENTITIES_DESCRIPTION: &str = "What the corpus knows about a person, system, concept or event, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something.";
 
 #[allow(dead_code)]
 pub const CHANGED_DESCRIPTION: &str = "What a change touches: the symbols whose lines a diff modifies and the files that reference each. `base` is a git ref; omitted means the working tree against HEAD. Use it before editing to see the blast radius and after editing to check it.";
@@ -134,6 +138,26 @@ pub struct TraceArgs {
 pub struct ChangedArgs {
     /// A git ref to diff against; omit for the working tree against HEAD.
     pub base: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EntitiesArgs {
+    /// A name or a question.
+    pub query: String,
+    /// Entity names you already know.
+    pub entities: Option<Vec<String>>,
+    /// Max entities. Default 10, max 25.
+    pub limit: Option<usize>,
+}
+
+impl From<EntitiesArgs> for EntitiesRequest {
+    fn from(a: EntitiesArgs) -> Self {
+        EntitiesRequest {
+            query: a.query,
+            entities: a.entities.unwrap_or_default(),
+            limit: a.limit.unwrap_or(ENTITIES_LIMIT_DEFAULT),
+        }
+    }
 }
 
 fn split_symbol(s: &str) -> Result<(String, String), String> {
@@ -243,6 +267,17 @@ impl SingularragServer {
                 .map(|r| r.text),
         )
     }
+
+    #[tool(
+        name = "entities",
+        description = "What the corpus knows about a person, system, concept or event, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something."
+    )]
+    async fn entities(
+        &self,
+        Parameters(args): Parameters<EntitiesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        text_result(self.handle.entities(args.into()).await.map(|r| r.text))
+    }
 }
 
 #[tool_handler(router = self.tool_router.clone())]
@@ -285,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_list_is_exactly_the_five_spec_tools() {
+    fn tool_list_is_exactly_the_six_spec_tools() {
         let router = SingularragServer::tool_router();
         let mut names: Vec<String> = router
             .list_all()
@@ -298,6 +333,7 @@ mod tests {
             vec![
                 "annotate",
                 "changed",
+                "entities",
                 "find_symbol",
                 "repo_map",
                 "trace_path"
@@ -314,6 +350,16 @@ mod tests {
         assert_eq!(trace.description.as_deref(), Some(TRACE_PATH_DESCRIPTION));
         let changed = tools.iter().find(|t| t.name == "changed").unwrap();
         assert_eq!(changed.description.as_deref(), Some(CHANGED_DESCRIPTION));
+        let ent = tools.iter().find(|t| t.name == "entities").unwrap();
+        assert_eq!(ent.description.as_deref(), Some(ENTITIES_DESCRIPTION));
+        let schema = serde_json::to_value(&ent.input_schema).unwrap();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("query")
+                && props.contains_key("entities")
+                && props.contains_key("limit")
+        );
+        assert_eq!(schema["required"], serde_json::json!(["query"]));
         let schema = serde_json::to_value(&ann.input_schema).unwrap();
         let props = schema["properties"].as_object().unwrap();
         assert!(
@@ -388,5 +434,13 @@ mod tests {
         }
         .into();
         assert_eq!(f.limit, 10);
+        let e: EntitiesRequest = EntitiesArgs {
+            query: "q".into(),
+            entities: None,
+            limit: None,
+        }
+        .into();
+        assert_eq!(e.limit, ENTITIES_LIMIT_DEFAULT);
+        assert!(e.entities.is_empty());
     }
 }

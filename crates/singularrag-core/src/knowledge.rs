@@ -708,13 +708,139 @@ fn write_section(
     Ok(())
 }
 
-/// `needle` occurs in `hay` with no word character directly before or after it.
-fn contains_phrase(hay: &str, needle: &str) -> bool {
+/// Where `needle` first occurs in `hay` with no word character directly before or after it.
+fn phrase_position(hay: &str, needle: &str) -> Option<usize> {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    hay.match_indices(needle).any(|(i, m)| {
-        !hay[..i].chars().next_back().is_some_and(is_word)
-            && !hay[i + m.len()..].chars().next().is_some_and(is_word)
-    })
+    hay.match_indices(needle)
+        .find(|(i, m)| {
+            !hay[..*i].chars().next_back().is_some_and(is_word)
+                && !hay[i + m.len()..].chars().next().is_some_and(is_word)
+        })
+        .map(|(i, _)| i)
+}
+
+/// A model outage is an answer (`models_unavailable`), anything else an error.
+fn only_unavailable(e: Error) -> Result<()> {
+    match e {
+        Error::ModelUnavailable(_) => Ok(()),
+        e => Err(e),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MatchedEntity {
+    id: i64,
+    name: String,
+}
+
+/// The entities a query and a list of names match, plus the query's vector.
+#[derive(Debug, Default)]
+struct EntityMatches {
+    entities: Vec<MatchedEntity>,
+    query_vec: Option<Vec<f32>>,
+    models_unavailable: bool,
+}
+
+/// The entity matching rule `repo_map`'s seeds and the `entities` tool share, with at
+/// most one model call (the query's embedding). In order: the names in `entities`
+/// (exact `norm_name`, argument order); then entities the query names, as a whole-word
+/// phrase of `norm_name(query)` or as one of its whitespace tokens, by where they occur
+/// in the query; then, with a query vector, the `ENTITY_K` nearest entities at least
+/// `ENTITY_MIN_SIM` close, most similar first. Ties go to the entity with more mentions.
+/// Name matching needs no model; with no vectors in the index the model is not asked.
+fn matching_entities(
+    store: &Store,
+    models: Option<&Models>,
+    query: Option<&str>,
+    entities: &[String],
+) -> Result<EntityMatches> {
+    let mut out = EntityMatches::default();
+    let conn = store.conn();
+    let push = |out: &mut EntityMatches, id: i64, name: &str| {
+        if !out.entities.iter().any(|m| m.id == id) {
+            out.entities.push(MatchedEntity {
+                id,
+                name: name.to_string(),
+            });
+        }
+    };
+
+    // Candidates in one query, matched in Rust: the arguments by exact `norm_name`,
+    // the query by whole-word phrase or by one of its whitespace tokens.
+    let candidates: Vec<(i64, String, String, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, norm_name, mentions FROM entities ORDER BY mentions DESC, id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for arg in entities
+        .iter()
+        .map(|e| norm_name(e))
+        .filter(|e| !e.is_empty())
+    {
+        if let Some((id, name, _, _)) = candidates.iter().find(|(_, _, n, _)| *n == arg) {
+            push(&mut out, *id, name);
+        }
+    }
+    if let Some(q) = query {
+        let phrase = norm_name(q);
+        let tokens: Vec<String> = q.split_whitespace().map(norm_name).collect();
+        // (position in the query, candidate index): candidates are already by mentions.
+        let mut named: Vec<(usize, usize)> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, n, _))| !n.is_empty())
+            .filter_map(|(i, (_, _, n, _))| {
+                phrase_position(&phrase, n)
+                    .or_else(|| {
+                        tokens
+                            .contains(n)
+                            .then(|| phrase.find(n.as_str()).unwrap_or(usize::MAX))
+                    })
+                    .map(|pos| (pos, i))
+            })
+            .collect();
+        named.sort();
+        for (_, i) in named {
+            let (id, name, _, _) = &candidates[i];
+            push(&mut out, *id, name);
+        }
+    }
+
+    let Some(models) = models else {
+        return Ok(out);
+    };
+    if vec::dim(store)?.is_none() {
+        return Ok(out);
+    }
+    if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+        match models.embed(&[q.to_string()]) {
+            Ok(mut v) if v.len() == 1 => out.query_vec = v.pop(),
+            Ok(_) => out.models_unavailable = true,
+            Err(e) => {
+                only_unavailable(e)?;
+                out.models_unavailable = true;
+            }
+        }
+    }
+    if let Some(qv) = &out.query_vec {
+        let mentions = |id: i64| candidates.iter().find(|c| c.0 == id).map_or(0, |c| c.3);
+        let mut near: Vec<(i64, f64)> = vec::knn(store, "entity_vec", qv, ENTITY_K)?
+            .into_iter()
+            .filter(|(_, sim)| *sim >= ENTITY_MIN_SIM)
+            .collect();
+        near.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| mentions(b.0).cmp(&mentions(a.0)))
+        });
+        for (id, _) in near {
+            if let Some((_, name, _, _)) = candidates.iter().find(|c| c.0 == id) {
+                push(&mut out, id, name);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Nearest sections a query vector seeds (knowledge spec §4).
@@ -763,65 +889,18 @@ pub fn seeds_for(
     themes: &[String],
 ) -> Result<Seeds> {
     let mut seeds = Seeds::default();
-    let conn = store.conn();
-
-    // Candidates in one query, matched in Rust: the arguments by exact `norm_name`,
-    // the query by whole-word phrase or by one of its whitespace tokens.
-    let candidates: Vec<(i64, String, String)> = {
-        let mut stmt = conn.prepare("SELECT id, name, norm_name FROM entities ORDER BY id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
-    for arg in entities
-        .iter()
-        .map(|e| norm_name(e))
-        .filter(|e| !e.is_empty())
-    {
-        if let Some((id, name, _)) = candidates.iter().find(|(_, _, n)| *n == arg) {
-            seeds.add_entity(*id, name.clone());
-        }
+    let matched = matching_entities(store, models, query, entities)?;
+    for m in matched.entities {
+        seeds.add_entity(m.id, m.name);
     }
-    if let Some(q) = query {
-        let phrase = norm_name(q);
-        let tokens: Vec<String> = q.split_whitespace().map(norm_name).collect();
-        for (id, name, n) in &candidates {
-            if !n.is_empty() && (contains_phrase(&phrase, n) || tokens.contains(n)) {
-                seeds.add_entity(*id, name.clone());
-            }
-        }
-    }
+    seeds.query_vec = matched.query_vec;
+    seeds.models_unavailable = matched.models_unavailable;
 
     let Some(models) = models else {
         return Ok(seeds);
     };
     if vec::dim(store)?.is_none() {
         return Ok(seeds);
-    }
-    let unavailable = |e: Error| match e {
-        Error::ModelUnavailable(_) => Ok(()),
-        e => Err(e),
-    };
-
-    if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
-        match models.embed(&[q.to_string()]) {
-            Ok(mut v) if v.len() == 1 => seeds.query_vec = v.pop(),
-            Ok(_) => seeds.models_unavailable = true,
-            Err(e) => {
-                unavailable(e)?;
-                seeds.models_unavailable = true;
-            }
-        }
-    }
-    if let Some(qv) = &seeds.query_vec {
-        let mut stmt = conn.prepare("SELECT name FROM entities WHERE id = ?1")?;
-        for (id, sim) in vec::knn(store, "entity_vec", qv, ENTITY_K)? {
-            if sim < ENTITY_MIN_SIM {
-                continue;
-            }
-            if let Some(name) = stmt.query_row([id], |r| r.get::<_, String>(0)).optional()? {
-                seeds.add_entity(id, name);
-            }
-        }
     }
 
     let themes: Vec<String> = themes
@@ -837,7 +916,7 @@ pub fn seeds_for(
             }
             Ok(_) => seeds.models_unavailable = true,
             Err(e) => {
-                unavailable(e)?;
+                only_unavailable(e)?;
                 seeds.models_unavailable = true;
             }
         }
@@ -847,6 +926,196 @@ pub fn seeds_for(
         seeds.theme_vecs.clear();
     }
     Ok(seeds)
+}
+
+/// Relations the `entities` tool shows, over all matched entities together.
+pub const ENTITY_RELATIONS_MAX: usize = 30;
+
+/// A document section that states something about an entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitedSection {
+    pub symbol_id: i64,
+    pub path: String,
+    pub name: String,
+    pub line_start: u32,
+    pub line_end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationHit {
+    pub src: String,
+    pub dst: String,
+    pub description: String,
+    pub section: CitedSection,
+}
+
+/// One entity the `entities` tool answers with: its relations (either end) and the
+/// sections that mention it or state one of its relations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityHit {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+    pub description: String,
+    pub mentions: usize,
+    pub relations: Vec<RelationHit>,
+    pub sections: Vec<CitedSection>,
+}
+
+fn cited_section(conn: &Connection, symbol_id: i64) -> Result<Option<CitedSection>> {
+    Ok(conn
+        .query_row(
+            "SELECT f.path, s.name, s.line_start, s.line_end FROM symbols s
+             JOIN files f ON f.id = s.file_id WHERE s.id = ?1",
+            [symbol_id],
+            |r| {
+                Ok(CitedSection {
+                    symbol_id,
+                    path: r.get(0)?,
+                    name: r.get(1)?,
+                    line_start: r.get(2)?,
+                    line_end: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The `entities` tool's answer: up to `limit` entities matched by the rule
+/// `repo_map`'s entity seeds use (`extra` are exact names), each with its relations
+/// (at most `ENTITY_RELATIONS_MAX` over all entities; a relation between two matched
+/// entities is shown once, under the first) and its sections, mentions first in
+/// document order, deduped. The only model call is the query's embedding; the bool is
+/// true when that call failed, and name matches still answer.
+pub fn match_entities(
+    store: &Store,
+    models: Option<&Models>,
+    query: &str,
+    extra: &[String],
+    limit: usize,
+) -> Result<(Vec<EntityHit>, bool)> {
+    let matched = matching_entities(store, models, Some(query), extra)?;
+    let conn = store.conn();
+    let mut entity =
+        conn.prepare("SELECT name, type, description, mentions FROM entities WHERE id = ?1")?;
+    let mut mentioned = conn.prepare(
+        "SELECT m.symbol_id FROM entity_mentions m JOIN symbols s ON s.id = m.symbol_id
+         JOIN files f ON f.id = s.file_id WHERE m.entity_id = ?1 ORDER BY f.path, s.line_start",
+    )?;
+    let mut related = conn.prepare(
+        "SELECT r.id, se.name, de.name, r.description, r.symbol_id FROM relations r
+         JOIN entities se ON se.id = r.src_entity JOIN entities de ON de.id = r.dst_entity
+         WHERE r.src_entity = ?1 OR r.dst_entity = ?1 ORDER BY r.id",
+    )?;
+    let mut shown_relations: HashSet<i64> = HashSet::new();
+    let mut hits = Vec::new();
+    for m in matched.entities.into_iter().take(limit) {
+        let Some((name, r#type, description, mentions)) = entity
+            .query_row([m.id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .optional()?
+        else {
+            continue;
+        };
+        let mut sections: Vec<CitedSection> = Vec::new();
+        let ids: Vec<i64> = mentioned
+            .query_map([m.id], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        for id in ids {
+            if let Some(c) = cited_section(conn, id)? {
+                if !sections.contains(&c) {
+                    sections.push(c);
+                }
+            }
+        }
+        let rows: Vec<(i64, String, String, String, i64)> = related
+            .query_map([m.id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut relations = Vec::new();
+        for (rid, src, dst, desc, symbol_id) in rows {
+            if shown_relations.len() >= ENTITY_RELATIONS_MAX {
+                break;
+            }
+            if shown_relations.contains(&rid) {
+                continue;
+            }
+            let Some(section) = cited_section(conn, symbol_id)? else {
+                continue;
+            };
+            shown_relations.insert(rid);
+            if !sections.contains(&section) {
+                sections.push(section.clone());
+            }
+            relations.push(RelationHit {
+                src,
+                dst,
+                description: desc,
+                section,
+            });
+        }
+        hits.push(EntityHit {
+            id: m.id,
+            name,
+            r#type,
+            description,
+            mentions: mentions.max(0) as usize,
+            relations,
+            sections,
+        });
+    }
+    Ok((hits, matched.models_unavailable))
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The `entities` block: per entity a `name (type): description` line, its sections as
+/// `  ← path::heading (lines a-b)` and its relations as
+/// `  src → dst: description (path::heading, lines a-b)`, then a count footer.
+pub fn render_entities(hits: &[EntityHit]) -> String {
+    let mut out = String::new();
+    let mut relations = 0;
+    let mut sections: Vec<i64> = Vec::new();
+    for h in hits {
+        out.push_str(&format!("{} ({})", h.name, h.r#type));
+        if !h.description.is_empty() {
+            out.push_str(&format!(": {}", h.description));
+        }
+        out.push('\n');
+        for s in &h.sections {
+            out.push_str(&format!(
+                "  ← {}::{} (lines {}-{})\n",
+                s.path, s.name, s.line_start, s.line_end
+            ));
+            if !sections.contains(&s.symbol_id) {
+                sections.push(s.symbol_id);
+            }
+        }
+        for r in &h.relations {
+            let s = &r.section;
+            out.push_str(&format!(
+                "  {} → {}: {} ({}::{}, lines {}-{})\n",
+                r.src, r.dst, r.description, s.path, s.name, s.line_start, s.line_end
+            ));
+        }
+        relations += h.relations.len();
+    }
+    out.push_str(&format!(
+        "# {} · {} · {}\n",
+        plural(hits.len(), "entity", "entities"),
+        plural(relations, "relation", "relations"),
+        plural(sections.len(), "section", "sections")
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -1348,6 +1617,30 @@ mod tests {
         );
         // "headers" is not the word "header".
         assert!(!names("stale headers").contains(&"STALE header".to_string()));
+    }
+
+    #[test]
+    fn match_and_render_entities_with_their_relations_and_sections() {
+        let (_d, store, _f, m) = crate::rank::tests::knowledge_ready(); // make that helper pub(crate)
+        let (hits, off) = match_entities(&store, Some(&m), "stale header", &[], 10).unwrap();
+        assert!(!off);
+        assert_eq!(hits[0].name, "STALE header");
+        assert_eq!(hits[0].relations.len(), 1);
+        assert_eq!(hits[0].sections[0].name, "Freshness");
+        let text = render_entities(&hits);
+        assert!(text.starts_with("STALE header (concept): the header when files changed\n  ← docs/design.md::Freshness (lines "), "{text}");
+        assert!(text.contains("STALE header → createSession: refresh runs before session creation (docs/design.md::Freshness, lines "), "{text}");
+        // One entity citing one section here, so the footer is singular throughout.
+        assert!(
+            text.ends_with("\n# 1 entity · 1 relation · 1 section\n"),
+            "{text}"
+        );
+        let (none, _) = match_entities(&store, None, "nothing matches this", &[], 10).unwrap();
+        assert!(none.is_empty());
+        assert_eq!(
+            render_entities(&none),
+            "# 0 entities · 0 relations · 0 sections\n"
+        );
     }
 
     #[test]

@@ -163,6 +163,29 @@ pub struct ChangedResponse {
     pub lock_timeout: bool,
 }
 
+/// `entities` tool: default and maximum number of entities answered.
+pub const ENTITIES_LIMIT_DEFAULT: usize = 10;
+pub const ENTITIES_LIMIT_MAX: usize = 25;
+
+#[derive(Debug, Clone)]
+pub struct EntitiesRequest {
+    /// A name or a question.
+    pub query: String,
+    /// Names the caller already knows, matched exactly (after `norm_name`).
+    pub entities: Vec<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntitiesResponse {
+    pub retrieval_id: i64,
+    pub text: String,
+    /// Entities answered.
+    pub entities: usize,
+    pub stale_count: usize,
+    pub lock_timeout: bool,
+}
+
 impl Engine {
     pub fn open(dir: &Path, session_key: &str) -> Result<Engine> {
         let ws = Workspace::open(dir)?;
@@ -484,6 +507,90 @@ impl Engine {
             retrieval_id,
             text,
             hits: served,
+            stale_count: stats.remaining,
+            lock_timeout: stats.lock_timeout,
+        })
+    }
+
+    /// What the corpus knows about the entities a query names or is near. Recorded as
+    /// tool `entities` with `limit_n`; the served items are the cited sections in
+    /// first-seen order, scored 1, 1/2, 1/3 … with the entities citing each as reasons.
+    pub fn entities(&mut self, req: &EntitiesRequest) -> Result<EntitiesResponse> {
+        let stats = self.refresh(self.refresh_budget)?;
+        let limit = req.limit.clamp(1, ENTITIES_LIMIT_MAX);
+        // With no vectors yet nothing can match by vector, so the client is not built.
+        let models = if crate::store::vec::dim(&self.store)?.is_some() {
+            self.models()
+        } else {
+            None
+        };
+        let (hits, models_unavailable) =
+            knowledge::match_entities(&self.store, models, &req.query, &req.entities, limit)?;
+        let mut ranked: Vec<ScoredSymbol> = Vec::new();
+        for h in &hits {
+            let cited = h
+                .sections
+                .iter()
+                .chain(h.relations.iter().map(|r| &r.section));
+            for c in cited {
+                let i = match ranked.iter().position(|s| s.symbol_id == c.symbol_id) {
+                    Some(i) => i,
+                    None => {
+                        ranked.push(ScoredSymbol {
+                            symbol_id: c.symbol_id,
+                            file_id: 0,
+                            path: c.path.clone(),
+                            name: c.name.clone(),
+                            kind: "section".into(),
+                            line_start: c.line_start,
+                            line_end: c.line_end,
+                            signature: String::new(),
+                            score: 1.0 / (ranked.len() as f64 + 1.0),
+                            reasons: crate::rank::Reasons::default(),
+                        });
+                        ranked.len() - 1
+                    }
+                };
+                let reasons = &mut ranked[i].reasons;
+                if !reasons.entities.contains(&h.name) {
+                    reasons.entities.push(h.name.clone());
+                    reasons.seeds.push(format!("entity:{}", h.name));
+                }
+            }
+        }
+        for s in &mut ranked {
+            s.reasons.score = s.score;
+        }
+        let (version, head) = self.index_meta()?;
+        let retrieval_id = self.record_retrieval(
+            "entities",
+            Some(&req.query),
+            &[],
+            None,
+            Some(limit),
+            &version,
+            head.as_deref(),
+            stats.remaining,
+            &ranked,
+            ranked.len(),
+        )?;
+        let mut extras = self.extras()?;
+        extras.models_unavailable |= models_unavailable;
+        let text = format!(
+            "{}\n{}",
+            map::header(
+                &version,
+                head.as_deref(),
+                stats.remaining,
+                &extras,
+                retrieval_id,
+            ),
+            knowledge::render_entities(&hits)
+        );
+        Ok(EntitiesResponse {
+            retrieval_id,
+            text,
+            entities: hits.len(),
             stale_count: stats.remaining,
             lock_timeout: stats.lock_timeout,
         })
@@ -1624,6 +1731,77 @@ mod tests {
             })
             .unwrap();
         assert!(t.text.contains("# 1 hop"), "{}", t.text);
+    }
+
+    #[test]
+    fn entities_records_a_retrieval_serving_the_cited_sections_and_clamps_the_limit() {
+        let (dir, store, f, _m) = crate::rank::tests::knowledge_ready();
+        drop(store);
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.set_models_url(&f.url());
+        let r = e
+            .entities(&EntitiesRequest {
+                query: "stale header".into(),
+                entities: vec![],
+                limit: 10,
+            })
+            .unwrap();
+        assert!(r.text.starts_with("# singularrag · index "), "{}", r.text);
+        assert!(
+            r.text
+                .contains("\nSTALE header (concept): the header when files changed\n"),
+            "{}",
+            r.text
+        );
+        assert!(r.entities >= 1);
+        let (tool, query, limit_n): (String, String, i64) = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT tool, query, limit_n FROM retrievals WHERE id = ?1",
+                [r.retrieval_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (tool.as_str(), query.as_str(), limit_n),
+            ("entities", "stale header", 10)
+        );
+        let (path, name, served, reasons): (String, String, bool, String) = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT path, name, served, reasons_json FROM retrieval_items WHERE retrieval_id = ?1 AND rank = 1",
+                [r.retrieval_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(format!("{path}::{name}"), "docs/design.md::Freshness");
+        assert!(served);
+        assert!(
+            reasons.contains(r#""entities":["STALE header"]"#)
+                && reasons.contains("entity:STALE header"),
+            "{reasons}"
+        );
+
+        let r = e
+            .entities(&EntitiesRequest {
+                query: "stale header".into(),
+                entities: vec![],
+                limit: 100,
+            })
+            .unwrap();
+        let limit_n: i64 = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT limit_n FROM retrievals WHERE id = ?1",
+                [r.retrieval_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(limit_n as usize, ENTITIES_LIMIT_MAX);
+        assert_eq!(ENTITIES_LIMIT_MAX, 25);
     }
 
     #[test]
