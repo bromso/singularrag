@@ -627,7 +627,7 @@ describe("App", () => {
     });
   });
 
-  test("a multi-root status shows a root filter that narrows the tree", async () => {
+  test("a multi-root status shows a root filter that narrows the tree and the map", async () => {
     const user = userEvent.setup();
     statusRootsOverride = [{ name: "app", path: "/repo/app", git_head: "9b1e0d4f" }, { name: "notes", path: "/repo/notes", git_head: "9b1e0d4f" }];
     treeOverride = [
@@ -640,5 +640,32 @@ describe("App", () => {
     await user.selectOptions(screen.getByLabelText("Root"), "notes");
     await waitFor(() => expect(screen.queryByText("app/src/a.ts")).toBeNull());
     expect(screen.getByText("notes/n.md")).toBeTruthy();
+
+    // The map's own node/edge set is filtered too, not just the tree rows: with the
+    // root still set to "notes", switching to the map view must show only its file —
+    // the accessible summary label (which counts the payload's own nodes) is how a
+    // screen-reader user (and this test) can observe the graph, not just the DOM rows.
+    await user.click(screen.getByRole("radio", { name: "Map" }));
+    expect(await screen.findByRole("img", { name: /^Map of 1 file\./ })).toBeTruthy();
+  });
+
+  test("switching root clears a focused row from the hidden root", async () => {
+    const user = userEvent.setup();
+    statusRootsOverride = [{ name: "app", path: "/repo/app", git_head: "9b1e0d4f" }, { name: "notes", path: "/repo/notes", git_head: "9b1e0d4f" }];
+    treeOverride = [
+      { path: "app/src/a.ts", lang: "typescript", skipped_reason: null, symbols: [] },
+      { path: "notes/n.md", lang: "markdown", skipped_reason: null, symbols: [] },
+    ];
+    render(<App />);
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await user.click(within(grid).getByText("app/src/a.ts"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    await waitFor(() => expect(within(panel).getByRole("heading", { name: "app/src/a.ts" })).toBeTruthy());
+
+    // "app/src/a.ts" is under the root about to be hidden; the detail panel must not
+    // keep pointing at a row the tree (and the map) no longer show.
+    await user.selectOptions(screen.getByLabelText("Root"), "notes");
+    await waitFor(() => expect(within(panel).queryByRole("heading", { name: "app/src/a.ts" })).toBeNull());
+    expect(within(panel).getByText("Select a file or symbol.")).toBeTruthy();
   });
 });
