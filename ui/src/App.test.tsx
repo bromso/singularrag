@@ -43,6 +43,12 @@ let detailItems: unknown[] = [];
 // What `GET /api/status` answers as `index_version`; a test can change this before
 // firing a change event to simulate the index having moved on.
 let statusVersion = "abc123";
+// When set, `GET /api/status` answers with these `roots` instead of the fixture's
+// single-root default — lets a test simulate a multi-root workspace.
+let statusRootsOverride: { name: string; path: string; git_head: string | null }[] | null = null;
+// When set, `GET /api/tree` (and, absent its own override, `GET /api/graph`) answers
+// with these files instead of the fixture's default single file.
+let treeOverride: typeof tree | null = null;
 // When non-null, each `GET /api/status` call captures its response body immediately
 // (reflecting `statusVersion` at call time, like a real server would) but blocks
 // on a fresh gate before returning it, and pushes that gate's resolver here — so a
@@ -69,6 +75,8 @@ beforeEach(() => {
   extraRetrievalItems = [];
   detailItems = [{ rank: 1, symbol_id: 1, path: "src/auth/session.ts", name: "createSession", line_start: 3, score: 0.1, served: true, reasons: r }];
   statusVersion = "abc123";
+  statusRootsOverride = null;
+  treeOverride = null;
   statusGates = null;
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
@@ -83,7 +91,7 @@ beforeEach(() => {
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
     if (init?.headers && (init.headers as Record<string, string>).Authorization !== "Bearer deadbeef") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
     if (url.endsWith("/api/status")) {
-      const body = { ...status, index_version: statusVersion };
+      const body = { ...status, index_version: statusVersion, roots: statusRootsOverride ?? status.roots };
       if (statusGates) await new Promise<void>((resolve) => { statusGates!.push(resolve); });
       return json(body);
     }
@@ -91,10 +99,11 @@ beforeEach(() => {
       if (blastGate) await blastGate;
       return json({ root: { path: "src/auth/session.ts", symbol: "createSession" }, files: [{ path: "src/http/middleware.ts", depth: 1, via: "createSession" }], truncated: null });
     }
-    if (url.endsWith("/api/graph")) return json({ index_version: "abc123", nodes: graphNodesOverride ?? tree.map((f) => ({ path: f.path, symbols: f.symbols.length, lang: f.lang })), edges: [] });
+    if (url.endsWith("/api/graph")) return json({ index_version: "abc123", nodes: graphNodesOverride ?? (treeOverride ?? tree).map((f) => ({ path: f.path, symbols: f.symbols.length, lang: f.lang })), edges: [] });
+    if (url.endsWith("/api/query") && init?.method === "POST") return json({ retrieval_id: 8, served: 1, cut: 0 });
     if (url.includes("/api/retrievals?")) return json(retrievalList);
     if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [...detailItems, ...extraRetrievalItems] });
-    if (url.endsWith("/api/tree")) return json(tree);
+    if (url.endsWith("/api/tree")) return json(treeOverride ?? tree);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
     // GET /api/map returns a fresh object (new identity) each call, reflecting
     // whatever was last PUT — this both matches how the real server behaves
@@ -600,5 +609,36 @@ describe("App", () => {
     await user.click(screen.getByRole("radio", { name: "Map" }));
     await screen.findByRole("img");
     expect((await axe.run(container)).violations).toEqual([]);
+  });
+
+  test("running a query from the panel selects the new retrieval", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const rail = await screen.findByRole("region", { name: "Retrievals" });
+    within(rail).getByText("Claude Code");
+    // The new retrieval a running query would create — pushed before the query
+    // resolves, so it's there by the time `onQueryDone`'s refetch runs.
+    retrievalList = [{ ...retrieval, id: 8, query: "where is routing", tool: "repo_map" }, retrieval];
+    await user.type(screen.getByLabelText("Query"), "where is routing");
+    await user.click(screen.getByRole("button", { name: "Run query" }));
+    await waitFor(() => {
+      const button = within(rail).getByRole("button", { name: /^Map · where/ });
+      expect(button.getAttribute("aria-current")).toBe("true");
+    });
+  });
+
+  test("a multi-root status shows a root filter that narrows the tree", async () => {
+    const user = userEvent.setup();
+    statusRootsOverride = [{ name: "app", path: "/repo/app", git_head: "9b1e0d4f" }, { name: "notes", path: "/repo/notes", git_head: "9b1e0d4f" }];
+    treeOverride = [
+      { path: "app/src/a.ts", lang: "typescript", skipped_reason: null, symbols: [] },
+      { path: "notes/n.md", lang: "markdown", skipped_reason: null, symbols: [] },
+    ];
+    render(<App />);
+    await screen.findByText("app/src/a.ts");
+    expect(screen.getByText("notes/n.md")).toBeTruthy();
+    await user.selectOptions(screen.getByLabelText("Root"), "notes");
+    await waitFor(() => expect(screen.queryByText("app/src/a.ts")).toBeNull());
+    expect(screen.getByText("notes/n.md")).toBeTruthy();
   });
 });

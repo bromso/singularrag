@@ -30,3 +30,4 @@ export type GraphEdge = { src: number; dst: number; weight: number; names: numbe
 export type GraphPayload = { index_version: string; nodes: GraphNode[]; edges: GraphEdge[] };
 export type BlastFile = { path: string; depth: number; via: string };
 export type BlastResult = { root: { path: string; symbol: string }; files: BlastFile[]; truncated: null | "depth" | "files" };
+export type QueryResult = { retrieval_id: number; served: number; cut: number };

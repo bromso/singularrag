@@ -12,6 +12,7 @@ import { FreshnessBadge, freshnessText } from "@/components/FreshnessBadge";
 import { LiveRegion } from "@/components/LiveRegion";
 import { MapErrorBoundary } from "@/components/MapErrorBoundary";
 import { MapView } from "@/components/MapView";
+import { QueryPanel } from "@/components/QueryPanel";
 import { RepoTree, type TreeRow } from "@/components/RepoTree";
 import { RetrievalsRail } from "@/components/RetrievalsRail";
 import { SkippedSheet } from "@/components/SkippedSheet";
@@ -35,6 +36,7 @@ export function App() {
   const [map, setMap] = useState<MapConfig>(emptyMap);
   const [focused, setFocused] = useState<TreeRow | null>(null);
   const [filter, setFilter] = useState("");
+  const [root, setRoot] = useState("");
   const [blast, setBlast] = useState<BlastResult | null>(null);
   const [blastLoading, setBlastLoading] = useState(false);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
@@ -119,6 +121,15 @@ export function App() {
   }, [selected]);
 
   const rows = useMemo(() => joinRetrieval(tree, detail?.items ?? null), [tree, detail]);
+  const filteredRows = useMemo(() => (root ? rows.filter((r) => r.path.startsWith(`${root}/`)) : rows), [rows, root]);
+
+  // A query submitted from the panel becomes a new UI retrieval; refetch the list from
+  // the server (rather than optimistically inserting) so it lands with whatever fields
+  // the server fills in, then select it so the rail and detail panel jump to it.
+  const onQueryDone = useCallback((id: number) => {
+    api.retrievals().then(setRetrievals).catch((e: unknown) => toastError(e));
+    setSelected(id);
+  }, []);
 
   // A row's action button only selected the row, which row focus had already done, so it
   // did nothing a screen-reader user could notice (I10). Move DOM focus to the panel it
@@ -229,19 +240,31 @@ export function App() {
         <FreshnessBadge status={status} />
         <SkippedSheet skipped={skipped} />
         <ViewToggle value={view} onChange={changeView} />
+        {status && status.roots.length > 1 && (
+          <label className="text-sm">
+            Root
+            <select value={root} onChange={(e) => setRoot(e.target.value)} className="ml-2 rounded border bg-background px-2 py-1">
+              <option value="">All roots</option>
+              {status.roots.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}
+            </select>
+          </label>
+        )}
         <label className="ml-auto text-sm">
           Filter
           <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} className="ml-2 rounded border bg-background px-2 py-1" placeholder="path or symbol" />
         </label>
       </header>
-      <RetrievalsRail retrievals={retrievals} selected={selected} onSelect={setSelected}
-        onMore={() => api.retrievals(retrievals[retrievals.length - 1]?.id).then((more) => setRetrievals((rs) => [...rs, ...more]))} />
+      <div className="flex min-h-0 flex-col">
+        <QueryPanel onDone={onQueryDone} announce={announce} />
+        <RetrievalsRail retrievals={retrievals} selected={selected} onSelect={setSelected}
+          onMore={() => api.retrievals(retrievals[retrievals.length - 1]?.id).then((more) => setRetrievals((rs) => [...rs, ...more]))} />
+      </div>
       <main className={view === "tree" ? "min-h-0 overflow-auto" : "relative min-h-0 overflow-hidden"}>
         {view === "tree" ? (
-          <RepoTree rows={rows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
+          <RepoTree rows={filteredRows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
         ) : (
           <MapErrorBoundary onSwitchToTable={switchToTable}>
-            <MapView payload={graph} rows={rows} hasRetrieval={detail !== null}
+            <MapView payload={graph} rows={filteredRows} hasRetrieval={detail !== null}
               focusedPath={focused?.path ?? null} focusedSymbol={focused?.kind === "symbol" ? focused.symbol.symbol.name : null}
               expandedPath={expandedPath} blast={blast} boundaries={map.boundary} ariaLabel={mapLabel}
               onSelectNode={onSelectNode} onToggleExpand={toggleExpand} onSwitchToTable={switchToTable} onLayoutReady={onLayoutReady} />

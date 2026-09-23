@@ -3,8 +3,8 @@ import { edgeStyle, nodeSize, nodeStyle, readPalette, type EdgeCtx, type NodeCtx
 
 const SIGMA_COLOR = /^#[0-9a-fA-F]{6}$|^rgba?\(/;
 
-const pal: Palette = { served: "#0a0", cut: "#a60", untouched: "#888", focus: "#00f", edge: "#666", edgeDim: "#ddd", label: "#000", background: "#fff" };
-const base: NodeCtx = { status: null, focused: false, blastDepth: null, blastActive: false, symbols: 4, hovered: false, zoomRatio: 1 };
+const pal: Palette = { served: "#0a0", cut: "#a60", untouched: "#888", focus: "#00f", edge: "#666", edgeDim: "#ddd", label: "#000", background: "#fff", docs: "#70c", config: "#0aa", styles: "#c07" };
+const base: NodeCtx = { status: null, focused: false, blastDepth: null, blastActive: false, symbols: 4, hovered: false, zoomRatio: 1, group: "code" };
 
 describe("nodeStyle", () => {
   test("served is filled with a plain label", () => {
@@ -25,6 +25,10 @@ describe("nodeStyle", () => {
     expect(s.size).toBeLessThan(nodeStyle("src/a.ts", { ...base, status: "served" }, pal).size);
     expect(nodeStyle("src/a.ts", { ...base, status: "untouched", hovered: true }, pal).label).toBe("src/a.ts");
     expect(nodeStyle("src/a.ts", { ...base, status: "untouched", zoomRatio: 0.3 }, pal).label).toBe("src/a.ts");
+  });
+  test("untouched document nodes use the docs colour", () => {
+    const s = nodeStyle("docs/a.md", { ...base, status: "untouched", group: "docs" }, pal);
+    expect(s.color).toBe(pal.docs);
   });
   test("no retrieval means neutral nodes with labels", () => {
     expect(nodeStyle("src/a.ts", base, pal)).toMatchObject({ type: "circle", label: "src/a.ts" });
@@ -71,7 +75,7 @@ describe("readPalette", () => {
 
 describe("sigma-parsable colours", () => {
   test("every colour the reducers emit is sigma-parsable", () => {
-    const pal6: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff" };
+    const pal6: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff", docs: "#7c3aed", config: "#0e7490", styles: "#be185d" };
     const statuses: (NodeCtx["status"])[] = [null, "served", "cut", "untouched"];
     const bools = [false, true];
     const collected: string[] = [];
@@ -79,7 +83,7 @@ describe("sigma-parsable colours", () => {
       for (const focused of bools) {
         for (const blastActive of bools) {
           for (const blastDepth of [null, 0, 2]) {
-            const s = nodeStyle("src/a.ts", { status, focused, blastDepth, blastActive, symbols: 4, hovered: false, zoomRatio: 1 }, pal6);
+            const s = nodeStyle("src/a.ts", { status, focused, blastDepth, blastActive, symbols: 4, hovered: false, zoomRatio: 1, group: "code" }, pal6);
             collected.push(s.color);
             if (s.borderColor) collected.push(s.borderColor);
           }
