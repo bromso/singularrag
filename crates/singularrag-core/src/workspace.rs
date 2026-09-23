@@ -100,6 +100,12 @@ impl Workspace {
             .models
             .map(ModelsEntry::fold)
             .unwrap_or_else(|| ws.models.clone());
+        if models.api.is_some() {
+            return Err(Error::Config(format!(
+                "{}: models.api is not supported yet; extraction runs through Ollama",
+                file.display()
+            )));
+        }
         if parsed.root.is_empty() {
             return Ok(Workspace { models, ..ws });
         }
@@ -350,14 +356,25 @@ mod tests {
             Workspace::open(d.path()).unwrap().models,
             crate::models::ModelsConfig::default()
         );
-        write_roots(
-            d.path(),
-            "[models]\nextract = \"llama3.2:3b\"\napi = \"anthropic\"\n",
-        );
+        write_roots(d.path(), "[models]\nextract = \"llama3.2:3b\"\n");
         let ws = Workspace::open(d.path()).unwrap();
         assert_eq!(ws.models.extract, "llama3.2:3b");
         assert_eq!(ws.models.embed, "nomic-embed-text");
-        assert_eq!(ws.models.api.as_deref(), Some("anthropic"));
+        assert_eq!(ws.models.api, None);
         assert!(!ws.is_named(), "a models table alone does not name roots");
+    }
+
+    #[test]
+    fn models_api_is_refused_until_the_api_route_exists() {
+        let d = ws_dir();
+        write_roots(d.path(), "[models]\napi = \"anthropic\"\n");
+        let e = crate::engine::Engine::open(d.path(), "s").unwrap_err();
+        assert!(matches!(e, Error::Config(_)), "{e}");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("models.api is not supported yet; extraction runs through Ollama"),
+            "{msg}"
+        );
+        assert!(msg.contains("workspace.toml"), "{msg}");
     }
 }

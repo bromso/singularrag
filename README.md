@@ -186,8 +186,9 @@ Configure it in `.singularrag/workspace.toml`, all optional:
 ollama = "http://127.0.0.1:11434"   # default
 embed = "nomic-embed-text"          # default
 extract = "qwen2.5:7b-instruct"     # default
-# api = "anthropic"                 # opt-in: extraction through an API key instead; embeddings stay local
 ```
+
+Extraction through a hosted API is planned; until then any `api` value in `[models]` is refused when the workspace opens.
 
 `SINGULARRAG_OLLAMA_URL` overrides the `ollama` URL from the environment (tests and a non-default Ollama host use this).
 
