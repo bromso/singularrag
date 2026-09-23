@@ -930,11 +930,26 @@ struct EntityMatches {
     models_unavailable: bool,
 }
 
+/// English function words and pronouns: an entity named one of these (a model does emit
+/// `I` or `the`) would match nearly every query, so queries never match it by name.
+const STOPWORDS: &[&str] = &[
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "by", "for", "with", "from", "as",
+    "is", "are", "was", "were", "be", "it", "its", "this", "that", "these", "those", "i", "you",
+    "he", "she", "we", "they", "me", "him", "her", "us", "them", "my", "your", "our", "their",
+    "not", "no",
+];
+
+/// Whether a query may match this `norm_name` by phrase or token: at least 3 characters
+/// and not a stopword. Explicit entity arguments are not held to this.
+fn query_matchable(norm: &str) -> bool {
+    norm.chars().count() >= 3 && !STOPWORDS.contains(&norm)
+}
+
 /// The entity matching rule `repo_map`'s seeds and the `entities` tool share, with at
 /// most one model call (the query's embedding). In order: the names in `entities`
 /// (exact `norm_name`, argument order); then entities the query names, as a whole-word
 /// phrase of `norm_name(query)` or as one of its whitespace tokens, by where they occur
-/// in the query; then, with a query vector, the `ENTITY_K` nearest entities at least
+/// in the query, skipping names shorter than 3 characters and `STOPWORDS`; then, with a query vector, the `ENTITY_K` nearest entities at least
 /// `ENTITY_MIN_SIM` close, most similar first. Ties go to the entity with more mentions.
 /// Name matching needs no model; with no vectors in the index the model is not asked.
 fn matching_entities(
@@ -979,7 +994,7 @@ fn matching_entities(
         let mut named: Vec<(usize, usize)> = candidates
             .iter()
             .enumerate()
-            .filter(|(_, (_, _, n, _))| !n.is_empty())
+            .filter(|(_, (_, _, n, _))| query_matchable(n))
             .filter_map(|(i, (_, _, n, _))| {
                 phrase_position(&phrase, n)
                     .or_else(|| {
@@ -1883,6 +1898,34 @@ mod tests {
         assert!(
             s.entity_names.contains(&"STALE header".to_string()),
             "name matches are kept"
+        );
+    }
+
+    #[test]
+    fn trivial_entity_names_never_match_a_query_but_still_match_by_argument() {
+        let (_d, store) = indexed_docs();
+        let json = r#"{"docs/design.md::Freshness": {"entities": [
+            {"name": "I", "type": "person", "description": "the narrator"},
+            {"name": "the", "type": "concept", "description": "an article"},
+            {"name": "Aurelia", "type": "person", "description": "a captain"}
+        ], "relations": []}}"#;
+        assert_eq!(load_extraction_json(&store, None, json).unwrap(), 1);
+        let names = |q: Option<&str>, args: &[String]| {
+            seeds_for(&store, None, q, args, &[]).unwrap().entity_names
+        };
+        assert!(
+            names(Some("where do I configure the login flow"), &[]).is_empty(),
+            "{:?}",
+            names(Some("where do I configure the login flow"), &[])
+        );
+        assert_eq!(
+            names(Some("where did Aurelia sail"), &[]),
+            vec!["Aurelia".to_string()]
+        );
+        assert_eq!(
+            names(None, &["I".to_string(), "the".to_string()]),
+            vec!["I".to_string(), "the".to_string()],
+            "an explicit argument matches anything exact"
         );
     }
 
