@@ -382,6 +382,22 @@ fn record_outage(store: &Store, t: &mut KnowledgeTick, message: String) -> Resul
     Ok(())
 }
 
+/// When the model now answers in a different dimension than the index holds, rebuild
+/// (which clears the vectors and re-queues every section) and tell the caller to end
+/// the tick; the next ticks re-embed at the new dimension. Not an outage.
+fn dimension_changed(store: &Store, vectors: &[Vec<f32>]) -> Result<bool> {
+    let Some(len) = vectors.first().map(Vec::len) else {
+        return Ok(false);
+    };
+    match vec::dim(store)? {
+        Some(d) if d != len => {
+            vec::ensure_tables(store, len)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn clear_meta(store: &Store, key: &str) -> Result<()> {
     store
         .conn()
@@ -413,11 +429,10 @@ struct ToEmbed {
     hash: String,
     body: String,
     vector: Option<Vec<f32>>,
-    cached: bool,
 }
 
 /// Queued sections without a vector, up to `EMBED_PER_TICK`: cache hits by hash, the misses
-/// in one model call. Returns `false` when a model outage stopped it.
+/// in one model call. Returns `false` when a model outage or a dimension rebuild ended the tick.
 fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<bool> {
     let conn = store.conn();
     let rows: Vec<(i64, String)> = {
@@ -462,7 +477,6 @@ fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<b
             symbol_id,
             hash,
             body,
-            cached: vector.is_some(),
             vector,
         });
     }
@@ -485,6 +499,10 @@ fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<b
             record_outage(store, t, "embed: empty vector".to_string())?;
             return Ok(false);
         }
+        if dimension_changed(store, &vectors)? {
+            return Ok(false);
+        }
+        // First vectors ever: this creates the tables; otherwise a cheap no-op.
         vec::ensure_tables(store, d)?;
         for (i, v) in misses.into_iter().zip(vectors) {
             items[i].vector = Some(v);
@@ -492,16 +510,11 @@ fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<b
     } else if let Some(d) = dim_before {
         vec::ensure_tables(store, d)?;
     }
-    // A rebuild just now invalidated cache hits of the old dimension; they wait a tick.
-    let dim_now = vec::dim(store)?;
 
     let tx = conn.unchecked_transaction()?;
     let mut embedded = 0;
     for it in &items {
         let Some(v) = &it.vector else { continue };
-        if it.cached && dim_now != Some(v.len()) {
-            continue;
-        }
         match vec::insert(store, "section_vec", it.symbol_id, v) {
             Ok(()) => {}
             Err(Error::ModelUnavailable(m)) => {
@@ -579,7 +592,15 @@ fn extract_step(
                 heading: &heading,
                 text: &body,
             }) {
-                Ok(x) => x,
+                Ok(x) => {
+                    // A memo keyed by hash, not section state: kept even when a later
+                    // step fails, so that failure never costs another model call.
+                    conn.execute(
+                        "INSERT OR REPLACE INTO extraction_cache(hash, json) VALUES (?1, ?2)",
+                        params![hash, extraction_json(&x)?],
+                    )?;
+                    x
+                }
                 Err(Error::ModelUnavailable(m)) if m.contains("not JSON") => {
                     conn.execute(
                         "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1",
@@ -597,7 +618,12 @@ fn extract_step(
             HashMap::new()
         } else {
             match models.embed(&texts) {
-                Ok(v) => texts.into_iter().zip(v).collect(),
+                Ok(v) => {
+                    if dimension_changed(store, &v)? {
+                        return Ok(());
+                    }
+                    texts.into_iter().zip(v).collect()
+                }
                 Err(Error::ModelUnavailable(m)) => return record_outage(store, t, m),
                 Err(e) => return Err(e),
             }
@@ -611,8 +637,11 @@ fn extract_step(
     Ok(())
 }
 
-/// One transaction: the extraction applied, vectors for what is new, the extraction cached,
-/// the queue row gone. Any error rolls all of it back.
+fn extraction_json(x: &Extraction) -> Result<String> {
+    serde_json::to_string(x).map_err(|e| Error::Config(e.to_string()))
+}
+
+/// One transaction: the extraction applied, vectors for what is new, the queue row gone. Any error rolls all of it back.
 fn write_section(
     store: &Store,
     symbol_id: i64,
@@ -659,13 +688,6 @@ fn write_section(
             vec::insert(store, "relation_vec", id, v)?;
         }
     }
-    tx.execute(
-        "INSERT OR REPLACE INTO extraction_cache(hash, json) VALUES (?1, ?2)",
-        params![
-            hash,
-            serde_json::to_string(x).map_err(|e| Error::Config(e.to_string()))?
-        ],
-    )?;
     tx.execute(
         "DELETE FROM extract_queue WHERE symbol_id = ?1",
         [symbol_id],
@@ -1006,6 +1028,111 @@ mod tests {
         let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
         assert!(t.model_error.is_none() && t.embedded > 0, "{t:?}");
         assert_eq!(store.get_meta("models_error").unwrap(), None);
+    }
+
+    #[test]
+    fn a_dimension_change_seen_at_extraction_rebuilds_instead_of_stalling() {
+        let (_d, store) = indexed_docs();
+        let sections = count(&store, "SELECT COUNT(*) FROM sections_fts");
+        let f = FakeOllama::spawn(8);
+        let t = tick(&store, &models(&f), Duration::ZERO).unwrap();
+        assert_eq!(
+            t.embedded as i64, sections,
+            "every section embedded at 8 dims"
+        );
+        assert_eq!(
+            t.extracted, 0,
+            "a zero budget leaves the whole extraction backlog"
+        );
+        drop(f);
+        let g = FakeOllama::spawn(16);
+        g.set_extraction("", serde_json::json!({"entities": [{"name": "Thing", "type": "concept", "description": "in every section"}], "relations": []}));
+        let m = models(&g);
+        let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+        assert!(t.model_error.is_none(), "{t:?}");
+        assert_eq!(crate::store::vec::dim(&store).unwrap(), Some(16));
+        assert_eq!(
+            store.get_meta("embeddings_rebuilding").unwrap().as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue"),
+            sections,
+            "re-queued"
+        );
+        while pending(&store).unwrap() > 0 {
+            let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+            assert!(t.model_error.is_none(), "{t:?}");
+        }
+        let mut q = vec![0.0f32; 16];
+        q[0] = 1.0;
+        assert_eq!(
+            crate::store::vec::knn(&store, "entity_vec", &q, 1)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT mentions FROM entities WHERE norm_name = 'thing'"
+            ),
+            sections
+        );
+        let generates = g
+            .calls()
+            .iter()
+            .filter(|p| p.as_str() == "/api/generate")
+            .count();
+        assert_eq!(
+            generates as i64, sections,
+            "the extraction before the rebuild was not asked again"
+        );
+    }
+
+    #[test]
+    fn an_extraction_is_cached_even_when_its_entity_embedding_fails() {
+        let (_d, store) = indexed_docs();
+        let sections = count(&store, "SELECT COUNT(*) FROM sections_fts");
+        let f = FakeOllama::spawn(8);
+        let m = models(&f);
+        tick(&store, &m, Duration::ZERO).unwrap();
+        f.set_extraction("Freshness", serde_json::json!({"entities": [{"name": "STALE header", "type": "concept", "description": "says files changed"}], "relations": []}));
+        f.corrupt_next_embed(1);
+        let t = loop {
+            let t = tick(&store, &m, Duration::from_secs(20)).unwrap();
+            if t.model_error.is_some() {
+                break t;
+            }
+            assert!(
+                pending(&store).unwrap() > 0,
+                "the corrupt embed was never hit"
+            );
+        };
+        assert!(t.model_error.is_some(), "{t:?}");
+        let fresh: i64 = count(&store, "SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = 'docs/design.md' AND s.name = 'Freshness'");
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM extract_queue WHERE symbol_id = {fresh}")
+            ),
+            1,
+            "the queue row survived"
+        );
+        assert_eq!(count(&store, &format!("SELECT COUNT(*) FROM extraction_cache c JOIN extract_queue q ON q.hash = c.hash WHERE q.symbol_id = {fresh}")), 1, "cached anyway");
+        while pending(&store).unwrap() > 0 {
+            tick(&store, &m, Duration::from_secs(20)).unwrap();
+        }
+        let generates = f
+            .calls()
+            .iter()
+            .filter(|p| p.as_str() == "/api/generate")
+            .count();
+        assert_eq!(
+            generates as i64, sections,
+            "no section went to the model twice"
+        );
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM entity_vec"), 1);
     }
 
     #[test]
