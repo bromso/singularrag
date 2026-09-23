@@ -1,4 +1,5 @@
 import type { RetrievalSummary } from "@/api/types";
+import { toolLabel } from "@/lib/toolLabel";
 import { cn } from "@/lib/utils";
 
 function rel(ms: number): string {
@@ -27,7 +28,7 @@ export function RetrievalsRail({ retrievals, selected, onSelect, onMore }: {
               <li key={r.id}>
                 <button type="button" aria-current={selected === r.id ? "true" : undefined} onClick={() => onSelect(r.id)}
                   className={cn("w-full px-3 py-2 text-left text-sm hover:bg-accent focus-visible:bg-accent", selected === r.id && "bg-accent")}>
-                  <span className="block">{r.tool} · {r.query ?? "no query"}</span>
+                  <span className="block">{toolLabel(r.tool)} · {r.query ?? "no query"}</span>
                   <span className="block text-xs text-muted-foreground">{rel(r.created_at_ms)} · {r.served} served · {r.cut} cut · {r.stale_count ? `${r.stale_count} stale` : "fresh"}</span>
                 </button>
               </li>
