@@ -36,6 +36,8 @@ embed = "nomic-embed-text"          # default
 - The embedding dimension is read from the first successful call and stored in `meta` (`embed_dim`, `embed_model`). A later call with a different model or dimension drops and rebuilds the vector tables and re-queues every section; the header says `embeddings: rebuilding`.
 - `singularrag doctor`: prints whether Ollama answers at the configured URL, whether both models are pulled (`/api/tags`), the embedding dimension, the queue length and the last extraction error. Read-only. README's install section tells the user to install Ollama and pull the two models.
 
+*Amended 2026-09-24 (final review).* The API route is not implemented; any `api` value is refused with a config error until it is.
+
 ## 3. Extraction and the knowledge stores
 
 Schema version 4 adds, in `index.db`:
