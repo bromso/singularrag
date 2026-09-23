@@ -48,6 +48,8 @@ pub struct SessionSpec {
     pub tools: Vec<String>,
     pub mcp_config: Option<PathBuf>,
     pub allowed_tools: Vec<String>,
+    /// A settings file with the condition's hooks; loaded even under `--setting-sources ""`.
+    pub settings: Option<PathBuf>,
     pub max_turns: u32,
     pub max_budget_usd: f64,
 }
@@ -73,6 +75,10 @@ pub fn command_args(spec: &SessionSpec) -> Vec<String> {
             a.push("--allowedTools".into());
             a.push(spec.allowed_tools.join(","));
         }
+    }
+    if let Some(s) = &spec.settings {
+        a.push("--settings".into());
+        a.push(s.display().to_string());
     }
     a.extend([
         "--setting-sources".to_string(),
@@ -150,6 +156,7 @@ mod tests {
             tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
             mcp_config: Some(PathBuf::from("/tmp/mcp.json")),
             allowed_tools: vec!["mcp__singularrag".into()],
+            settings: None,
             max_turns: 25,
             max_budget_usd: 0.5,
         }
@@ -225,5 +232,21 @@ mod tests {
         s.allowed_tools = vec![];
         let args = command_args(&s);
         assert!(!args.iter().any(|a| a == "--allowedTools"));
+    }
+
+    #[test]
+    fn settings_flag_follows_allowed_tools_and_precedes_setting_sources() {
+        let mut s = spec();
+        s.settings = Some(PathBuf::from("/x/settings.json"));
+        let args = command_args(&s);
+        let at = args
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("--settings");
+        assert_eq!(args[at + 1], "/x/settings.json");
+        assert_eq!(args[at - 2], "--allowedTools");
+        assert_eq!(args[at + 2], "--setting-sources");
+        let none = command_args(&spec());
+        assert!(!none.iter().any(|a| a == "--settings"));
     }
 }

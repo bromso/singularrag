@@ -65,6 +65,7 @@ fn spec_for(
     q: &Question,
     mcp: Option<&Path>,
     allowed_tools: Vec<String>,
+    settings: Option<&Path>,
 ) -> SessionSpec {
     SessionSpec {
         prompt: session::prompt_for(&q.query, cfg.answer_max),
@@ -72,6 +73,7 @@ fn spec_for(
         tools: cfg.tools.clone(),
         mcp_config: mcp.map(Path::to_path_buf),
         allowed_tools,
+        settings: settings.map(Path::to_path_buf),
         max_turns: cfg.max_turns,
         max_budget_usd: cfg.max_budget_usd,
     }
@@ -178,7 +180,13 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
             };
             for q in &questions {
                 for _ in 1..=cfg.repeats {
-                    let spec = spec_for(&cfg, q, c.mcp_config.as_deref(), allowed_tools.clone());
+                    let spec = spec_for(
+                        &cfg,
+                        q,
+                        c.mcp_config.as_deref(),
+                        allowed_tools.clone(),
+                        c.settings.as_deref(),
+                    );
                     let args: Vec<String> = session::command_args(&spec)
                         .iter()
                         .map(|a| shell_quote(a))
@@ -290,6 +298,18 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
             }
             None => None,
         };
+        let settings = match &c.settings {
+            Some(src) => {
+                let text = std::fs::read_to_string(src)
+                    .with_context(|| format!("reading {}", src.display()))?
+                    .replace("<checkout>", &checkout)
+                    .replace("<bin>", &singularrag_bin());
+                let dst = cdir.join("settings.json");
+                std::fs::write(&dst, text)?;
+                Some(dst)
+            }
+            None => None,
+        };
         if !c.warmup.is_empty() {
             let argv: Vec<String> = c
                 .warmup
@@ -327,7 +347,13 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
                 let stream_path = cdir.join(format!("{}-{repeat}.stream.jsonl", q.id));
                 let stderr_path = cdir.join(format!("{}-{repeat}.stderr", q.id));
                 eprintln!("[{}/{}#{repeat}] running", c.name, q.id);
-                let spec = spec_for(&cfg, q, mcp.as_deref(), allowed_tools.clone());
+                let spec = spec_for(
+                    &cfg,
+                    q,
+                    mcp.as_deref(),
+                    allowed_tools.clone(),
+                    settings.as_deref(),
+                );
                 let outcome = session::run_session(&cfg.repo, &spec, &stream_path, &stderr_path)?;
                 let parsed = stream::parse_stream(&std::fs::read_to_string(&stream_path)?);
                 let spawn_error = match outcome.exit_code {
@@ -354,9 +380,8 @@ pub fn run(opts: &RunOpts) -> Result<Option<PathBuf>> {
                     if record.failed { " · FAILED" } else { "" }
                 );
                 dirty_after(&cfg, &format!("{}/{}#{repeat}", c.name, q.id))?;
-                if !parsed.permission_denials.is_empty() {
-                    let reason =
-                        format!("tool {} denied by permission", parsed.permission_denials[0]);
+                if !record.denied.is_empty() {
+                    let reason = format!("tool {} denied by permission", record.denied[0]);
                     eprintln!("[{}] aborted: {reason}", c.name);
                     rf.run.aborted.insert(c.name.clone(), reason);
                     write_run_file(&run_dir, &rf)?;

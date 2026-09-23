@@ -26,8 +26,13 @@ pub struct Record {
     pub duration_ms: u64,
     pub failed: bool,
     pub reason: Option<String>,
+    /// Tools denied by permission, the singularrag hook's Read denials excluded.
     #[serde(default)]
     pub denied: Vec<String>,
+    /// Reads refused by the singularrag hook: a `Read` denial whose tool result carries
+    /// `singularrag:`. Counted, never an abort.
+    #[serde(default)]
+    pub hook_denials: u64,
 }
 
 impl Record {
@@ -96,6 +101,24 @@ pub fn score(
     } else {
         Some("no result line".to_string())
     };
+    let is_hook = |tool: &str, id: &str| {
+        tool == "Read"
+            && parsed
+                .tool_results
+                .get(id)
+                .is_some_and(|t| t.contains("singularrag:"))
+    };
+    let hook_denials = parsed
+        .permission_denial_ids
+        .iter()
+        .filter(|(t, id)| is_hook(t, id))
+        .count() as u64;
+    let mut denied: Vec<String> = Vec::new();
+    for (t, id) in &parsed.permission_denial_ids {
+        if !is_hook(t, id) && !denied.contains(t) {
+            denied.push(t.clone());
+        }
+    }
     let answer = if reason.is_none() {
         answer_of(parsed, answer_max).unwrap_or_default()
     } else {
@@ -132,7 +155,8 @@ pub fn score(
         duration_ms: result.map(|r| r.duration_ms).unwrap_or(0),
         failed: reason.is_some(),
         reason,
-        denied: parsed.permission_denials.clone(),
+        denied,
+        hook_denials,
     }
 }
 
@@ -342,5 +366,46 @@ mod tests {
         let back: Record = serde_json::from_str(&text).unwrap();
         assert_eq!(back.hit, r.hit);
         assert_eq!(back.tokens, r.tokens);
+    }
+
+    const HOOK_STREAM: &str = concat!(
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/tmp/hono/src/router.ts"}}]},"session_id":"5"}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"singularrag: this repository has a map. Call repo_map with your task first.","is_error":true}]},"session_id":"5"}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":4000,"num_turns":2,"structured_output":{"symbols":["src/router.ts::Router"]},"session_id":"5","total_cost_usd":0.04,"usage":{"input_tokens":5,"cache_creation_input_tokens":4000,"cache_read_input_tokens":0,"output_tokens":30},"permission_denials":[{"tool_name":"Read","tool_use_id":"tu1","tool_input":{"file_path":"/tmp/hono/src/router.ts"}}]}"#,
+        "\n"
+    );
+
+    #[test]
+    fn a_read_denied_by_the_singularrag_hook_is_counted_not_denied() {
+        let p = parse_stream(HOOK_STREAM);
+        let r = score(
+            &q(&["src/router.ts::Router"]),
+            "singularrag+hook",
+            1,
+            &p,
+            15,
+            None,
+        );
+        assert_eq!(r.hook_denials, 1);
+        assert!(r.denied.is_empty(), "{:?}", r.denied);
+        assert!(!r.failed);
+        assert_eq!(r.recall, 1.0);
+    }
+
+    #[test]
+    fn a_denial_of_another_tool_is_not_a_hook_denial() {
+        let p = parse_stream(&fixture("denied.jsonl"));
+        let r = score(
+            &q(&["src/router.ts::Router"]),
+            "singularrag",
+            1,
+            &p,
+            15,
+            None,
+        );
+        assert_eq!(r.hook_denials, 0);
+        assert_eq!(r.denied, s(&["mcp__singularrag__repo_map"]));
     }
 }

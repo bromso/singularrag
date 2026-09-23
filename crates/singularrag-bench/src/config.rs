@@ -15,6 +15,9 @@ pub struct Condition {
     /// Claude Code `mcpServers` JSON; absolute after `load`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_config: Option<PathBuf>,
+    /// Claude Code settings JSON passed as `--settings` (a hooks block); absolute after `load`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<PathBuf>,
     /// Argv run once before this condition's loop, `<checkout>` substituted (spec §3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warmup: Vec<String>,
@@ -118,6 +121,17 @@ pub fn load(path: &Path) -> Result<RunConfig> {
                 );
             }
             c.mcp_config = Some(abs);
+        }
+        if let Some(s) = &c.settings {
+            let abs = absolutise(&base, s);
+            if !abs.is_file() {
+                bail!(
+                    "condition {}: settings not found: {}",
+                    c.name,
+                    abs.display()
+                );
+            }
+            c.settings = Some(abs);
         }
         for entry in &c.reset {
             // A prefix check alone lets `.singularrag/../../x` through, and `remove_dir_all`
@@ -315,5 +329,23 @@ mcp_config = "conditions/singularrag.json"
             .unwrap_err()
             .to_string();
         assert!(e.contains("unknown condition nope"), "{e}");
+    }
+
+    #[test]
+    fn settings_resolves_relative_to_the_config_and_must_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(base.join("conditions")).unwrap();
+        std::fs::write(base.join("conditions/singularrag.json"), "{}").unwrap();
+        let with = format!("{GOOD}settings = \"conditions/hook.json\"\n");
+        let e = load(&write(&base, &with)).unwrap_err().to_string();
+        assert!(e.contains("settings not found"), "{e}");
+        std::fs::write(base.join("conditions/hook.json"), "{}").unwrap();
+        let cfg = load(&write(&base, &with)).unwrap();
+        assert_eq!(
+            cfg.conditions[1].settings.as_deref(),
+            Some(base.join("conditions/hook.json").as_path())
+        );
+        assert!(cfg.conditions[0].settings.is_none());
     }
 }

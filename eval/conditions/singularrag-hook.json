@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Read", "hooks": [ { "type": "command", "command": "<bin> --repo <checkout> hook read" } ] },
+      { "matcher": "mcp__singularrag__repo_map", "hooks": [ { "type": "command", "command": "<bin> --repo <checkout> hook map" } ] }
+    ]
+  }
+}
