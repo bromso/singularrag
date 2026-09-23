@@ -67,6 +67,26 @@ export function login(userId: string): void {
     w(root, "README.md", "# ts-mini\n");
 }
 
+/// A named workspace: `app` is the TypeScript mini repo, `notes` holds one README that
+/// mentions `createSession` in a code span. Returns the two root paths. The workspace
+/// directory itself holds only `.singularrag/workspace.toml`.
+pub fn write_workspace(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let app = dir.join("roots/app");
+    let notes = dir.join("roots/notes");
+    write_ts_mini(&app);
+    w(
+        &notes,
+        "README.md",
+        "# Notes\n\nSessions come from `createSession`; see [[design]].\n",
+    );
+    w(
+        dir,
+        crate::workspace::WORKSPACE_FILE,
+        "[[root]]\nname = \"app\"\npath = \"roots/app\"\n[[root]]\nname = \"notes\"\npath = \"roots/notes\"\n",
+    );
+    (app, notes)
+}
+
 pub fn write_rust_mini(root: &Path) {
     w(
         root,

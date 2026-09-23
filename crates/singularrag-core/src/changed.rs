@@ -248,6 +248,7 @@ mod tests {
     use crate::fixture::write_ts_mini;
     use crate::index::Indexer;
     use crate::store::Store;
+    use crate::workspace::Workspace;
     use std::process::Command;
 
     fn git(root: &std::path::Path, args: &[&str]) {
@@ -283,10 +284,14 @@ mod tests {
             ],
         );
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
         (dir, store)
     }
 
@@ -319,10 +324,14 @@ mod tests {
             "export function fresh(): number { return 1; }\n",
         )
         .unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
         let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
         assert_eq!(c.base, "HEAD");
         let cs = c
@@ -378,10 +387,14 @@ mod tests {
                 "comment",
             ],
         );
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
         let now = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
         assert!(
             now.symbols.is_empty() && now.files_without_symbols.is_empty(),
@@ -410,10 +423,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_ts_mini(dir.path());
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
-        Indexer::new(&store, dir.path(), &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
         let e = changed(&store, &MapConfig::default(), dir.path(), None)
             .unwrap_err()
             .to_string();
@@ -431,10 +448,14 @@ mod tests {
     }
 
     fn refresh(store: &Store, dir: &std::path::Path) {
-        Indexer::new(store, dir, &MapConfig::default())
-            .unwrap()
-            .refresh(None)
-            .unwrap();
+        Indexer::new(
+            store,
+            &Workspace::single(dir).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(None)
+        .unwrap();
     }
 
     fn names(c: &Changed) -> Vec<String> {

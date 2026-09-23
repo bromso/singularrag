@@ -12,6 +12,7 @@ use crate::map::{self, CUT_RECORDED};
 use crate::rank::{rank_symbols, ScoredSymbol};
 use crate::store::{lock, Store};
 use crate::time::now_ms;
+use crate::workspace::Workspace;
 use crate::Result;
 
 pub const DB_FILE: &str = ".singularrag/index.db";
@@ -26,8 +27,10 @@ pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
 /// not `Sync`, so an `Engine` cannot be shared between threads. Plan 2 (the MCP server)
 /// decides between `Mutex<Connection>` and one `Engine` per request; nothing here
 /// assumes either.
+#[derive(Debug)]
 pub struct Engine {
     root: PathBuf,
+    ws: Workspace,
     store: Store,
     config: MapConfig,
     /// mtime of `map.toml` when the config was last read (`None` when absent).
@@ -143,15 +146,16 @@ pub struct ChangedResponse {
 }
 
 impl Engine {
-    pub fn open(root: &Path, session_key: &str) -> Result<Engine> {
-        let root = root.canonicalize().map_err(|e| {
-            crate::Error::Config(format!("opening repo at {}: {e}", root.display()))
-        })?;
+    pub fn open(dir: &Path, session_key: &str) -> Result<Engine> {
+        let ws = Workspace::open(dir)?;
+        let root = ws.dir.clone();
         let store = Store::open(&root.join(DB_FILE))?;
         let config = MapConfig::load(&root)?;
+        config.check_roots(&ws.names())?;
         let config_mtime = map_toml_mtime(&root);
         Ok(Engine {
             root,
+            ws,
             store,
             config,
             config_mtime,
@@ -165,6 +169,9 @@ impl Engine {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    pub fn workspace(&self) -> &Workspace {
+        &self.ws
     }
     pub fn store(&self) -> &Store {
         &self.store
@@ -207,7 +214,9 @@ impl Engine {
     fn reload_config_if_changed(&mut self) -> Result<()> {
         let mtime = map_toml_mtime(&self.root);
         if mtime != self.config_mtime {
-            self.config = MapConfig::load(&self.root)?;
+            let config = MapConfig::load(&self.root)?;
+            config.check_roots(&self.ws.names())?;
+            self.config = config;
             self.config_mtime = mtime;
         }
         Ok(())
@@ -218,7 +227,7 @@ impl Engine {
     pub fn refresh(&mut self, budget: Duration) -> Result<IndexStats> {
         self.reload_config_if_changed()?;
         let pid = std::process::id();
-        let indexer = Indexer::new(&self.store, &self.root, &self.config)?;
+        let indexer = Indexer::new(&self.store, &self.ws, &self.config)?;
         let wait_until = Instant::now() + Duration::from_millis(LOCK_WAIT_MS);
         loop {
             if lock::try_acquire(&self.store, pid, now_ms())? {
@@ -1373,5 +1382,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tool, "changed");
+    }
+
+    #[test]
+    fn open_on_a_named_workspace_prefixes_map_paths_and_rejects_unknown_prefixes() {
+        let d = tempfile::tempdir().unwrap();
+        crate::fixture::write_workspace(d.path());
+        std::fs::write(
+            d.path().join(crate::config::MAP_FILE),
+            "[[pin]]\npath = \"app/src/auth/session.ts\"\n",
+        )
+        .unwrap();
+        let mut e = Engine::open(d.path(), "t").unwrap();
+        assert_eq!(e.workspace().names(), vec!["app", "notes"]);
+        let r = e
+            .repo_map(&MapRequest {
+                query: Some("session".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(r.text.contains("app/src/auth/session.ts:"), "{}", r.text);
+        assert!(r.text.contains("HEAD app:none notes:none"), "{}", r.text);
+        std::fs::write(
+            d.path().join(crate::config::MAP_FILE),
+            "[[pin]]\npath = \"src/auth/session.ts\"\n",
+        )
+        .unwrap();
+        let err = Engine::open(d.path(), "t").unwrap_err().to_string();
+        assert!(err.contains("does not start with a root name"), "{err}");
     }
 }

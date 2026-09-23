@@ -3,7 +3,7 @@
 //! as `remaining` so callers can say "STALE: N files changed since index".
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::{params, Connection};
@@ -15,7 +15,8 @@ use crate::secrets::looks_secret;
 use crate::store::Store;
 use crate::time::now_ms;
 use crate::tokens::split_identifier;
-use crate::walk::{walk, WalkEntry};
+use crate::walk::{walk_workspace, WalkEntry};
+use crate::workspace::Workspace;
 use crate::{Error, Result};
 
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -35,7 +36,7 @@ pub struct IndexStats {
 
 pub struct Indexer<'a> {
     store: &'a Store,
-    root: PathBuf,
+    ws: Workspace,
     config: &'a MapConfig,
 }
 
@@ -55,10 +56,10 @@ enum Outcome {
 }
 
 impl<'a> Indexer<'a> {
-    pub fn new(store: &'a Store, root: &Path, config: &'a MapConfig) -> Result<Self> {
+    pub fn new(store: &'a Store, ws: &Workspace, config: &'a MapConfig) -> Result<Self> {
         Ok(Indexer {
             store,
-            root: root.canonicalize()?,
+            ws: ws.clone(),
             config,
         })
     }
@@ -90,7 +91,7 @@ impl<'a> Indexer<'a> {
     /// Files whose mtime or size differ from the table, or that are not in it yet.
     pub fn stale_count(&self) -> Result<usize> {
         let known = self.known_files()?;
-        let w = walk(&self.root, &self.config.deny_patterns())?;
+        let w = walk_workspace(&self.ws, &self.config.deny_patterns())?;
         Ok(w.entries
             .iter()
             .filter(|e| Self::changed(&known, e))
@@ -118,7 +119,7 @@ impl<'a> Indexer<'a> {
     ) -> Result<IndexStats> {
         let mut stats = IndexStats::default();
         let known = self.known_files()?;
-        let w = walk(&self.root, &self.config.deny_patterns())?;
+        let w = walk_workspace(&self.ws, &self.config.deny_patterns())?;
         stats.scanned = w.entries.len() + w.skipped.len();
         let now = now_ms();
 
@@ -298,9 +299,25 @@ impl<'a> Indexer<'a> {
         let version = hasher.finalize().to_hex()[..12].to_string();
         self.store.set_meta("index_version", &version)?;
         self.store.set_meta("indexed_at_ms", &now.to_string())?;
-        match git_head(&self.root) {
-            Some(h) => self.store.set_meta("git_head", &h)?,
-            None => self.store.set_meta("git_head", "")?,
+        if self.ws.is_named() {
+            let mut parts = Vec::new();
+            for r in &self.ws.roots {
+                let head = git_head(&r.path).unwrap_or_default();
+                self.store
+                    .set_meta(&format!("git_head:{}", r.name), &head)?;
+                let short = if head.is_empty() {
+                    "none".to_string()
+                } else {
+                    head.chars().take(7).collect()
+                };
+                parts.push(format!("{}:{short}", r.name));
+            }
+            self.store.set_meta("git_head", &parts.join(" "))?;
+        } else {
+            match git_head(&self.ws.roots[0].path) {
+                Some(h) => self.store.set_meta("git_head", &h)?,
+                None => self.store.set_meta("git_head", "")?,
+            }
         }
         Ok(())
     }
@@ -349,6 +366,7 @@ mod tests {
     use crate::config::MapConfig;
     use crate::fixture::{write_rust_mini, write_ts_mini};
     use crate::store::Store;
+    use crate::workspace::Workspace;
 
     fn setup() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -365,7 +383,7 @@ mod tests {
     fn full_index_records_files_symbols_refs_and_skips() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(None).unwrap();
         assert_eq!(stats.remaining, 0);
         assert!(stats.indexed >= 4, "{stats:?}");
@@ -431,7 +449,7 @@ mod tests {
             return; // running as root: the file is readable anyway
         }
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(None).unwrap();
         let reason: Option<String> = store
             .conn()
@@ -462,7 +480,7 @@ mod tests {
         write_rust_mini(dir.path());
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(None).unwrap();
         assert_eq!(stats.indexed, 2, "{stats:?}");
         assert_eq!(stats.remaining, 0);
@@ -519,7 +537,7 @@ mod tests {
     fn incremental_refresh_touches_only_changed_files() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         ix.refresh(None).unwrap();
         let before: i64 = store
             .conn()
@@ -565,7 +583,7 @@ mod tests {
     fn same_content_new_mtime_is_unchanged_not_indexed() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         ix.refresh(None).unwrap();
 
         let p = dir.path().join("src/util/log.ts");
@@ -588,7 +606,7 @@ mod tests {
     fn deleted_files_are_removed_with_their_symbols() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         ix.refresh(None).unwrap();
         std::fs::remove_file(dir.path().join("src/util/log.ts")).unwrap();
         let stats = ix.refresh(None).unwrap();
@@ -610,7 +628,7 @@ mod tests {
     fn expired_deadline_indexes_nothing_and_reports_remaining() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
         let stats = ix.refresh(Some(std::time::Instant::now())).unwrap();
         assert_eq!(stats.indexed, 0);
         assert!(stats.remaining >= 4, "{stats:?}");
@@ -621,8 +639,9 @@ mod tests {
     fn refresh_with_calls_on_file_once_per_walked_entry() {
         let (dir, store) = setup();
         let cfg = MapConfig::default();
-        let ix = Indexer::new(&store, dir.path(), &cfg).unwrap();
-        let w = walk(&dir.path().canonicalize().unwrap(), &cfg.deny_patterns()).unwrap();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
+        let w =
+            crate::walk::walk(&dir.path().canonicalize().unwrap(), &cfg.deny_patterns()).unwrap();
         let mut count = 0usize;
         let stats = ix.refresh_with(None, || count += 1).unwrap();
         assert_eq!(count, w.entries.len());
@@ -685,5 +704,56 @@ mod tests {
             git_head(dir.path()).as_deref(),
             Some("4444444444444444444444444444444444444444")
         );
+    }
+
+    #[test]
+    fn a_named_workspace_indexes_both_roots_and_records_a_head_per_root() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, _notes) = crate::fixture::write_workspace(d.path());
+        // Make `app` a git checkout so it has a head; `notes` stays plain.
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(&app)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "."]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "base",
+        ]);
+        let ws = Workspace::open(d.path()).unwrap();
+        let store = Store::open(&d.path().join(crate::engine::DB_FILE)).unwrap();
+        let s = Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        assert!(s.indexed >= 4, "{s:?}");
+        let n: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path LIKE 'app/%' AND skipped_reason IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(n >= 4, "{n}");
+        let head = store.get_meta("git_head:app").unwrap().unwrap();
+        assert_eq!(head.len(), 40);
+        assert_eq!(
+            store.get_meta("git_head:notes").unwrap().as_deref(),
+            Some("")
+        );
+        let composed = store.get_meta("git_head").unwrap().unwrap();
+        assert_eq!(composed, format!("app:{} notes:none", &head[..7]));
     }
 }

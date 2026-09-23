@@ -100,7 +100,7 @@ fn missing_repo_says_which_path_failed() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(format!(
-            "opening repo at {}",
+            "opening workspace at {}",
             missing.display()
         )));
 }
