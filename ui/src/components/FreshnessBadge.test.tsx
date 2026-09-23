@@ -32,3 +32,20 @@ describe("FreshnessBadge head", () => {
     expect(screen.getByText("9b1e0d4")).toBeTruthy();
   });
 });
+
+describe("knowledge status segments", () => {
+  test("pending entities, unavailable models and a rebuild each add a segment", () => {
+    expect(freshnessText({ ...base, entities_pending: 3 })).toBe("fresh · entities: 3 pending");
+    expect(freshnessText({ ...base, models_unavailable: true })).toBe("fresh · models unavailable");
+    expect(freshnessText({ ...base, embeddings_rebuilding: true })).toBe("fresh · embeddings rebuilding");
+    expect(freshnessText({ ...base, stale_count: 2, entities_pending: 1, models_unavailable: true, embeddings_rebuilding: true }))
+      .toBe("2 stale · entities: 1 pending · models unavailable · embeddings rebuilding");
+  });
+  test("the badge renders them as text", () => {
+    render(<FreshnessBadge status={{ ...base, entities_pending: 3, models_unavailable: true, embeddings_rebuilding: true }} />);
+    const badge = screen.getByLabelText("Index freshness");
+    expect(badge.textContent).toContain("entities: 3 pending");
+    expect(badge.textContent).toContain("models unavailable");
+    expect(badge.textContent).toContain("embeddings rebuilding");
+  });
+});

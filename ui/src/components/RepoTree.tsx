@@ -2,11 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Collection, Tree, TreeItem, TreeItemContent, type Key } from "react-aria-components";
 import { ChevronRight, MoreHorizontal } from "lucide-react";
 import { StatusMark } from "@/lib/status";
+import type { Entity } from "@/api/types";
 import type { FileRow, SymbolRow } from "@/lib/join";
 import { reasonsToSentences } from "@/lib/reasons";
 import { cn } from "@/lib/utils";
 
-export type TreeRow = { kind: "file"; path: string; file: FileRow } | { kind: "symbol"; path: string; file: FileRow; symbol: SymbolRow };
+/** A row of the tree itself: what `RepoTree` reports. */
+export type GridRow = { kind: "file"; path: string; file: FileRow } | { kind: "symbol"; path: string; file: FileRow; symbol: SymbolRow };
+/** What the detail panel can show: a tree row, or an entity (from the map or the panel's list). */
+export type TreeRow = GridRow | { kind: "entity"; entity: Entity };
+/** A request to show and focus one row (by its tree key), e.g. from the panel's "Go to section".
+ *  `seq` makes a repeat request for the same row a new value. */
+export type RevealRequest = { path: string; key: string; seq: number };
 // The accent tint alone is ~1.07:1 against the background — not a focus indicator (I4).
 // `outline-none` is deliberately absent here (it stays on the Tree container); react-aria
 // sets data-focus-visible on the row only for keyboard focus.
@@ -21,7 +28,7 @@ const statusOrder = { served: 0, cut: 1, untouched: 2 } as const;
 // render prop exposed by <TreeItemContent>'s children-as-function; these two
 // components consume that and report focus via a real effect.
 function FileRowView({ file, isFocused, onFocusRow, onAction }: {
-  file: FileRow; isFocused: boolean; onFocusRow: (row: TreeRow) => void; onAction: (row: TreeRow) => void;
+  file: FileRow; isFocused: boolean; onFocusRow: (row: GridRow) => void; onAction: (row: GridRow) => void;
 }) {
   useEffect(() => {
     if (isFocused) onFocusRow({ kind: "file", path: file.path, file });
@@ -42,7 +49,7 @@ function FileRowView({ file, isFocused, onFocusRow, onAction }: {
 }
 
 function SymbolRowView({ file, symbol, isFocused, onFocusRow, onAction }: {
-  file: FileRow; symbol: SymbolRow; isFocused: boolean; onFocusRow: (row: TreeRow) => void; onAction: (row: TreeRow) => void;
+  file: FileRow; symbol: SymbolRow; isFocused: boolean; onFocusRow: (row: GridRow) => void; onAction: (row: GridRow) => void;
 }) {
   useEffect(() => {
     if (isFocused) onFocusRow({ kind: "symbol", path: file.path, file, symbol });
@@ -66,8 +73,9 @@ function SymbolRowView({ file, symbol, isFocused, onFocusRow, onAction }: {
 
 const defaultExpansion = (rows: FileRow[]) => new Set<Key>(rows.filter((r) => r.expandedByDefault).map((r) => r.path));
 
-export function RepoTree({ rows, filter, seedKey, onFocusRow, onAction }: {
-  rows: FileRow[]; filter: string; seedKey: number; onFocusRow: (row: TreeRow) => void; onAction: (row: TreeRow) => void;
+export function RepoTree({ rows, filter, seedKey, onFocusRow, onAction, reveal = null, onRevealed }: {
+  rows: FileRow[]; filter: string; seedKey: number; onFocusRow: (row: GridRow) => void; onAction: (row: GridRow) => void;
+  reveal?: RevealRequest | null; onRevealed?: () => void;
 }) {
   const [sort, setSort] = useState<SortKey>("path");
   const [expanded, setExpanded] = useState<Set<Key>>(() => defaultExpansion(rows));
@@ -81,6 +89,23 @@ export function RepoTree({ rows, filter, seedKey, onFocusRow, onAction }: {
   useEffect(() => {
     setExpanded(defaultExpansion(rowsRef.current));
   }, [seedKey]);
+
+  // Reveal: expand the row's file, then (once that has rendered) move DOM focus to the row;
+  // react-aria's row focus handler makes it the tree's focused key, and the row reports
+  // itself through `onFocusRow` like any keyboard focus. Declared after the seeding effect
+  // so a reveal on mount is not undone by the seed.
+  useEffect(() => {
+    if (!reveal) return;
+    setExpanded((prev) => (prev.has(reveal.path) ? prev : new Set([...prev, reveal.path])));
+    const t = setTimeout(() => {
+      const row = Array.from(document.querySelectorAll<HTMLElement>('[role="treegrid"] [role="row"]')).find((r) => r.dataset.key === reveal.key);
+      row?.focus();
+      // Consumed: a later remount (map, then back to the tree) must not reveal it again.
+      onRevealed?.();
+    }, 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal]);
 
   // New rows may have dropped files (a delete, a rename); forget their keys, keep the rest.
   useEffect(() => {

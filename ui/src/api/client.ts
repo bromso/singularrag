@@ -1,4 +1,4 @@
-import type { BlastResult, GraphPayload, MapConfig, MapDoc, QueryResult, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "./types";
+import type { BlastResult, EntitiesPayload, GraphPayload, MapConfig, MapDoc, QueryResult, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "./types";
 
 export class ApiError extends Error {
   /** `current` carries the server's document on a 409 so the caller can reload from it. */
@@ -63,6 +63,7 @@ export const api = {
   // since `expectedVersion` was read (a hand edit, or another tab).
   saveMap: (cfg: MapConfig, expectedVersion: number) => req<MapDoc>("PUT", "/map", { ...cfg, expected_version: expectedVersion }),
   graph: () => req<GraphPayload>("GET", "/graph"),
+  entities: () => req<EntitiesPayload>("GET", "/entities"),
   blast: (path: string, symbol: string) => req<BlastResult>("GET", `/blast?path=${encodeURIComponent(path)}&symbol=${encodeURIComponent(symbol)}`),
   query: (query: string, budget: number) => req<QueryResult>("POST", "/query", { query, budget }),
 };

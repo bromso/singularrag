@@ -1,19 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import type { BlastResult, MapConfig } from "@/api/types";
+import type { BlastResult, EntitiesPayload, MapConfig } from "@/api/types";
+import { PROSE_KINDS } from "@/lib/entities";
 import { reasonsToSentences } from "@/lib/reasons";
 import { agentNoteFor, boundariesOf, boundaryNames, isExcluded, isPinned, noteFor } from "@/lib/mapEdits";
+import { EntityList, EntityView, SymbolKnowledge, type FocusSection } from "./EntityView";
 import type { TreeRow } from "./RepoTree";
 
-export function DetailPanel({ row, map, onPin, onExclude, onNote, onRemoveAgentNote, blast, blastLoading, onToggleBlast, expandedPath, onToggleExpand, onAddBoundary, onRemoveBoundary }: {
+export function DetailPanel({ row: focused, map, entities, onFocusEntity, onFocusSection, onPin, onExclude, onNote, onRemoveAgentNote, blast, blastLoading, onToggleBlast, expandedPath, onToggleExpand, onAddBoundary, onRemoveBoundary }: {
   row: TreeRow | null; map: MapConfig;
   onPin: (path: string, symbol?: string) => void; onExclude: (path: string) => void; onNote: (path: string, symbol: string | undefined, text: string) => void;
   onRemoveAgentNote: (path: string, symbol?: string) => void;
   blast: BlastResult | null; blastLoading: boolean; onToggleBlast: (path: string, symbol: string) => void;
   expandedPath: string | null; onToggleExpand: (path: string) => void;
   onAddBoundary: (name: string, path: string) => void; onRemoveBoundary: (name: string, path: string) => void;
+  entities: EntitiesPayload | null; onFocusEntity: (id: number) => void; onFocusSection: FocusSection;
 }) {
+  // A focused entity has its own view; the hooks below (the note draft) are about a file or symbol.
+  const row = focused?.kind === "entity" ? null : focused;
   const [newBoundary, setNewBoundary] = useState("");
   const symbol = row?.kind === "symbol" ? row.symbol.symbol.name : undefined;
   const [text, setText] = useState("");
@@ -37,7 +42,21 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, onRemoveAgentN
       setText(saved);
     }
   }, [row?.path, symbol, saved]);
-  if (!row) return <section id="detail-panel" aria-label="Details" className="min-h-0 overflow-auto border-l p-3 text-sm text-muted-foreground">Select a file or symbol.</section>;
+  if (focused?.kind === "entity") {
+    return (
+      <section id="detail-panel" aria-label="Details" className="flex min-h-0 flex-col gap-3 overflow-auto border-l p-3">
+        <EntityView entity={focused.entity} entities={entities} onFocusSection={onFocusSection} />
+      </section>
+    );
+  }
+  if (!row) {
+    return (
+      <section id="detail-panel" aria-label="Details" className="min-h-0 overflow-auto border-l p-3 text-sm">
+        <p className="text-muted-foreground">Select a file or symbol.</p>
+        <EntityList entities={entities} onFocusEntity={onFocusEntity} />
+      </section>
+    );
+  }
   const item = row.kind === "symbol" ? row.symbol.item : null;
   const blastShown = row.kind === "symbol" && !!blast && blast.root.path === row.path && blast.root.symbol === row.symbol.symbol.name;
   return (
@@ -52,6 +71,9 @@ export function DetailPanel({ row, map, onPin, onExclude, onNote, onRemoveAgentN
         </>
       ) : (
         <p className="text-sm text-muted-foreground">{row.kind === "symbol" ? "Not part of the selected retrieval." : `${row.file.served} served · ${row.file.cut} cut`}</p>
+      )}
+      {row.kind === "symbol" && PROSE_KINDS.has(row.symbol.symbol.kind) && (
+        <SymbolKnowledge symbolId={row.symbol.symbol.id} entities={entities} onFocusEntity={onFocusEntity} />
       )}
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="outline" aria-pressed={isPinned(map, row.path, symbol)} onClick={() => onPin(row.path, symbol)}>

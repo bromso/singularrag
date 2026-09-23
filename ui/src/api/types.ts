@@ -34,3 +34,9 @@ export type GraphPayload = { index_version: string; nodes: GraphNode[]; edges: G
 export type BlastFile = { path: string; depth: number; via: string };
 export type BlastResult = { root: { path: string; symbol: string }; files: BlastFile[]; truncated: null | "depth" | "files" };
 export type QueryResult = { retrieval_id: number; served: number; cut: number };
+/** Entity types the extractor emits: person, organisation, system, concept, event, place, document. */
+export type Entity = { id: number; name: string; type: string; description: string; mentions: number };
+/** A relation between two entities, stated by one section (`symbol_id`, at `path` / `name`). */
+export type Relation = { id: number; src: number; dst: number; description: string; symbol_id: number; path: string; name: string };
+export type Mention = { entity_id: number; symbol_id: number; path: string; name: string };
+export type EntitiesPayload = { entities: Entity[]; relations: Relation[]; mentions: Mention[]; truncated: boolean };

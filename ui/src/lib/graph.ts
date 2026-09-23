@@ -2,13 +2,18 @@ import Graph from "graphology";
 import { circular } from "graphology-layout";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import noverlap from "graphology-layout-noverlap";
-import type { GraphPayload } from "@/api/types";
+import type { EntitiesPayload, GraphPayload } from "@/api/types";
 
 export type Positions = Record<string, { x: number; y: number }>;
 
-export function buildGraph(payload: GraphPayload): Graph {
+export const entityKey = (id: number) => `entity:${id}`;
+
+/** File nodes keyed by path; with `entities`, the knowledge overlay too: `entity:<id>` nodes,
+ *  a `mention` edge to every file on the map that mentions the entity, and a `relation` edge
+ *  between related entities. A mention of a file not on the map adds nothing. */
+export function buildGraph(payload: GraphPayload, entities?: EntitiesPayload | null): Graph {
   const g = new Graph({ type: "undirected", multi: false, allowSelfLoops: false });
-  for (const n of payload.nodes) g.addNode(n.path, { symbols: n.symbols, lang: n.lang, x: 0, y: 0, size: 1 });
+  for (const n of payload.nodes) g.addNode(n.path, { kind: "file", symbols: n.symbols, lang: n.lang, x: 0, y: 0, size: 1 });
   for (const e of payload.edges) {
     const a = payload.nodes[e.src]?.path, b = payload.nodes[e.dst]?.path;
     if (!a || !b || a === b) continue;
@@ -22,7 +27,25 @@ export function buildGraph(payload: GraphPayload): Graph {
       g.addEdge(a, b, { weight: e.weight, names: e.names });
     }
   }
+  if (entities) addEntities(g, entities);
   return g;
+}
+
+function addEntities(g: Graph, { entities, relations, mentions }: EntitiesPayload) {
+  for (const e of entities) {
+    g.addNode(entityKey(e.id), { kind: "entity", entityId: e.id, label: e.name, entityType: e.type, mentions: e.mentions, description: e.description, x: 0, y: 0, size: 1 });
+  }
+  for (const m of mentions) {
+    const k = entityKey(m.entity_id);
+    // A file node's `kind` is "file": guards against a path that happens to look like a key.
+    if (!g.hasNode(k) || !g.hasNode(m.path) || g.getNodeAttribute(m.path, "kind") !== "file") continue;
+    if (!g.hasEdge(k, m.path)) g.addEdge(k, m.path, { kind: "mention", weight: 0.5, names: 0 });
+  }
+  for (const r of relations) {
+    const a = entityKey(r.src), b = entityKey(r.dst);
+    if (a === b || !g.hasNode(a) || !g.hasNode(b) || g.hasEdge(a, b)) continue;
+    g.addEdge(a, b, { kind: "relation", weight: 1, names: 0, description: r.description });
+  }
 }
 
 const ITERATIONS = 300;
