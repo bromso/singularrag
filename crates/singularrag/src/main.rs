@@ -71,7 +71,7 @@ enum Cmd {
         #[arg(long)]
         base: Option<String>,
     },
-    /// Serve the repo_map, find_symbol and annotate tools to an agent over stdio (MCP)
+    /// Serve the repo_map, find_symbol, trace_path, changed and annotate tools to an agent over stdio (MCP)
     Mcp {
         /// Inline refresh budget in milliseconds (spec §8). Tests lower it.
         #[arg(long, default_value_t = 2000, hide = true)]

@@ -116,6 +116,9 @@ Each file header ends with the files that reference it, strongest first, and a n
 singularrag index            # build or refresh the index
 singularrag query "text"     # print the map the agent would get
 singularrag find NAME        # look a symbol up
+singularrag path FROM TO     # the shortest reference chain between two path::symbol
+singularrag changed          # the symbols a diff touches and who references them (--base REF)
+singularrag init             # install the query-first hook and the MCP entry for this repo
 singularrag eval             # tier-one recall against eval/questions.toml
 singularrag serve            # open the map UI on localhost
 singularrag mcp              # serve over stdio

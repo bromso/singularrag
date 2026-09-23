@@ -255,3 +255,33 @@ fn init_writes_the_claude_files() {
         "{s}"
     );
 }
+
+#[test]
+fn mcp_help_names_all_five_tools() {
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "repo_map, find_symbol, trace_path, changed and annotate",
+        ));
+}
+
+#[test]
+fn readme_cli_block_lists_the_new_subcommands() {
+    let readme =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
+    let cli = readme.find("## CLI").expect("a CLI section");
+    let block = &readme[cli..readme[cli + 1..].find("\n## ").unwrap() + cli + 1];
+    for sub in [
+        "singularrag path ",
+        "singularrag changed",
+        "singularrag init",
+    ] {
+        assert!(
+            block.contains(sub),
+            "README CLI block lacks `{sub}`:\n{block}"
+        );
+    }
+}

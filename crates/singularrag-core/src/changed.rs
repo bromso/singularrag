@@ -95,9 +95,25 @@ pub fn changed(
             return Err(Error::Config(format!("base: {b:?} is not a git ref")));
         }
     }
-    let mut args = vec!["diff", "--unified=0", "--no-color"];
-    if let Some(b) = base {
-        args.push(b);
+    // Fixed prefixes and no external diff, so a user's `diff.noprefix`,
+    // `diff.mnemonicPrefix` or `diff.external` cannot change the format we parse;
+    // `core.quotepath=off` keeps non-ASCII paths literal.
+    let mut args = vec![
+        "-c",
+        "core.quotepath=off",
+        "diff",
+        "--unified=0",
+        "--no-color",
+        "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ];
+    match base {
+        Some(b) => args.push(b),
+        // No revision means index vs working tree, which hides staged edits; compare
+        // against HEAD when there is one. An unborn HEAD leaves every file untracked.
+        None if git(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok() => args.push("HEAD"),
+        None => {}
     }
     let diff = git(root, &args)?;
     let untracked = git(root, &["ls-files", "--others", "--exclude-standard"])?;
@@ -109,6 +125,7 @@ pub fn changed(
 
     let mut symbols: Vec<ChangedSymbol> = Vec::new();
     let mut files_without: BTreeSet<String> = BTreeSet::new();
+    let mut hit_paths: BTreeSet<String> = BTreeSet::new();
     let mut seen: BTreeSet<i64> = BTreeSet::new();
     let mut truncated = false;
     let mut stmt = store.conn().prepare(
@@ -143,6 +160,7 @@ pub fn changed(
         })? {
             let (id, name, kind, signature, line_start, line_end) = row?;
             hit = true;
+            hit_paths.insert(path.clone());
             if !seen.insert(id) {
                 continue;
             }
@@ -170,6 +188,9 @@ pub fn changed(
             files_without.insert(path);
         }
     }
+    // A file with one hunk inside a symbol and one outside is a changed file, not also
+    // a file with no symbol touched.
+    files_without.retain(|p| !hit_paths.contains(p));
     symbols.sort_by(|a, b| a.path.cmp(&b.path).then(a.line_start.cmp(&b.line_start)));
     Ok(Changed {
         base: base_name,
@@ -397,5 +418,88 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("not a git checkout"), "{e}");
+    }
+
+    fn touch_create_session(dir: &std::path::Path) {
+        let p = dir.join("src/auth/session.ts");
+        let text = std::fs::read_to_string(&p).unwrap().replacen(
+            "const store = new SessionStore();",
+            "// changed\n  const store = new SessionStore();",
+            1,
+        );
+        std::fs::write(&p, text).unwrap();
+    }
+
+    fn refresh(store: &Store, dir: &std::path::Path) {
+        Indexer::new(store, dir, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+    }
+
+    fn names(c: &Changed) -> Vec<String> {
+        c.symbols.iter().map(|s| s.name.clone()).collect()
+    }
+
+    #[test]
+    fn staged_edits_count_against_head() {
+        let (dir, store) = repo();
+        touch_create_session(dir.path());
+        git(dir.path(), &["add", "."]);
+        refresh(&store, dir.path());
+        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        assert!(
+            names(&c).contains(&"createSession".to_string()),
+            "a staged edit is still a change against HEAD: {c:?}"
+        );
+    }
+
+    #[test]
+    fn diff_noprefix_config_does_not_hide_hunks() {
+        let (dir, store) = repo();
+        git(dir.path(), &["config", "diff.noprefix", "true"]);
+        git(dir.path(), &["config", "diff.mnemonicPrefix", "true"]);
+        touch_create_session(dir.path());
+        refresh(&store, dir.path());
+        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        assert!(
+            names(&c).contains(&"createSession".to_string()),
+            "hunks parse whatever the user's prefix config: {c:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_with_a_symbol_hit_and_an_outside_hunk_is_not_listed_twice() {
+        let (dir, store) = repo();
+        let p = dir.path().join("src/cli/login.ts");
+        let text = std::fs::read_to_string(&p).unwrap();
+        let text = format!("// top comment\n{}", text).replacen(
+            "const s = createSession",
+            "// body\n  const s = createSession",
+            1,
+        );
+        std::fs::write(&p, text).unwrap();
+        refresh(&store, dir.path());
+        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        assert!(names(&c).contains(&"login".to_string()), "{c:?}");
+        assert!(
+            c.files_without_symbols.is_empty(),
+            "the file has a symbol hit, so it is not also 'no symbol touched': {c:?}"
+        );
+        assert!(!render_changed(&c).contains("(no symbol touched)"));
+    }
+
+    #[test]
+    fn a_repo_with_no_commits_reports_every_file_as_new() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ts_mini(dir.path());
+        git(dir.path(), &["init", "-q"]);
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        refresh(&store, dir.path());
+        let c = changed(&store, &MapConfig::default(), dir.path(), None).unwrap();
+        assert!(
+            names(&c).contains(&"createSession".to_string()),
+            "unborn HEAD: the tree is all untracked: {c:?}"
+        );
     }
 }

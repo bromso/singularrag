@@ -83,7 +83,7 @@ No new views. The rail lists `trace_path` and `changed` retrievals with their to
 
 ## 8. Eval
 
-- The tier-two config gains an optional per-condition `settings` path (relative to the config file), passed as `--settings <absolute path>`; the file is committed under `eval/conditions/`. A condition's hooks file uses the absolute binary path the harness resolves (`singularrag_bin()`), substituted like `<checkout>`.
+- The tier-two config gains an optional per-condition `settings` path (relative to the config file), passed as `--settings <absolute path>`; the file is committed under `eval/conditions/`. A condition's hooks file uses `<bin>`, the same `singularrag` command the harness warms up with (`SINGULARRAG_BIN` when set, else the bare name on `PATH`), substituted like `<checkout>`.
 - The result line's `permission_denials` entries carry `tool_name`, `tool_use_id` and `tool_input` but no reason (probed 2026-09-21). A denial is a hook denial when its `tool_name` is `Read` and the stream's `tool_result` for that `tool_use_id` contains `singularrag:`; it is recorded in `Record.hook_denials` (count), not an abort. Any other denial still aborts the condition.
 - New condition `singularrag+hook`: the singularrag MCP config plus `conditions/singularrag-hook.json` (the two hooks). The next run is `alone,singularrag,singularrag+hook`, same questions, repeats and model.
 - Summary: `hook_denials` per condition in the table; the paired verdict is unchanged.

@@ -128,9 +128,12 @@ pub fn trace_path(
     }))
 }
 
-/// One line per hop, then `# N hops`. The left symbol of a hop is the symbol the walk
-/// arrived at (the previous hop's name, or `from` for the first); the right symbol is the
-/// hop's name, or `to`'s symbol on the last hop when they differ.
+/// One line per hop, then `# N hops`. Each side names the file and, when one is known
+/// there, a symbol: the endpoints' own, or for a file in the middle the hop name that is
+/// defined in it (the previous hop's name if that hop was forward, the next hop's if that
+/// one is backward). A file the walk only passes through by references is named alone,
+/// so the text never claims a symbol a file does not define; `path_symbols` builds
+/// provenance from the same rule.
 pub fn render_trace(t: &Trace) -> String {
     let mut out = String::new();
     if t.hops.is_empty() {
@@ -140,26 +143,36 @@ pub fn render_trace(t: &Trace) -> String {
         ));
         return out;
     }
-    let mut left = t.from.1.clone();
-    let last = t.hops.len() - 1;
-    for (i, h) in t.hops.iter().enumerate() {
-        let right = if i == last {
-            t.to.1.clone()
+    let n = t.hops.len();
+    let mut anchor: Vec<Option<String>> = Vec::with_capacity(n + 1);
+    anchor.push(Some(t.from.1.clone()));
+    for i in 1..n {
+        let (prev, next) = (&t.hops[i - 1], &t.hops[i]);
+        anchor.push(if prev.forward {
+            Some(prev.name.clone())
+        } else if !next.forward {
+            Some(next.name.clone())
         } else {
-            h.name.clone()
-        };
+            None
+        });
+    }
+    anchor.push(Some(t.to.1.clone()));
+    let label = |path: &str, sym: &Option<String>| match sym {
+        Some(s) => format!("{path}::{s}"),
+        None => path.to_string(),
+    };
+    for (i, h) in t.hops.iter().enumerate() {
         let via = if h.forward {
             format!("references {}", h.name)
         } else {
             format!("referenced through {}", h.name)
         };
         out.push_str(&format!(
-            "{}::{} → {}::{} ({via})\n",
-            h.from, left, h.to, right
+            "{} → {} ({via})\n",
+            label(&h.from, &anchor[i]),
+            label(&h.to, &anchor[i + 1])
         ));
-        left = right;
     }
-    let n = t.hops.len();
     out.push_str(&format!("# {n} hop{}\n", if n == 1 { "" } else { "s" }));
     out
 }
@@ -332,5 +345,37 @@ mod tests {
         )
         .unwrap();
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn a_backward_hop_never_names_a_symbol_in_a_file_that_lacks_it() {
+        let (_d, store) = indexed();
+        // session.ts → login.ts is backwards (login references createSession); login.ts → log.ts
+        // is forwards. login.ts defines no createSession, so the middle file is named alone.
+        let t = trace_path(
+            &store,
+            &MapConfig::default(),
+            "src/auth/session.ts",
+            "createSession",
+            "src/util/log.ts",
+            "log",
+        )
+        .unwrap()
+        .expect("a path");
+        assert_eq!(t.hops.len(), 2);
+        assert!(!t.hops[0].forward && t.hops[1].forward, "{t:?}");
+        assert_eq!(
+            render_trace(&t),
+            "src/auth/session.ts::createSession → src/cli/login.ts (referenced through createSession)\n\
+             src/cli/login.ts → src/util/log.ts::log (references log)\n\
+             # 2 hops\n"
+        );
+        let syms = path_symbols(&store, &t).unwrap();
+        assert_eq!(
+            syms.iter()
+                .map(|s| format!("{}::{}", s.1, s.2))
+                .collect::<Vec<_>>(),
+            vec!["src/auth/session.ts::createSession", "src/util/log.ts::log"]
+        );
     }
 }
