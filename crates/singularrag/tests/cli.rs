@@ -449,6 +449,75 @@ fn the_docs_question_file_loads_and_names_sections_that_exist() {
     }
 }
 
+fn prose_questions_path() -> &'static str {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../e",
+        "val/questions-prose.toml"
+    )
+}
+
+#[test]
+fn the_prose_question_file_loads_and_names_sections_that_exist() {
+    let qs = singularrag_core::eval::load_questions(std::path::Path::new(prose_questions_path()))
+        .unwrap();
+    assert_eq!(qs.len(), 12);
+    let mut cats: std::collections::BTreeMap<&str, usize> = Default::default();
+    for q in &qs {
+        *cats.entry(q.category.as_str()).or_default() += 1;
+    }
+    assert_eq!(
+        cats.into_iter().collect::<Vec<_>>(),
+        vec![("entity", 4), ("paraphrase", 4), ("relation", 4)]
+    );
+    // Gold is checked against an index of the fixture in a tempdir, the corpus the questions
+    // were authored from.
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_prose(dir.path());
+    let mut e = singularrag_core::engine::Engine::open(dir.path(), "prose-gold-check").unwrap();
+    e.set_models_enabled(false);
+    e.refresh(std::time::Duration::from_secs(120)).unwrap();
+    for q in &qs {
+        assert!(!q.gold.is_empty(), "{} has no gold", q.id);
+        for g in &q.gold {
+            let (path, name) = g.split_once("::").unwrap();
+            let n: i64 = e
+                .store()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1 AND s.name = ?2",
+                    [path, name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(n > 0, "{} gold {g} is not in the index", q.id);
+        }
+    }
+}
+
+#[test]
+fn eval_no_models_runs_the_prose_questions() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_prose(dir.path());
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        // Nothing listens here: with --no-models the run must never ask.
+        .env("SINGULARRAG_OLLAMA_URL", "http://127.0.0.1:9")
+        .args([
+            "eval",
+            "--questions",
+            prose_questions_path(),
+            "--budget",
+            "4096",
+            "--no-models",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mean recall"));
+}
+
 /// Recursively copy `from` into `to`, skipping build output, dependencies, VCS and index
 /// directories.
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {

@@ -66,6 +66,9 @@ enum Cmd {
         budget: usize,
         #[arg(long)]
         json: bool,
+        /// Run without the knowledge layer's models: no query embeddings, no semantic seeds
+        #[arg(long)]
+        no_models: bool,
     },
     /// The shortest chain of references between two symbols (what the trace_path tool returns)
     Path {
@@ -238,7 +241,11 @@ fn main() -> anyhow::Result<()> {
             questions,
             budget,
             json,
+            no_models,
         } => {
+            if no_models {
+                engine.set_models_enabled(false);
+            }
             let qs = singularrag_core::eval::load_questions(&questions)?;
             let results = singularrag_core::eval::run(&mut engine, &qs, budget)?;
             if json {

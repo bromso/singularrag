@@ -708,6 +708,90 @@ fn write_section(
     Ok(())
 }
 
+/// Applies a checked-in `{ "<path>::<heading>": Extraction }` map to the indexed sections it
+/// names, as the tick would have: the extraction (normalised) goes in with the section's hash,
+/// the extraction cache remembers it, and the queue row goes. With `models`, the section and
+/// the new entities and relations are embedded as well; without, they stay unembedded.
+/// Keys naming no section with a body are skipped with a warning. Returns sections applied.
+pub fn load_extraction_json(store: &Store, models: Option<&Models>, json: &str) -> Result<usize> {
+    let map: std::collections::BTreeMap<String, Extraction> =
+        serde_json::from_str(json).map_err(|e| Error::Config(format!("extraction json: {e}")))?;
+    let conn = store.conn();
+    let mut applied = 0;
+    let mut unknown = Vec::new();
+    for (key, x) in map {
+        let found = match key.split_once("::") {
+            Some((path, name)) => conn
+                .query_row(
+                    "SELECT s.id, t.content FROM symbols s JOIN files f ON f.id = s.file_id
+                     JOIN sections_fts t ON t.rowid = s.id
+                     WHERE f.path = ?1 AND s.name = ?2 ORDER BY s.id LIMIT 1",
+                    [path, name],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?,
+            None => None,
+        };
+        let Some((symbol_id, body)) = found else {
+            unknown.push(key);
+            continue;
+        };
+        let x = crate::models::normalise_extraction(x);
+        let hash = section_hash(&body);
+        let vectors = match models {
+            Some(m) => embed_loaded_section(store, m, symbol_id, &hash, &body, &x)?,
+            None => HashMap::new(),
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO extraction_cache(hash, json) VALUES (?1, ?2)",
+            params![hash, extraction_json(&x)?],
+        )?;
+        write_section(store, symbol_id, &hash, &x, &vectors)?;
+        applied += 1;
+    }
+    if !unknown.is_empty() {
+        tracing::warn!(
+            skipped = unknown.len(),
+            keys = ?unknown,
+            "extraction keys name no indexed section"
+        );
+    }
+    Ok(applied)
+}
+
+/// One model call for a loaded section: its body (written to `section_vec` and the embedding
+/// cache here) and the entity/relation texts `write_section` will look up.
+fn embed_loaded_section(
+    store: &Store,
+    models: &Models,
+    symbol_id: i64,
+    hash: &str,
+    body: &str,
+    x: &Extraction,
+) -> Result<HashMap<String, Vec<f32>>> {
+    let texts = vector_texts(store.conn(), x)?;
+    let mut all = Vec::with_capacity(texts.len() + 1);
+    all.push(body.to_string());
+    all.extend(texts.iter().cloned());
+    let mut vectors = models.embed(&all)?.into_iter();
+    let Some(section) = vectors.next().filter(|v| !v.is_empty()) else {
+        return Err(Error::ModelUnavailable("embed: empty vector".to_string()));
+    };
+    vec::ensure_tables(store, section.len())?;
+    let tx = store.conn().unchecked_transaction()?;
+    vec::insert(store, "section_vec", symbol_id, &section)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO section_embeddings(symbol_id, hash) VALUES (?1, ?2)",
+        params![symbol_id, hash],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO embedding_cache(hash, dim, blob) VALUES (?1, ?2, ?3)",
+        params![hash, section.len() as i64, vec::to_blob(&section)],
+    )?;
+    tx.commit()?;
+    Ok(texts.into_iter().zip(vectors).collect())
+}
+
 /// Where `needle` first occurs in `hay` with no word character directly before or after it.
 fn phrase_position(hay: &str, needle: &str) -> Option<usize> {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
@@ -1648,5 +1732,83 @@ mod tests {
         assert_eq!(norm_name("  Acme   Ltd. "), "acme ltd");
         assert_eq!(norm_name("Jonas!"), "jonas");
         assert_eq!(norm_name("créateSession"), "créatesession");
+    }
+
+    #[test]
+    fn the_prose_fixture_loads_its_extraction_without_a_model() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let n = load_extraction_json(
+            &store,
+            None,
+            include_str!("../fixtures/prose/extraction.json"),
+        )
+        .unwrap();
+        assert!(n >= 9, "{n}");
+        assert!(count(&store, "SELECT COUNT(*) FROM entities") >= 12);
+        assert!(count(&store, "SELECT COUNT(*) FROM relations") >= 10);
+        assert_eq!(pending(&store).unwrap(), 0);
+        // Without a model only names match, so the query finds the ship, and the captain
+        // comes with it as a relation.
+        let (hits, _) = match_entities(&store, None, "who captained the Aurelia", &[], 5).unwrap();
+        assert!(
+            hits.iter().any(|h| h.name == "Ingrid Halvorsen"
+                || h.relations.iter().any(|r| r.src == "Ingrid Halvorsen"
+                    && r.dst == "Aurelia"
+                    && r.description == "captain of the Aurelia")),
+            "{hits:?}"
+        );
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM extraction_cache"), 10);
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM section_embeddings"),
+            0,
+            "no model, no vectors"
+        );
+        // Keys naming no section are skipped, not an error.
+        let n = load_extraction_json(
+            &store,
+            None,
+            r#"{"docs/voyage.md::No such heading": {"entities": [], "relations": []}, "nonsense": {}}"#,
+        )
+        .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn loading_the_prose_extraction_with_a_model_embeds_sections_entities_and_relations() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let f = FakeOllama::spawn(8);
+        let m = models(&f);
+        let n = load_extraction_json(
+            &store,
+            Some(&m),
+            include_str!("../fixtures/prose/extraction.json"),
+        )
+        .unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(pending(&store).unwrap(), 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM section_embeddings"), 10);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM section_vec"), 10);
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM entity_vec"),
+            count(&store, "SELECT COUNT(*) FROM entities")
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM relation_vec"),
+            count(&store, "SELECT COUNT(*) FROM relations")
+        );
     }
 }

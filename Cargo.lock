@@ -1821,6 +1821,7 @@ dependencies = [
  "thiserror",
  "toml",
  "toml_edit",
+ "tracing",
  "tree-sitter",
  "tree-sitter-css",
  "tree-sitter-html",

@@ -1,0 +1,79 @@
+# Fixed on first run. Never edit an existing question; add new ids instead.
+# Authored against the prose fixture (`singularrag_core::fixture::write_prose`: the files in
+# crates/singularrag-core/fixtures/prose/ written under docs/). Every gold entry is
+# `path::name` where `name` is a heading's text (a `section`).
+# `paraphrase` questions share no distinctive word with their gold section, so only a
+# semantic hit finds them; `entity` and `relation` questions name entities from
+# fixtures/prose/extraction.json.
+
+[[question]]
+id = "P1"
+category = "paraphrase"
+query = "when was the vessel battered by bad weather and pushed far from its route"
+gold = ["docs/voyage.md::The storm"]
+
+[[question]]
+id = "P2"
+category = "paraphrase"
+query = "how do I get reimbursed after paying for something myself on the job"
+gold = ["docs/handbook.md::Expense process"]
+
+[[question]]
+id = "P3"
+category = "paraphrase"
+query = "who looks after a recent hire while they settle in"
+gold = ["docs/handbook.md::Onboarding"]
+
+[[question]]
+id = "P4"
+category = "paraphrase"
+query = "what was gathered on the barren speck of land where the crew sheltered to mend the canvas"
+gold = ["docs/voyage.md::Kolbeinsey"]
+
+[[question]]
+id = "E1"
+category = "entity"
+query = "what do we know about Tomas Berg"
+gold = ["docs/voyage.md::Departure", "docs/voyage.md::Kolbeinsey", "docs/voyage.md::The report"]
+
+[[question]]
+id = "E2"
+category = "entity"
+query = "what do we know about Okta"
+gold = ["docs/handbook.md::Onboarding"]
+
+[[question]]
+id = "E3"
+category = "entity"
+query = "what do we know about PagerDuty"
+gold = ["docs/handbook.md::Incident process"]
+
+[[question]]
+id = "E4"
+category = "entity"
+query = "what do we know about the Bergen Museum"
+gold = ["docs/voyage.md::The Aurelia voyage", "docs/voyage.md::The report"]
+
+[[question]]
+id = "R1"
+category = "relation"
+query = "how is Ingrid Halvorsen connected to the storm of 14 August"
+gold = ["docs/voyage.md::The storm"]
+
+[[question]]
+id = "R2"
+category = "relation"
+query = "how is the release captain connected to the changelog"
+gold = ["docs/handbook.md::Release process"]
+
+[[question]]
+id = "R3"
+category = "relation"
+query = "how is Finance connected to Expensify"
+gold = ["docs/handbook.md::Expense process"]
+
+[[question]]
+id = "R4"
+category = "relation"
+query = "how is Tomas Berg connected to Kolbeinsey"
+gold = ["docs/voyage.md::Kolbeinsey", "docs/voyage.md::The report"]
