@@ -149,23 +149,31 @@ pub fn fts_body_hits(store: &Store, terms: &[String]) -> Result<Vec<(i64, f64)>>
     Ok(out)
 }
 
-/// How a file's FTS bonus is shared between its hits (documents spec §5, amended). Each
-/// hit is `(name hit, body rank)`: a name hit weighs 1.0; a body hit weighs its rank
-/// normalised so the strongest body hit in the file weighs 1.0; a symbol with both adds
-/// them. Returns each hit's share of the bonus, summing to one. An even split falls out
-/// when every hit is a name hit, which is what code files had before.
-pub fn hit_shares(hits: &[(bool, Option<f64>)]) -> Vec<f64> {
-    let max_body = hits.iter().filter_map(|(_, b)| *b).fold(0.0_f64, f64::max);
+/// One hit for `hit_shares`: `(name hit, body rank, semantic similarity)`.
+pub type Hit = (bool, Option<f64>, Option<f64>);
+
+/// How a file's FTS bonus is shared between its hits (documents spec §5, amended;
+/// knowledge spec §4). Each hit is `(name hit, body rank, semantic similarity)`: a name
+/// hit weighs 1.0; a body rank is normalised so the strongest body hit in the file
+/// weighs 1.0 (similarities never enter that maximum); the symbol then takes the larger
+/// of its normalised rank and its similarity, and adds the name weight. Returns each
+/// hit's share of the bonus, summing to one. An even split falls out when every hit is
+/// a name hit, which is what code files had before.
+pub fn hit_shares(hits: &[Hit]) -> Vec<f64> {
+    let max_body = hits
+        .iter()
+        .filter_map(|(_, b, _)| *b)
+        .fold(0.0_f64, f64::max);
     let weights: Vec<f64> = hits
         .iter()
-        .map(|(name, body)| {
+        .map(|(name, body, semantic)| {
             let n = if *name { 1.0 } else { 0.0 };
             let b = match body {
                 Some(r) if max_body > 0.0 => r / max_body,
                 Some(_) => 1.0,
                 None => 0.0,
             };
-            n + b
+            n + b.max(semantic.unwrap_or(0.0))
         })
         .collect();
     let total: f64 = weights.iter().sum();
@@ -438,29 +446,27 @@ pub fn rank_symbols(
     // strength (`hit_shares`): a spec section that really answers the query keeps most
     // of its document's bonus instead of a twentieth of it.
     let mut group_size: HashMap<(usize, String), usize> = HashMap::new();
-    let mut hits_by_file: HashMap<usize, Vec<(i64, bool, Option<f64>)>> = HashMap::new();
+    let mut hits_by_file: HashMap<usize, Vec<(i64, Hit)>> = HashMap::new();
     for s in &symbols {
         let fi = g.index_of[&s.file_id];
         *group_size.entry((fi, s.name.clone())).or_default() += 1;
         // Entity and theme hits weigh like a name hit; a semantic hit weighs its
-        // similarity, as a body hit weighs its rank.
+        // similarity against the file's normalised body ranks (`hit_shares`).
         let name_hit =
             is_fts_hit(s.id) || kh.entities.contains_key(&s.id) || kh.themes.contains_key(&s.id);
-        let body = match (body_rank(s.id), kh.semantic.get(&s.id).copied()) {
-            (Some(b), Some(sem)) => Some(b.max(sem)),
-            (b, sem) => b.or(sem),
-        };
-        if name_hit || body.is_some() {
+        let body = body_rank(s.id);
+        let semantic = kh.semantic.get(&s.id).copied();
+        if name_hit || body.is_some() || semantic.is_some() {
             hits_by_file
                 .entry(fi)
                 .or_default()
-                .push((s.id, name_hit, body));
+                .push((s.id, (name_hit, body, semantic)));
         }
     }
     let mut share_of: HashMap<i64, f64> = HashMap::new();
     for hits in hits_by_file.values() {
-        let kinds: Vec<(bool, Option<f64>)> = hits.iter().map(|(_, n, b)| (*n, *b)).collect();
-        for ((id, _, _), share) in hits.iter().zip(hit_shares(&kinds)) {
+        let kinds: Vec<Hit> = hits.iter().map(|(_, h)| *h).collect();
+        for ((id, _), share) in hits.iter().zip(hit_shares(&kinds)) {
             share_of.insert(*id, share);
         }
     }
@@ -953,20 +959,24 @@ pub(crate) mod tests {
     #[test]
     fn hit_shares_weigh_body_hits_by_rank_and_name_hits_as_one() {
         // Two name hits: even split, as before.
-        let even = hit_shares(&[(true, None), (true, None)]);
+        let even = hit_shares(&[(true, None, None), (true, None, None)]);
         assert!((even[0] - 0.5).abs() < 1e-9 && (even[1] - 0.5).abs() < 1e-9);
         // One strong body hit and three weak ones: the strong one weighs 1.0, the weak
         // ones 0.1 each, so the strong section takes 1 / 1.3 of the file's bonus.
         let s = hit_shares(&[
-            (false, Some(10.0)),
-            (false, Some(1.0)),
-            (false, Some(1.0)),
-            (false, Some(1.0)),
+            (false, Some(10.0), None),
+            (false, Some(1.0), None),
+            (false, Some(1.0), None),
+            (false, Some(1.0), None),
         ]);
         assert!((s[0] - 1.0 / 1.3).abs() < 1e-9, "{s:?}");
         assert!((s[1] - 0.1 / 1.3).abs() < 1e-9, "{s:?}");
         // A name hit beside body hits weighs 1.0, the same as the strongest body hit.
-        let m = hit_shares(&[(true, None), (false, Some(4.0)), (false, Some(2.0))]);
+        let m = hit_shares(&[
+            (true, None, None),
+            (false, Some(4.0), None),
+            (false, Some(2.0), None),
+        ]);
         assert!(
             (m[0] - 1.0 / 2.5).abs() < 1e-9
                 && (m[1] - 1.0 / 2.5).abs() < 1e-9
@@ -974,12 +984,24 @@ pub(crate) mod tests {
             "{m:?}"
         );
         // Shares always sum to one; a symbol with both a name and a body hit adds them.
-        let both = hit_shares(&[(true, Some(3.0)), (false, Some(3.0))]);
+        let both = hit_shares(&[(true, Some(3.0), None), (false, Some(3.0), None)]);
         assert!(
             (both.iter().sum::<f64>() - 1.0).abs() < 1e-9 && both[0] > both[1],
             "{both:?}"
         );
         assert!(hit_shares(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_semantic_hit_weighs_against_normalised_body_ranks() {
+        // Body ranks are raw bm25 sums; they are normalised before the similarity is
+        // compared, and a similarity never enters the body maximum.
+        let s = hit_shares(&[(false, Some(8.0), None), (false, None, Some(0.85))]);
+        assert!((s[0] - 1.0 / 1.85).abs() < 1e-9, "{s:?}");
+        assert!((s[1] - 0.85 / 1.85).abs() < 1e-9, "{s:?}");
+        // A symbol with both takes the larger of its normalised rank and its similarity.
+        let b = hit_shares(&[(false, Some(8.0), None), (false, Some(2.0), Some(0.6))]);
+        assert!((b[1] - 0.6 / 1.6).abs() < 1e-9, "{b:?}");
     }
 
     #[test]

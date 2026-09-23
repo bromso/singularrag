@@ -708,6 +708,15 @@ fn write_section(
     Ok(())
 }
 
+/// `needle` occurs in `hay` with no word character directly before or after it.
+fn contains_phrase(hay: &str, needle: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    hay.match_indices(needle).any(|(i, m)| {
+        !hay[..i].chars().next_back().is_some_and(is_word)
+            && !hay[i + m.len()..].chars().next().is_some_and(is_word)
+    })
+}
+
 /// Nearest sections a query vector seeds (knowledge spec §4).
 pub const SEMANTIC_K: usize = 20;
 /// Nearest entities a query vector may match.
@@ -739,10 +748,13 @@ impl Seeds {
 }
 
 /// The seeds for one `repo_map` call, with at most two model calls: one embedding for
-/// the query, one batch for all themes. A model outage never escapes: it sets
-/// `models_unavailable` and leaves the vectors empty. Without models (disabled) only the
-/// entity names the query terms or the arguments spell out match. With no vectors in
-/// the index yet nothing could be matched by vector, so the models are not asked.
+/// the query, one batch for all themes (skipped once the first has failed). A model
+/// outage never escapes: it sets `models_unavailable` and leaves the vectors empty;
+/// entities already matched, by name or by vector before the failure, are kept.
+/// Entity names match when an argument equals one (after `norm_name`) or when the
+/// query contains one as a whole-word phrase; that needs no model, so it also works
+/// with models disabled. With no vectors in the index yet nothing could be matched by
+/// vector, so the models are not asked.
 pub fn seeds_for(
     store: &Store,
     models: Option<&Models>,
@@ -753,22 +765,28 @@ pub fn seeds_for(
     let mut seeds = Seeds::default();
     let conn = store.conn();
 
-    let names: Vec<String> = query
-        .map(crate::tokens::query_terms)
-        .unwrap_or_default()
+    // Candidates in one query, matched in Rust: the arguments by exact `norm_name`,
+    // the query by whole-word phrase or by one of its whitespace tokens.
+    let candidates: Vec<(i64, String, String)> = {
+        let mut stmt = conn.prepare("SELECT id, name, norm_name FROM entities ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for arg in entities
         .iter()
-        .chain(entities)
-        .map(|n| norm_name(n))
-        .filter(|n| !n.is_empty())
-        .collect();
+        .map(|e| norm_name(e))
+        .filter(|e| !e.is_empty())
     {
-        let mut stmt = conn.prepare("SELECT id, name FROM entities WHERE norm_name = ?1")?;
-        for n in &names {
-            if let Some((id, name)) = stmt
-                .query_row([n], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-                .optional()?
-            {
-                seeds.add_entity(id, name);
+        if let Some((id, name, _)) = candidates.iter().find(|(_, _, n)| *n == arg) {
+            seeds.add_entity(*id, name.clone());
+        }
+    }
+    if let Some(q) = query {
+        let phrase = norm_name(q);
+        let tokens: Vec<String> = q.split_whitespace().map(norm_name).collect();
+        for (id, name, n) in &candidates {
+            if !n.is_empty() && (contains_phrase(&phrase, n) || tokens.contains(n)) {
+                seeds.add_entity(*id, name.clone());
             }
         }
     }
@@ -811,7 +829,8 @@ pub fn seeds_for(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .collect();
-    if !themes.is_empty() {
+    // After a failed query embed a second call would only wait out another timeout.
+    if !themes.is_empty() && !seeds.models_unavailable {
         match models.embed(&themes) {
             Ok(v) if v.len() == themes.len() => {
                 seeds.theme_vecs = themes.into_iter().zip(v).collect();
@@ -1293,6 +1312,42 @@ mod tests {
             "no section went to the model twice"
         );
         assert_eq!(count(&store, "SELECT COUNT(*) FROM entity_vec"), 1);
+    }
+
+    #[test]
+    fn a_failed_query_embed_skips_the_themes_call() {
+        let (_d, store, f, m) = crate::rank::tests::knowledge_ready();
+        let embeds = || f.calls().iter().filter(|c| *c == "/api/embed").count();
+        let before = embeds();
+        f.corrupt_next_embed(1);
+        let s = seeds_for(&store, Some(&m), Some("stale header"), &[], &["y".into()]).unwrap();
+        assert!(s.models_unavailable && s.query_vec.is_none() && s.theme_vecs.is_empty());
+        assert_eq!(embeds() - before, 1, "one failed call, no second timeout");
+        assert!(
+            s.entity_names.contains(&"STALE header".to_string()),
+            "name matches are kept"
+        );
+    }
+
+    #[test]
+    fn entity_names_match_as_whole_phrases_in_the_query_without_models() {
+        let (_d, store, _f, _m) = crate::rank::tests::knowledge_ready();
+        let names = |q: &str| {
+            seeds_for(&store, None, Some(q), &[], &[])
+                .unwrap()
+                .entity_names
+        };
+        assert!(names("where is SessionStore created").contains(&"SessionStore".to_string()));
+        assert!(names("what is the STALE header").contains(&"STALE header".to_string()));
+        let session = names("session");
+        assert!(
+            !session
+                .iter()
+                .any(|n| n == "SessionStore" || n == "STALE header"),
+            "{session:?}"
+        );
+        // "headers" is not the word "header".
+        assert!(!names("stale headers").contains(&"STALE header".to_string()));
     }
 
     #[test]
