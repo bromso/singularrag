@@ -284,7 +284,7 @@ singularrag eval --questions ~/.singularrag/questions-vault.toml --budget 4096
 
 The journeys design (`docs/superpowers/specs/2026-09-24-singularrag-journeys-design.md` §6) adds a fourth category to the prose set: four `process` questions, `S1`–`S4`, on the handbook's four processes, whose answers are steps; sixteen questions in all. The existing twelve ids are unchanged. `eval` now also puts every `entity`, `relation` and `process` question to the `entities` tool and reports whether a gold section was among its served items (the `cited` column, `-` for other categories, and one `cited N/M <category>` line per category). `--extraction <path>` loads a checked-in extraction after indexing and before the questions, so the `entities` run has something to cite without a model.
 
-Recorded 2026-09-24 at the journeys branch, release build, `SINGULARRAG_OLLAMA_URL=http://127.0.0.1:1` (nothing listens), every run `--no-models`. Ollama is not installed on this machine, so seeds-on stays open as before.
+Recorded 2026-09-24 at the journeys branch, release build, `SINGULARRAG_OLLAMA_URL=http://127.0.0.1:1` (nothing listens), every run `--no-models`. Ollama was not installed on this machine at that point, so seeds-on stayed open; see "First real-model run" below for what happened once it was.
 
 ### Recipe
 
