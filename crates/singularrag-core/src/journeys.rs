@@ -283,11 +283,15 @@ pub struct StepView {
     /// The role entity's name, else the extracted role text; empty when none.
     pub role: String,
     pub systems: Vec<String>,
+    /// Entity ids parallel to `systems` (same order — both come from `systems_for_step`).
+    pub system_ids: Vec<i64>,
     pub section: crate::knowledge::CitedSection,
     /// At most `LINK_LIMIT` "implemented by" links.
     pub code: Vec<CodeLink>,
     /// Links beyond `code` that were cut by `LINK_LIMIT`.
     pub more_code: usize,
+    /// The underlying `steps` row id (for callers, e.g. the serve DTO, that need it).
+    pub step_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,14 +316,18 @@ pub fn process_steps(
                 row.id, row.symbol_id
             ))
         })?;
+        let step_id = row.id;
+        let role = role_name(conn, &row)?;
         steps.push(StepView {
             ordinal: i + 1,
-            role: role_name(conn, &row)?,
+            role,
             text: row.text,
+            system_ids: systems.iter().map(|(id, _)| *id).collect(),
             systems: systems.into_iter().map(|(_, n)| n).collect(),
             section,
             code,
             more_code,
+            step_id,
         });
     }
     Ok(ProcessSteps { steps })
@@ -815,21 +823,25 @@ mod tests {
                     text: "Submit in Expensify".into(),
                     role: "employee".into(),
                     systems: vec!["Expensify".into()],
+                    system_ids: vec![1],
                     section: sect("docs/handbook.md", "Expense process", 10, 20),
                     code: vec![],
                     more_code: 0,
+                    step_id: 1,
                 },
                 StepView {
                     ordinal: 2,
                     text: "Finance reviews".into(),
                     role: "".into(),
                     systems: vec![],
+                    system_ids: vec![],
                     section: sect("docs/handbook.md", "Expense process", 10, 20),
                     code: vec![
                         link("src/payroll/expense.ts", "approveClaim", 3),
                         link("src/payroll/expense.ts", "review", 9),
                     ],
                     more_code: 1,
+                    step_id: 2,
                 },
             ],
         };

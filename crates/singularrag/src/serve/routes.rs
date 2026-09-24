@@ -85,6 +85,10 @@ pub async fn entities(State(s): State<AppState>) -> Result<Json<queries::Entitie
     Ok(Json(locked(&s, queries::entities)?))
 }
 
+pub async fn processes(State(s): State<AppState>) -> Result<Json<queries::ProcessesDto>, ApiError> {
+    Ok(Json(locked(&s, queries::processes)?))
+}
+
 /// `MapConfig` plus the token a client must hand back to write: `map.toml`'s mtime in
 /// milliseconds, 0 when the file does not exist. Kept here rather than in core so
 /// `MapConfig` stays the on-disk shape (spec §3).
@@ -362,6 +366,107 @@ mod tests {
             assert!(mentions[0].get(f).is_some(), "mention missing {f}: {v}");
         }
         assert!(mentions[0]["path"].as_str().unwrap().starts_with("docs/"));
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn processes_lists_processes_with_steps_roles_and_code_links() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_prose(dir.path());
+        let handbook = std::fs::read_to_string(dir.path().join("docs/handbook.md")).unwrap();
+        let handbook = handbook.replace(
+            "which pauses the clock until you reply.",
+            "which pauses the clock until you reply. The approval runs through `approveClaim`.",
+        );
+        std::fs::write(dir.path().join("docs/handbook.md"), handbook).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/payroll")).unwrap();
+        std::fs::write(
+            dir.path().join("src/payroll/expense.ts"),
+            "export function approveClaim(id: string): boolean {\n  return id.length > 0;\n}\n",
+        )
+        .unwrap();
+        let mut e = singularrag_core::engine::Engine::open(dir.path(), "t").unwrap();
+        e.refresh(std::time::Duration::from_secs(60)).unwrap();
+        let map = serde_json::json!({"docs/handbook.md::Expense process": {
+            "entities": [
+                {"name": "Expense process", "type": "process", "description": "how you get money back"},
+                {"name": "Manager", "type": "role", "description": "approves claims"},
+                {"name": "Expensify", "type": "system", "description": "the expense tool"}
+            ],
+            "relations": [],
+            "steps": {"process": "Expense process", "steps": [
+                {"text": "Submit each expense in Expensify", "role": "employee", "systems": ["Expensify"]},
+                {"text": "Your manager approves or rejects the claim", "role": "Manager", "systems": []}
+            ]}
+        }});
+        singularrag_core::knowledge::load_extraction_json(e.store(), None, &map.to_string())
+            .unwrap();
+        drop(e);
+
+        let (state, handle) = crate::serve::state::test_state(dir.path(), 1);
+        let token = state.token.to_string();
+        let app = crate::serve::router(state);
+        let req = |with_token: bool| {
+            let mut b = axum::http::Request::builder()
+                .uri("/api/processes")
+                .header("host", "127.0.0.1:1");
+            if with_token {
+                b = b.header("authorization", format!("Bearer {token}"));
+            }
+            b.body(axum::body::Body::empty()).unwrap()
+        };
+
+        let res = tower::ServiceExt::oneshot(app.clone(), req(false))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+
+        let res = tower::ServiceExt::oneshot(app, req(true)).await.unwrap();
+        assert_eq!(res.status(), 200);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["truncated"], false, "{v}");
+
+        let processes = v["processes"].as_array().unwrap();
+        assert_eq!(processes.len(), 1, "{v}");
+        let p = &processes[0];
+        // Only one process is typed in this fixture, so it is trivially first alphabetically.
+        assert_eq!(p["name"], "Expense process", "{v}");
+        assert!(p["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "Manager"));
+
+        let steps = p["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2, "{v}");
+        assert_eq!(steps[0]["ordinal"], 1);
+        assert_eq!(steps[0]["section"]["path"], "docs/handbook.md", "{steps:?}");
+        assert_eq!(steps[0]["section"]["name"], "Expense process");
+        assert!(steps[0]["section"]["symbol_id"].is_i64());
+        assert!(steps[0]["section"]["line"].is_i64());
+        assert_eq!(steps[0]["role"], "employee");
+        let systems = steps[0]["systems"].as_array().unwrap();
+        assert_eq!(systems.len(), 1);
+        assert_eq!(systems[0]["name"], "Expensify");
+        assert!(systems[0]["id"].is_i64());
+
+        let code = steps[0]["code"].as_array().unwrap();
+        assert!(!code.is_empty(), "{v}");
+        let mention = code
+            .iter()
+            .find(|c| c["name"] == "approveClaim")
+            .expect("approveClaim linked");
+        assert_eq!(mention["path"], "src/payroll/expense.ts");
+        assert_eq!(mention["via"], "mention", "{mention}");
+        assert!(mention["symbol_id"].is_i64());
+        assert!(mention["line"].is_i64());
+        assert!(steps[0]["more_code"].is_number());
 
         handle.shutdown();
     }
