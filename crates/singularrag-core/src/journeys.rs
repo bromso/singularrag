@@ -254,11 +254,14 @@ pub fn implemented_by(
             }
         }
     }
-    // Stable sort: ties (equal referrer counts) keep `index`'s deterministic (symbol-id) order,
-    // which for a normally-indexed repo tracks file discovery order — i.e. "then path" in
-    // practice, without needing an explicit path comparison that would outrank a directory like
-    // "config/" ahead of a same-named vendor client purely alphabetically.
-    by_system.sort_by_key(|(s, _)| std::cmp::Reverse(s.referrers));
+    // Ranked by incoming-reference count, then path, then name — the spec's explicit tie-break.
+    by_system.sort_by_key(|(s, _)| {
+        (
+            std::cmp::Reverse(s.referrers),
+            s.path.clone(),
+            s.name.clone(),
+        )
+    });
     links.extend(by_system.into_iter().map(|(s, sys)| CodeLink {
         symbol_id: s.symbol_id,
         path: s.path.clone(),
@@ -549,7 +552,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             links.iter().map(|l| l.symbol_id).collect::<Vec<_>>(),
-            vec![approve, client, cfg]
+            vec![approve, cfg, client],
+            "system matches tie-break on path: config/app.json before src/vendors/..."
         );
         assert!(matches!(links[0].via, Via::Mention));
         assert!(matches!(&links[1].via, Via::System(s) if s == "Expensify"));
@@ -687,8 +691,24 @@ mod tests {
             implemented_by(conn, &index, step, &[(stripe, "Stripe".into())], LINK_LIMIT).unwrap();
         assert_eq!(
             links.iter().map(|l| l.symbol_id).collect::<Vec<_>>(),
-            vec![popular, quiet]
+            vec![popular, quiet],
+            "higher incoming-reference count sorts first"
         );
         assert_eq!(more, 0);
+
+        // Explicit path tie-break: two symbols with equal (zero) referrers, seeded in reverse
+        // path order ("b.ts" before "a.ts") so insertion order alone would get this wrong.
+        let widget_b = seed_code(conn, "b.ts", "acmeWidgetB", "function", 1);
+        let widget_a = seed_code(conn, "a.ts", "acmeWidgetA", "function", 1);
+        let acme = seed_entity(conn, sec, "Acme", "system");
+        let index2 = load_code_index(conn).unwrap();
+        let (tie_links, tie_more) =
+            implemented_by(conn, &index2, step, &[(acme, "Acme".into())], LINK_LIMIT).unwrap();
+        assert_eq!(
+            tie_links.iter().map(|l| l.symbol_id).collect::<Vec<_>>(),
+            vec![widget_a, widget_b],
+            "equal referrers tie-break ascending by path: a.ts before b.ts"
+        );
+        assert_eq!(tie_more, 0);
     }
 }
