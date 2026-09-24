@@ -311,6 +311,8 @@ singularrag --repo <prose-x-dir> eval --questions eval/questions-prose.toml --bu
 
 hono at 4096: **0.771** (recorded 0.771). Docs at 4096 on the pinned tree: **0.653** (recorded 0.653). Gate met.
 
+Re-run after the final review's fix wave (token-window system matching, the `implements` seed capped at three links per step and at half a note's boost, the `via step` hop in `entities`, the stricter process `cited` rule), same recipe, fresh `git archive` trees: hono **0.771**, docs **0.653**, and every prose table below byte-identical in recall. The pinned corpus has no code the fixture's systems name, so the `implements` changes cannot move it; the only number that moved is `cited` for `process` (4/4 → 2/4, below).
+
 ### Prose set, seeds off, no extraction
 
 This is the run comparable with the recorded seeds-off values: no entities in the index, so the only thing new is four more questions.
@@ -338,10 +340,10 @@ The `cited` lines are the same at every budget (the `entities` run does not depe
 ```
 cited 4/4 entity
 cited 4/4 relation
-cited 4/4 process
+cited 2/4 process
 ```
 
-All four `process` questions cite gold through `entities` with the checked-in steps loaded: gate met. The knowledge design's `entities` gate (at least 8 of the 12 entity and relation questions) is met at 8 of 8 on the checked-in extraction; it stays open for a model's own extraction until Ollama is installed.
+Since the final review a `process` question is cited only when a gold section is served and a rendered step of a process hit cites it (it had been cited by entity name alone, which stayed 4/4 with every `steps` block removed). S1 and S2 name a process, role or step system and get their steps; S3 matches only the `Post-mortem` document entity and S4 only the `Single sign-on` concept, neither of which is a process or a role or system of any step, so the `entities` answer renders no steps for them. The journeys gate ("all four `process` questions cite gold") is not met on the stricter rule; questions and fixture are unchanged. The knowledge design's `entities` gate (at least 8 of the 12 entity and relation questions) is met at 8 of 8 on the checked-in extraction; it stays open for a model's own extraction until Ollama is installed.
 
 At 4096 with the extraction:
 
@@ -361,15 +363,15 @@ R3    relation    1.00    4136  yes
 R4    relation    1.00    4149  yes    
 S1    process     1.00    4133  yes    
 S2    process     1.00    4136  yes    
-S3    process     1.00    4143  yes    
-S4    process     1.00    4142  yes    
+S3    process     1.00    4143  no     
+S4    process     1.00    4142  no     
 mean recall 0.812 over 16 questions
 cited 4/4 entity
 cited 4/4 relation
-cited 4/4 process
+cited 2/4 process
 ```
 
-S4 cites through the fixture's `Single sign-on` concept (Okta's relation to it names "the single sign-on system that opens every other tool", as the handbook does); without it the query would share no entity name with the Onboarding section. The three paraphrase misses remain the semantic seed's job.
+S4's gold section is still served through the fixture's `Single sign-on` concept (Okta's relation to it names "the single sign-on system that opens every other tool", as the handbook does), but that concept is no step's system, so no Onboarding step is rendered and S4 is not cited. The three paraphrase misses remain the semantic seed's job.
 
 ## Tier two
 
