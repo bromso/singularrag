@@ -11,7 +11,7 @@ describe("ViewToggle", () => {
     render(<ViewToggle value="tree" onChange={mock()} />);
     const group = screen.getByRole("radiogroup", { name: "View" });
     const radios = screen.getAllByRole("radio");
-    expect(radios.map((r) => r.textContent)).toEqual(["Tree", "Map"]);
+    expect(radios.map((r) => r.textContent)).toEqual(["Tree", "Map", "Journeys"]);
     expect(radios[0].getAttribute("aria-checked")).toBe("true");
     expect(radios[1].getAttribute("tabindex")).toBe("-1");
     expect(group).toBeTruthy();
@@ -36,6 +36,8 @@ describe("ViewToggle", () => {
     expect(loadView()).toBe("tree");
     saveView("map");
     expect(loadView()).toBe("map");
+    saveView("journeys");
+    expect(loadView()).toBe("journeys");
     localStorage.setItem("singularrag.view", "bogus");
     expect(loadView()).toBe("tree");
   });

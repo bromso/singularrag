@@ -18,6 +18,12 @@ const entitiesFixture = {
   mentions: [{ entity_id: 1, symbol_id: 10, path: "docs/guide.md", name: "Intro" }, { entity_id: 2, symbol_id: 99, path: "docs/other.md", name: "Elsewhere" }],
   truncated: false,
 };
+const processesFixture = {
+  processes: [{ id: 1, name: "Onboarding", description: "", roles: ["engineer"], steps: [
+    { ordinal: 1, text: "Read the intro", role: "engineer", systems: [], section: { symbol_id: 10, path: "docs/guide.md", name: "Intro", line: 1 }, code: [], more_code: 0 },
+  ] }],
+  truncated: false,
+};
 // Merged into every `GET /api/status` answer; a test can set knowledge-status flags.
 let statusExtra: Record<string, unknown> = {};
 // When set, `GET /api/entities` answers with it instead of `entitiesFixture`.
@@ -121,6 +127,7 @@ beforeEach(() => {
     if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [...detailItems, ...extraRetrievalItems] });
     if (url.endsWith("/api/tree")) return json(treeOverride ?? tree);
     if (url.endsWith("/api/entities")) return json(entitiesOverride ?? entitiesFixture);
+    if (url.endsWith("/api/processes")) return json(processesFixture);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
     // GET /api/map returns a fresh object (new identity) each call, reflecting
     // whatever was last PUT — this both matches how the real server behaves
@@ -809,5 +816,42 @@ describe("App", () => {
     const s = (globalThis as any).__sigma.instances.at(-1);
     expect(s.graph.hasNode("entity:1")).toBe(true);
     expect(s.graph.hasNode("entity:2")).toBe(false);
+  });
+
+  test("the Journeys view lists the processes and hides the overlay toggle", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await user.click(screen.getByRole("radio", { name: "Journeys" }));
+    const list = await screen.findByRole("list", { name: "Processes" });
+    expect(within(list).getByRole("button", { name: /Onboarding/ })).toBeTruthy();
+    expect(screen.queryByRole("radiogroup", { name: "Overlay" })).toBeNull();
+    expect(localStorage.getItem("singularrag.view")).toBe("journeys");
+  });
+
+  test("a change event refetches the processes", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await waitFor(() => expect(calls("/api/processes")).toBe(1));
+    await act(async () => { changeHandler!({ data: "{}" }); });
+    await waitFor(() => expect(calls("/api/processes")).toBe(2));
+  });
+
+  test("Documented in switches to the tree and focuses that section's row", async () => {
+    treeOverride = docTree;
+    localStorage.setItem("singularrag.view", "journeys");
+    const user = userEvent.setup();
+    render(<App />);
+    const list = await screen.findByRole("list", { name: "Processes" });
+    await user.click(within(list).getByRole("button", { name: /Onboarding/ }));
+    const steps = screen.getByRole("list", { name: "Steps of Onboarding" });
+    await user.click(within(steps).getByRole("button", { name: "Documented in docs/guide.md::Intro" }));
+    await screen.findByRole("treegrid", { name: "Repository" });
+    await waitFor(() => {
+      const ae = document.activeElement;
+      expect(ae?.getAttribute("role")).toBe("row");
+      expect(ae?.textContent).toContain("Intro");
+    });
+    expect(localStorage.getItem("singularrag.view")).toBe("tree");
   });
 });

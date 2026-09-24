@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { ApiError, api, setToken, tokenFromFragment } from "@/api/client";
 import { subscribe } from "@/api/events";
-import type { BlastResult, EntitiesPayload, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
+import type { BlastResult, EntitiesPayload, GraphPayload, MapConfig, MapDoc, ProcessesPayload, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
 import { filterEntitiesToRoot } from "@/lib/graph";
 import { joinRetrieval } from "@/lib/join";
 import { addToBoundary, boundariesOf, noteFor, removeAgentNote, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
@@ -10,6 +10,7 @@ import { fileStatusOf } from "@/lib/mapStyle";
 import { summaryLabel } from "@/lib/mapSummary";
 import { DetailPanel } from "@/components/DetailPanel";
 import { FreshnessBadge, freshnessText } from "@/components/FreshnessBadge";
+import { JourneysView } from "@/components/JourneysView";
 import { LiveRegion } from "@/components/LiveRegion";
 import { MapErrorBoundary } from "@/components/MapErrorBoundary";
 import { MapView } from "@/components/MapView";
@@ -52,6 +53,9 @@ export function App() {
   // Every change event refetches the entities; an unchanged answer keeps the old object,
   // so the map (which rebuilds its graph when `entities` changes identity) stays put.
   const entitiesJson = useRef("");
+  // The processes follow the same rule: refetched on every load, replaced only when changed.
+  const [processes, setProcesses] = useState<ProcessesPayload | null>(null);
+  const processesJson = useRef("");
   const [reveal, setReveal] = useState<RevealRequest | null>(null);
   const revealSeq = useRef(0);
   const indexRef = useRef<string | null>(null);
@@ -95,6 +99,8 @@ export function App() {
       // unhandled rejection; the `await` at the end reports a failure.
       const entitiesReq = api.entities();
       entitiesReq.catch(() => {});
+      const processesReq = api.processes();
+      processesReq.catch(() => {});
       const [s, rs, sk, m] = await Promise.all([api.status(), api.retrievals(), api.skipped(), api.map()]);
       if (gen !== loadGen.current) return;
       setStatus(s); setRetrievals(rs); setSkipped(sk); applyMapDoc(m);
@@ -121,6 +127,10 @@ export function App() {
       if (gen !== loadGen.current) return;
       const json = JSON.stringify(e);
       if (json !== entitiesJson.current) { entitiesJson.current = json; setEntities(e); }
+      const p = await processesReq;
+      if (gen !== loadGen.current) return;
+      const pJson = JSON.stringify(p);
+      if (pJson !== processesJson.current) { processesJson.current = pJson; setProcesses(p); }
     };
     load().catch((e: unknown) => toastError(e));
     return subscribe(
@@ -337,10 +347,12 @@ export function App() {
         <RetrievalsRail retrievals={retrievals} selected={selected} onSelect={setSelected}
           onMore={() => api.retrievals(retrievals[retrievals.length - 1]?.id).then((more) => setRetrievals((rs) => [...rs, ...more]))} />
       </div>
-      <main className={view === "tree" ? "min-h-0 overflow-auto" : "relative min-h-0 overflow-hidden"}>
+      <main className={view === "map" ? "relative min-h-0 overflow-hidden" : "min-h-0 overflow-auto"}>
         {view === "tree" ? (
           <RepoTree rows={filteredRows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail}
             reveal={reveal} onRevealed={() => setReveal(null)} />
+        ) : view === "journeys" ? (
+          <JourneysView payload={processes} pending={status?.entities_pending ?? 0} onFocusSection={focusSection} />
         ) : (
           <MapErrorBoundary onSwitchToTable={switchToTable}>
             <MapView payload={filteredGraph} rows={filteredRows} hasRetrieval={detail !== null}
