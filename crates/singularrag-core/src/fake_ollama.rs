@@ -16,6 +16,7 @@ struct State {
     calls: Mutex<Vec<String>>,
     generate_prompt_lens: Mutex<Vec<usize>>,
     fail_generate: AtomicUsize,
+    error_generate: AtomicUsize,
     corrupt_embed: AtomicUsize,
     drop_next: AtomicUsize,
     accepted: AtomicUsize,
@@ -109,6 +110,11 @@ impl FakeOllama {
     }
 
     /// `false` also clears `set_down_after`.
+    /// The next `n` generate requests answer HTTP 500 with Ollama's "prediction aborted"
+    /// body, as the server does when a generation loops.
+    pub fn error_next_generate(&self, n: usize) {
+        self.state.error_generate.store(n, Ordering::SeqCst);
+    }
     pub fn set_down(&self, down: bool) {
         self.state.down.store(down, Ordering::SeqCst);
         if !down {
@@ -220,6 +226,16 @@ fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
                 "/api/generate".into()
             });
             lock(&st.generate_prompt_lens).push(prompt.chars().count());
+            if take_one(&st.error_generate) {
+                let body = r#"{"error":"prediction aborted, token repeat limit reached"}"#;
+                let mut out = stream.try_clone()?;
+                write!(
+                    out,
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+                return out.flush();
+            }
             if take_one(&st.fail_generate) {
                 json!({"response": "not json {"})
             } else {

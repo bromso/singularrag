@@ -371,6 +371,14 @@ fn vector_texts(conn: &Connection, e: &Extraction) -> Result<Vec<String>> {
     Ok(texts)
 }
 
+/// A model failure that belongs to this request, not to the server: a malformed answer, a
+/// timeout, or a 5xx the server returned for this prompt (Ollama's "prediction aborted"
+/// when a generation loops). Each costs the section an attempt; anything else (connection
+/// refused, a missing model) is an outage that stops the tick.
+fn is_per_request_failure(m: &str) -> bool {
+    m.contains("not JSON") || m.starts_with("timed out") || m.contains(": HTTP 5")
+}
+
 /// The text a section sends to a model: runs of spaces and tabs become one space, runs of
 /// blank lines one blank line. A section's stored text keeps its child sections and code
 /// fences as blank runs (so offsets survive), which made an H1 a 95k-character "section"
@@ -826,9 +834,7 @@ fn extract_step(
                     )?;
                     x
                 }
-                Err(Error::ModelUnavailable(m))
-                    if m.contains("not JSON") || m.starts_with("timed out") =>
-                {
+                Err(Error::ModelUnavailable(m)) if is_per_request_failure(&m) => {
                     conn.execute(
                         "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1 AND hash = ?3",
                         params![symbol_id, m, hash],
@@ -976,9 +982,7 @@ fn steps_for_row(
                 )?;
                 a
             }
-            Err(Error::ModelUnavailable(m))
-                if m.contains("not JSON") || m.starts_with("timed out") =>
-            {
+            Err(Error::ModelUnavailable(m)) if is_per_request_failure(&m) => {
                 conn.execute(
                     "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1 AND hash = ?3",
                     params![symbol_id, m, hash],
@@ -2846,6 +2850,21 @@ mod tests {
         fake.set_generate_delay(Duration::from_millis(0));
         let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
         assert_eq!((t.extracted, t.pending), (2, 0), "{t:?}");
+    }
+
+    #[test]
+    fn a_model_side_500_costs_an_attempt_not_an_outage() {
+        let (fake, store, models, _d) = tick_fixture(&[("Loops", "one"), ("Fine", "two")]);
+        fake.error_next_generate(1);
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert!(t.model_error.is_none(), "{t:?}");
+        assert_eq!((t.extracted, t.failed, t.pending), (1, 1, 1), "{t:?}");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue WHERE attempts = 1 AND last_error LIKE '%HTTP 500%'"),
+            1
+        );
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.pending), (1, 0), "{t:?}");
     }
 
     fn process_extraction() -> serde_json::Value {
