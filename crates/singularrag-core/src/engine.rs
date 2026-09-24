@@ -226,6 +226,12 @@ impl Engine {
         self.models_enabled = enabled;
     }
 
+    /// Applies a checked-in extraction (`knowledge::load_extraction_json`) to this index,
+    /// embedding what it loads when models are enabled. Returns the sections applied.
+    pub fn load_extraction_json(&mut self, json: &str) -> Result<usize> {
+        knowledge::load_extraction_json(&self.store, self.models(), json)
+    }
+
     /// Point the model client at `url` (tests, and callers that override the workspace).
     pub fn set_models_url(&mut self, url: &str) {
         self.models_cfg.ollama = url.to_string();

@@ -4,7 +4,8 @@
 # `path::name` where `name` is a heading's text (a `section`).
 # `paraphrase` questions share no distinctive word with their gold section, so only a
 # semantic hit finds them; `entity` and `relation` questions name entities from
-# fixtures/prose/extraction.json.
+# fixtures/prose/extraction.json; `process` questions ask about a step of one of the
+# handbook's four processes (the checked-in extraction gives each its ordered steps).
 
 [[question]]
 id = "P1"
@@ -77,3 +78,27 @@ id = "R4"
 category = "relation"
 query = "how is Tomas Berg connected to Kolbeinsey"
 gold = ["docs/voyage.md::Kolbeinsey", "docs/voyage.md::The report"]
+
+[[question]]
+id = "S1"
+category = "process"
+query = "who approves an expense claim before Finance sees it"
+gold = ["docs/handbook.md::Expense process"]
+
+[[question]]
+id = "S2"
+category = "process"
+query = "what does the release captain do once staging looks healthy"
+gold = ["docs/handbook.md::Release process"]
+
+[[question]]
+id = "S3"
+category = "process"
+query = "who writes the post-mortem after an incident and by when"
+gold = ["docs/handbook.md::Incident process"]
+
+[[question]]
+id = "S4"
+category = "process"
+query = "which single sign-on system opens every other tool on the first day"
+gold = ["docs/handbook.md::Onboarding"]

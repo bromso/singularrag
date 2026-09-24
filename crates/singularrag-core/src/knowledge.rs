@@ -2405,6 +2405,60 @@ mod tests {
     }
 
     #[test]
+    fn the_checked_in_extraction_has_steps_for_the_four_handbook_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        reindex(dir.path(), &store);
+        load_extraction_json(
+            &store,
+            None,
+            include_str!("../fixtures/prose/extraction.json"),
+        )
+        .unwrap();
+        assert_eq!(pending(&store).unwrap(), 0);
+        let mut processes: Vec<String> = {
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT name FROM entities WHERE type = 'process'")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.collect::<std::result::Result<_, _>>().unwrap()
+        };
+        processes.sort();
+        assert_eq!(
+            processes,
+            vec![
+                "Expense process",
+                "Incident process",
+                "Onboarding",
+                "Release process"
+            ]
+        );
+        for p in &processes {
+            let rows =
+                crate::journeys::steps_for_process(store.conn(), entity_id(&store, &norm_name(p)))
+                    .unwrap();
+            assert!(rows.len() >= 3, "{p}: {rows:?}");
+        }
+        let expense =
+            crate::journeys::steps_for_process(store.conn(), entity_id(&store, "expense process"))
+                .unwrap();
+        let role = expense[1]
+            .role_id
+            .expect("step 2's role resolves to an entity");
+        let (name, ty): (String, String) = store
+            .conn()
+            .query_row(
+                "SELECT name, type FROM entities WHERE id = ?1",
+                [role],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((name.as_str(), ty.as_str()), ("Manager", "role"));
+    }
+
+    #[test]
     fn a_dimension_change_mid_load_stops_the_load_and_keeps_what_was_loaded() {
         let dir = tempfile::tempdir().unwrap();
         crate::fixture::write_prose(dir.path());
@@ -2692,8 +2746,8 @@ mod tests {
         crate::fixture::write_prose(dir.path());
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         reindex(dir.path(), &store);
-        // The prose fixture as checked in (it types "Expense process" as `concept`), then two
-        // sections replaced: the process type wins over the stored one, whatever the order.
+        // The prose fixture as checked in (four processes with four steps each), then two
+        // sections replaced: Expense by a two-step answer, Onboarding by a process with none.
         let fixture = include_str!("../fixtures/prose/extraction.json");
         load_extraction_json(&store, None, fixture).unwrap();
         let mut map: serde_json::Value = serde_json::from_str(fixture).unwrap();
@@ -2706,8 +2760,18 @@ mod tests {
         ], "relations": []});
         let n = load_extraction_json(&store, None, &map.to_string()).unwrap();
         assert_eq!(n, 10);
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 2);
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps_cache"), 1);
+        // Expense's 2 replace its 4, Onboarding's 4 go with its rewrite, Incident and Release
+        // keep 4 each.
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 2 + 4 + 4);
+        let expense = entity_id(&store, "expense process");
+        assert_eq!(
+            crate::journeys::steps_for_process(store.conn(), expense)
+                .unwrap()
+                .len(),
+            2
+        );
+        // Keyed by section hash: Expense's body did not change, so its row is replaced.
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps_cache"), 4);
         assert_eq!(pending(&store).unwrap(), 0);
         assert_eq!(count(&store, "SELECT COUNT(*) FROM extract_queue"), 0);
         let onboarding = entity_id(&store, "onboarding flow");

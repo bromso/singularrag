@@ -69,6 +69,10 @@ enum Cmd {
         /// Run without the knowledge layer's models: no query embeddings, no semantic seeds
         #[arg(long)]
         no_models: bool,
+        /// A checked-in extraction (`{ "<path>::<heading>": … }`) to load before the questions,
+        /// so the `entities` run can cite without a model
+        #[arg(long, value_name = "PATH")]
+        extraction: Option<PathBuf>,
     },
     /// The shortest chain of references between two symbols (what the trace_path tool returns)
     Path {
@@ -237,9 +241,15 @@ fn main() -> anyhow::Result<()> {
             budget,
             json,
             no_models,
+            extraction,
         } => {
             if no_models {
                 engine.set_models_enabled(false);
+            }
+            if let Some(p) = extraction {
+                engine.refresh(Duration::from_secs(600))?;
+                let n = engine.load_extraction_json(&std::fs::read_to_string(&p)?)?;
+                eprintln!("loaded {n} sections from {}", p.display());
             }
             let qs = singularrag_core::eval::load_questions(&questions)?;
             let results = singularrag_core::eval::run(&mut engine, &qs, budget)?;
