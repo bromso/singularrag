@@ -689,8 +689,8 @@ fn embed_step(store: &Store, models: &Models, t: &mut KnowledgeTick) -> Result<b
     for (symbol_id, hash) in rows {
         let Some(body) = section_body(conn, symbol_id)? else {
             conn.execute(
-                "DELETE FROM extract_queue WHERE symbol_id = ?1",
-                [symbol_id],
+                "DELETE FROM extract_queue WHERE symbol_id = ?1 AND hash = ?2",
+                params![symbol_id, hash],
             )?;
             continue;
         };
@@ -756,15 +756,15 @@ fn extract_step(
         }
         let Some(body) = section_body(conn, symbol_id)? else {
             conn.execute(
-                "DELETE FROM extract_queue WHERE symbol_id = ?1",
-                [symbol_id],
+                "DELETE FROM extract_queue WHERE symbol_id = ?1 AND hash = ?2",
+                params![symbol_id, hash],
             )?;
             continue;
         };
         let hash = if hash.is_empty() {
             let h = section_hash(&body);
             conn.execute(
-                "UPDATE extract_queue SET hash = ?2 WHERE symbol_id = ?1",
+                "UPDATE extract_queue SET hash = ?2 WHERE symbol_id = ?1 AND hash = ''",
                 params![symbol_id, h],
             )?;
             h
@@ -789,8 +789,8 @@ fn extract_step(
                 }
                 Err(Error::ModelUnavailable(m)) if m.contains("not JSON") => {
                     conn.execute(
-                        "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1",
-                        params![symbol_id, m],
+                        "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1 AND hash = ?3",
+                        params![symbol_id, m, hash],
                     )?;
                     t.failed += 1;
                     continue;
@@ -876,14 +876,20 @@ fn steps_stage(
         }
         let Some(body) = section_body(conn, symbol_id)? else {
             conn.execute(
-                "DELETE FROM extract_queue WHERE symbol_id = ?1",
-                [symbol_id],
+                "DELETE FROM extract_queue WHERE symbol_id = ?1 AND hash = ?2",
+                params![symbol_id, hash],
             )?;
             continue;
         };
-        // Stage 1 is only ever set with the row's hash in place; recompute defensively.
+        // Stage 1 is only ever set with the row's hash in place; recompute defensively, and
+        // write it back so the hash-guarded statements below still find this row.
         let hash = if hash.is_empty() {
-            section_hash(&body)
+            let h = section_hash(&body);
+            conn.execute(
+                "UPDATE extract_queue SET hash = ?2 WHERE symbol_id = ?1 AND hash = ''",
+                params![symbol_id, h],
+            )?;
+            h
         } else {
             hash
         };
@@ -931,8 +937,8 @@ fn steps_for_row(
             }
             Err(Error::ModelUnavailable(m)) if m.contains("not JSON") => {
                 conn.execute(
-                    "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1",
-                    params![symbol_id, m],
+                    "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1 AND hash = ?3",
+                    params![symbol_id, m, hash],
                 )?;
                 t.failed += 1;
                 return Ok(StepOutcome::Malformed);
@@ -957,8 +963,8 @@ fn steps_for_row(
         }
     };
     tx.execute(
-        "DELETE FROM extract_queue WHERE symbol_id = ?1",
-        [symbol_id],
+        "DELETE FROM extract_queue WHERE symbol_id = ?1 AND hash = ?2",
+        params![symbol_id, hash],
     )?;
     tx.commit()?;
     if let StepOutcome::Applied = outcome {
@@ -1038,13 +1044,13 @@ fn write_section(
     let has_process = x.entities.iter().any(|e| e.r#type == "process");
     if has_process {
         tx.execute(
-            "UPDATE extract_queue SET stage = 1, attempts = 0, last_error = NULL WHERE symbol_id = ?1",
-            [symbol_id],
+            "UPDATE extract_queue SET stage = 1, attempts = 0, last_error = NULL WHERE symbol_id = ?1 AND hash = ?2",
+            params![symbol_id, hash],
         )?;
     } else {
         tx.execute(
-            "DELETE FROM extract_queue WHERE symbol_id = ?1",
-            [symbol_id],
+            "DELETE FROM extract_queue WHERE symbol_id = ?1 AND hash = ?2",
+            params![symbol_id, hash],
         )?;
     }
     tx.commit()?;
@@ -1113,10 +1119,11 @@ pub fn load_extraction_json(store: &Store, models: Option<&Models>, json: &str) 
                 );
             }
         }
-        // A loaded fixture has nothing pending, whether or not the section had steps.
+        // A loaded fixture has nothing pending, whether or not the section had steps. An
+        // empty hash (a rebuild's) stands for the body just loaded.
         conn.execute(
-            "DELETE FROM extract_queue WHERE symbol_id = ?1",
-            [symbol_id],
+            "DELETE FROM extract_queue WHERE symbol_id = ?1 AND hash IN (?2, '')",
+            params![symbol_id, hash],
         )?;
         applied += 1;
     }
@@ -2638,6 +2645,63 @@ mod tests {
         assert_eq!((t.extracted, t.stepped, t.pending), (2, 1, 0), "{t:?}");
         assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 2);
         assert_eq!(steps_calls(&fake), 1, "served from the steps cache");
+    }
+
+    /// Runs one tick on its own handle while, from a second handle, the section is re-queued
+    /// with an edited body (a watcher in the other process) during the slow model call.
+    /// Returns the handle the test inspects and the edited body's hash.
+    fn requeue_during_a_slow_tick(at_steps_stage: bool) -> (Store, String, tempfile::TempDir) {
+        let (fake, store, models, dir) =
+            tick_fixture(&[("Expense process", "Submit each expense in Expensify.")]);
+        fake.set_extraction("Expense", process_extraction());
+        fake.set_steps("Expense", expense_steps());
+        if at_steps_stage {
+            fake.set_down_after(1);
+            tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+            fake.set_down(false);
+            assert_eq!(count(&store, "SELECT stage FROM extract_queue"), 1);
+        }
+        let other = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let symbol_id = count(&other, "SELECT symbol_id FROM extract_queue");
+        fake.set_generate_delay(Duration::from_millis(1200));
+        // The budget runs out inside the slow call, so the tick works no other row after it
+        // (the re-queued row would otherwise be claimed again by the same tick).
+        let worker = std::thread::spawn(move || {
+            let t = tick(&store, &models, Duration::from_millis(1000), &|| false).unwrap();
+            drop(fake);
+            t
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let edited = "Submit each expense in Expensify within a month.";
+        queue_section(other.conn(), symbol_id, edited).unwrap();
+        worker.join().unwrap();
+        (other, section_hash(edited), dir)
+    }
+
+    #[test]
+    fn a_requeue_during_the_steps_prompt_survives_the_tick() {
+        let (store, hash, _d) = requeue_during_a_slow_tick(true);
+        let row: (i64, String) = store
+            .conn()
+            .query_row("SELECT stage, hash FROM extract_queue", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .expect("the re-queued row is still there");
+        assert_eq!(row, (0, hash));
+        assert_eq!(pending(&store).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_requeue_during_the_entity_prompt_is_neither_advanced_nor_deleted() {
+        let (store, hash, _d) = requeue_during_a_slow_tick(false);
+        let row: (i64, String) = store
+            .conn()
+            .query_row("SELECT stage, hash FROM extract_queue", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .expect("the re-queued row is still there");
+        assert_eq!(row, (0, hash));
+        assert_eq!(pending(&store).unwrap(), 1);
     }
 
     #[test]
