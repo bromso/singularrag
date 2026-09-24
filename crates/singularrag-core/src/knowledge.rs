@@ -2880,6 +2880,54 @@ mod tests {
     }
 
     #[test]
+    fn a_system_first_stored_under_another_type_still_resolves_and_links() {
+        let (_fake, store, _models, dir) = tick_fixture(&[
+            (
+                "Code hosting",
+                "Our code lives on GitHub, the company that hosts it.",
+            ),
+            ("Release process", "The captain tags the release on GitHub."),
+        ]);
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/github_client.ts"),
+            "export function createTag(name: string): string {\n  return name;\n}\n",
+        )
+        .unwrap();
+        reindex(dir.path(), &store);
+        let map = serde_json::json!({
+            "docs/handbook.md::Code hosting": {"entities": [
+                {"name": "GitHub", "type": "organisation", "description": "the code host company"}
+            ], "relations": []},
+            "docs/handbook.md::Release process": {"entities": [
+                {"name": "Release process", "type": "process", "description": "how we ship"},
+                {"name": "GitHub", "type": "system", "description": "the code host"}
+            ], "relations": [],
+            "steps": {"process": "Release process", "steps": [
+                {"text": "Tag the release on GitHub", "role": "", "systems": ["GitHub"]}
+            ]}}
+        });
+        load_extraction_json(&store, None, &map.to_string()).unwrap();
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM entities WHERE norm_name = 'github' AND type = 'organisation'"),
+            1,
+            "the first section's type is kept"
+        );
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM step_systems"), 1);
+        let (hits, _) = match_entities(&store, None, "release process", &[], 10).unwrap();
+        let steps = hits[0].steps.as_ref().expect("a process hit has steps");
+        assert_eq!(steps.steps[0].systems, vec!["GitHub".to_string()]);
+        assert_eq!(
+            steps.steps[0]
+                .code
+                .iter()
+                .map(|l| format!("{}::{}", l.path, l.name))
+                .collect::<Vec<_>>(),
+            vec!["src/github_client.ts::createTag".to_string()]
+        );
+    }
+
+    #[test]
     fn an_embedding_rebuild_clears_steps_and_requeues_at_stage_zero() {
         let (fake, store, models, _d) = tick_fixture(&[
             ("Expense process", "Submit each expense in Expensify."),

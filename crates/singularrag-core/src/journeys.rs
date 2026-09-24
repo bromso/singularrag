@@ -15,11 +15,17 @@ pub struct StepRow {
     pub symbol_id: i64,
 }
 
+/// The entity of this section named `norm` of type `ty`. `process` must be stored as a
+/// process (the extraction upgrades it on the way in); a `role` or `system` resolves
+/// whatever type the entity was first stored under, preferring one of the expected type.
 fn section_entity(conn: &Connection, symbol_id: i64, ty: &str, norm: &str) -> Result<Option<i64>> {
+    let strict = ty == "process";
     Ok(conn
         .query_row(
-            "SELECT e.id FROM entities e JOIN entity_mentions m ON m.entity_id = e.id WHERE m.symbol_id = ?1 AND e.type = ?2 AND e.norm_name = ?3 LIMIT 1",
-            params![symbol_id, ty, norm],
+            "SELECT e.id FROM entities e JOIN entity_mentions m ON m.entity_id = e.id
+             WHERE m.symbol_id = ?1 AND e.norm_name = ?3 AND (e.type = ?2 OR NOT ?4)
+             ORDER BY e.type = ?2 DESC, e.id LIMIT 1",
+            params![symbol_id, ty, norm, strict],
             |r| r.get(0),
         )
         .optional()?)
