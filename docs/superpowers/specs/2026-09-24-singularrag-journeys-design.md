@@ -43,6 +43,8 @@ Cost of the gate being wrong: a process described without the model typing it `p
 ## 4. Retrieval and the agent
 
 - **Implemented by** (derived, read time): for a step, the union of (a) the code symbols the step's section already mentions (the documents design's doc-to-code `refs`) and (b) for each touched system with a `norm_name` of at least three characters, every code symbol or config key whose name, and every file whose stem, contains that name after normalisation (lowercase, hyphens and underscores removed): `okta` matches `oktaClient`, `okta_login.ts`, `auth.okta.issuer`. Ranked (a) first, then (b) by the number of files that reference the symbol's name, then path and name (the index stores no static rank; `file_rank` is computed per query); at most three shown per step, the count of the rest stated. A rule module `journeys::implemented_by(store, step) -> Vec<CodeLink>` with `CodeLink { path, name, line, via: Via::Mention | Via::System(String) }`.
+
+  *Amended 2026-09-24 (final review).* Rule (b) matches whole token windows, not substrings: a name and a file stem are split into lowercase tokens on every non-alphanumeric character and on camelCase boundaries (`journeys::ident_tokens`; `HTTPServer` is `[http, server]`), the system name is lowercased with every non-alphanumeric character removed, and a symbol matches when that name equals one or more consecutive tokens joined. `okta` matches `oktaClient` and `okta_login.ts` but not `tokta`; `store` no longer matches `restore`; `Incident channel` matches `postToIncidentChannel`.
 - **`entities` output.** When a matched entity is a `process`, its block is followed by its steps in ordinal order, merged across documenting sections by `(symbol_id line order, ordinal)`:
 
 ```
@@ -53,6 +55,8 @@ Expense process (process): how you get your own money back
 
   A step line has `text — role: … — systems: … — <path::heading>` and, when links exist, `code: path::name (+N)`. Served items gain the linked code symbols after the cited sections, in rank order, so the retrieval records them and the rail can show them. The footer counts steps: `# N entities · M relations · S steps · K sections`.
 - **Seed.** In `repo_map`, a matched `process` entity's touched systems seed their implementing code (rule (b) above) with `NOTE_BOOST`, and the file's hit weight is 1.0; `Reasons` gains `implements: Vec<String>` (the system names), rendered "Implements Expensify". The existing entity seed already covers the process's own sections.
+
+  *Amended 2026-09-24 (final review).* The seed takes the same top three links per step that `entities` prints (`LINK_LIMIT`), not every match, and adds `IMPLEMENTS_BOOST` (`NOTE_BOOST / 2`) per file; the implementing symbols keep their name-hit weight. A common system name (`Store`) otherwise pushed the process's own section out of a 1024-token map.
 - **Descriptions.** `ENTITIES_DESCRIPTION` gains one sentence: a process comes back as ordered steps with the role, systems, documenting section and implementing code. `INSTRUCTIONS` gains half a line: ask `entities` for how a process works. The MCP schema, `find_symbol`, `trace_path`, `changed`, `annotate` and the hook are unchanged.
 
 ## 5. UI: the Journeys perspective

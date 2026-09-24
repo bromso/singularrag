@@ -130,11 +130,55 @@ const NON_CODE_KINDS: [&str; 4] = ["section", "document", "element", "rule"];
 pub const LINK_LIMIT: usize = 3;
 pub const MIN_SYSTEM_CHARS: usize = 3;
 
-pub fn normalise_ident(s: &str) -> String {
+/// An identifier (or file stem) as lowercase word tokens: split on every non-alphanumeric
+/// character and on camelCase boundaries. A camelCase boundary is before an uppercase letter
+/// that follows a lowercase letter or a digit, or before the last capital of an acronym run
+/// when a lowercase letter follows it, so `HTTPServer` is `[http, server]` and `oauth2Client`
+/// is `[oauth2, client]`; digits stay with the token before them.
+pub fn ident_tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for run in s
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|r| !r.is_empty())
+    {
+        let chars: Vec<char> = run.chars().collect();
+        let mut cur = String::new();
+        for (i, &c) in chars.iter().enumerate() {
+            if i > 0 && c.is_uppercase() {
+                let prev = chars[i - 1];
+                let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+                if prev.is_lowercase() || prev.is_numeric() || (prev.is_uppercase() && next_lower) {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            cur.extend(c.to_lowercase());
+        }
+        out.push(cur);
+    }
+    out
+}
+
+/// A system name as `implemented_by` matches it: lowercase, every non-alphanumeric
+/// character removed (`Single sign-on` is `singlesignon`).
+fn normalise_system(s: &str) -> String {
     s.chars()
-        .filter(|c| *c != '-' && *c != '_')
+        .filter(|c| c.is_alphanumeric())
         .flat_map(|c| c.to_lowercase())
         .collect()
+}
+
+/// Whether `norm` equals the concatenation of one or more consecutive `tokens`.
+fn matches_token_window(tokens: &[String], norm: &str) -> bool {
+    (0..tokens.len()).any(|i| {
+        let mut joined = String::new();
+        for t in &tokens[i..] {
+            joined.push_str(t);
+            if joined.len() >= norm.len() {
+                return joined == norm;
+            }
+        }
+        false
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,8 +202,8 @@ struct CodeSym {
     path: String,
     name: String,
     line: u32,
-    norm_name: String,
-    norm_stem: String,
+    name_tokens: Vec<String>,
+    stem_tokens: Vec<String>,
     referrers: i64,
 }
 
@@ -192,8 +236,8 @@ pub fn load_code_index(conn: &Connection) -> Result<CodeIndex> {
             Ok(CodeSym {
                 symbol_id: r.get(0)?,
                 file_id: r.get(1)?,
-                norm_name: normalise_ident(&name),
-                norm_stem: normalise_ident(&stem),
+                name_tokens: ident_tokens(&name),
+                stem_tokens: ident_tokens(&stem),
                 path,
                 name,
                 line: r.get::<_, i64>(4)? as u32,
@@ -241,12 +285,13 @@ pub fn implemented_by(
     let mut links = section_mentions(conn, index, step.symbol_id)?;
     let mut by_system: Vec<(&CodeSym, String)> = Vec::new();
     for (_, name) in systems {
-        let norm = normalise_ident(&norm_name(name));
+        let norm = normalise_system(name);
         if norm.chars().count() < MIN_SYSTEM_CHARS {
             continue;
         }
         for s in &index.syms {
-            if (s.norm_name.contains(&norm) || s.norm_stem.contains(&norm))
+            if (matches_token_window(&s.name_tokens, &norm)
+                || matches_token_window(&s.stem_tokens, &norm))
                 && !links.iter().any(|l| l.symbol_id == s.symbol_id)
                 && !by_system.iter().any(|(x, _)| x.symbol_id == s.symbol_id)
             {
@@ -792,6 +837,95 @@ mod tests {
             "equal referrers tie-break ascending by path: a.ts before b.ts"
         );
         assert_eq!(tie_more, 0);
+    }
+
+    /// One step of process `P` in a fresh section naming `system`, and the code it links to.
+    fn links_for_system(conn: &Connection, system: &str) -> Vec<i64> {
+        let sec = seed_section(conn, "docs/handbook.md", "P", 900);
+        let p = seed_entity(conn, sec, "P", "process");
+        let sys = seed_entity(conn, sec, system, "system");
+        apply_steps(
+            conn,
+            sec,
+            "h",
+            &StepsAnswer {
+                process: "P".into(),
+                steps: vec![ExtractedStep {
+                    text: "x".into(),
+                    systems: vec![system.into()],
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+        let step = &steps_for_process(conn, p).unwrap()[0];
+        let index = load_code_index(conn).unwrap();
+        let (links, more) =
+            implemented_by(conn, &index, step, &[(sys, system.into())], usize::MAX).unwrap();
+        assert_eq!(more, 0);
+        links.into_iter().map(|l| l.symbol_id).collect()
+    }
+
+    #[test]
+    fn ident_tokens_split_on_punctuation_and_camel_case() {
+        let t = |s: &str| ident_tokens(s);
+        assert_eq!(t("oktaClient"), ["okta", "client"]);
+        assert_eq!(t("okta_login"), ["okta", "login"]);
+        assert_eq!(t("auth.okta.issuer"), ["auth", "okta", "issuer"]);
+        assert_eq!(t("PagerDuty-hooks"), ["pager", "duty", "hooks"]);
+        // An acronym run ends before its last capital when a lowercase letter follows.
+        assert_eq!(t("HTTPServer"), ["http", "server"]);
+        assert_eq!(t("parseHTTP"), ["parse", "http"]);
+        assert_eq!(t("oauth2Client"), ["oauth2", "client"]);
+        assert_eq!(t("StoreError"), ["store", "error"]);
+        assert!(t("--").is_empty());
+    }
+
+    #[test]
+    fn a_system_matches_whole_token_windows_not_substrings() {
+        let (_dir, store) = temp_store();
+        let conn = store.conn();
+        let okta_client = seed_code(conn, "src/auth/client.ts", "oktaClient", "function", 1);
+        let okta_login = seed_code(conn, "src/auth/okta_login.ts", "login", "function", 1);
+        let tokta = seed_code(conn, "src/misc/tokta.ts", "tokta", "function", 1);
+        assert_eq!(
+            links_for_system(conn, "Okta"),
+            vec![okta_client, okta_login],
+            "tokta ({tokta}) must not match Okta"
+        );
+    }
+
+    #[test]
+    fn store_matches_store_symbols_and_files_but_not_restore() {
+        let (_dir, store) = temp_store();
+        let conn = store.conn();
+        let s1 = seed_code(conn, "src/lib.rs", "Store", "struct", 1);
+        let s2 = seed_code(conn, "src/store.rs", "open", "function", 1);
+        let s3 = seed_code(conn, "src/error.rs", "StoreError", "enum", 1);
+        let restore = seed_code(conn, "src/backup.rs", "restore", "function", 1);
+        let restore_file = seed_code(conn, "src/restore.rs", "run", "function", 1);
+        let mut got = links_for_system(conn, "Store");
+        got.sort();
+        assert_eq!(
+            got,
+            vec![s1, s2, s3],
+            "restore ({restore}, {restore_file}) must not match Store"
+        );
+    }
+
+    #[test]
+    fn a_multi_word_system_matches_a_run_of_tokens() {
+        let (_dir, store) = temp_store();
+        let conn = store.conn();
+        let post = seed_code(
+            conn,
+            "src/ops/incident_channel.ts",
+            "postToIncidentChannel",
+            "function",
+            1,
+        );
+        let _other = seed_code(conn, "src/ops/channel.ts", "incidentLog", "function", 1);
+        assert_eq!(links_for_system(conn, "Incident channel"), vec![post]);
     }
 
     fn sect(path: &str, name: &str, a: u32, b: u32) -> crate::knowledge::CitedSection {

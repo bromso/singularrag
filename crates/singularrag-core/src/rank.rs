@@ -18,6 +18,9 @@ pub const FOCUS_BOOST: f64 = 10.0;
 pub const PIN_BOOST: f64 = 10.0;
 pub const FTS_FILE_BOOST: f64 = 5.0;
 pub const NOTE_BOOST: f64 = 5.0;
+/// A file implementing a matched process's step: half a note, so the process's own
+/// documenting section keeps its place above the code.
+pub const IMPLEMENTS_BOOST: f64 = NOTE_BOOST / 2.0;
 /// Symbols nobody references still get a sliver of their file's rank so they stay orderable.
 pub const UNREFERENCED_FRACTION: f64 = 0.001;
 
@@ -423,7 +426,7 @@ pub fn rank_symbols(
             seeds[i].extend(names.iter().map(|n| format!("entity:{n}")));
         }
         if let Some(names) = implements_files.get(&node.id) {
-            personalization[i] += NOTE_BOOST;
+            personalization[i] += IMPLEMENTS_BOOST;
             seeds[i].extend(names.iter().map(|n| format!("implements:{n}")));
         }
         if let Some(sim) = theme_files.get(&node.id) {

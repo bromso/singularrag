@@ -2047,4 +2047,86 @@ mod tests {
             "{reasons}"
         );
     }
+
+    #[test]
+    fn a_process_whose_system_names_many_symbols_still_serves_its_own_section_first() {
+        // The reviewer's flood: a system named `Store` matches dozens of symbols; the
+        // process's documenting section must survive a small budget and outrank them all.
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let mut main = String::new();
+        for i in 0..40 {
+            let (file, sym) = if i % 2 == 0 {
+                (format!("src/m{i}/store.ts"), format!("storeItem{i}"))
+            } else {
+                (format!("src/m{i}/cache.ts"), format!("userStore{i}"))
+            };
+            std::fs::create_dir_all(dir.path().join(format!("src/m{i}"))).unwrap();
+            std::fs::write(
+                dir.path().join(&file),
+                format!("export function {sym}(k: string): string {{\n  return k;\n}}\n"),
+            )
+            .unwrap();
+            let module = file.trim_end_matches(".ts");
+            main = format!(
+                "import {{ {sym} }} from \"./{}\";\n{main}{sym}(\"x\");\n",
+                &module[4..]
+            );
+        }
+        std::fs::write(dir.path().join("src/main.ts"), main).unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.refresh(Duration::from_secs(60)).unwrap();
+        let map = serde_json::json!({"docs/handbook.md::Expense process": {
+            "entities": [
+                {"name": "Expense process", "type": "process", "description": "how you get money back"},
+                {"name": "Manager", "type": "role", "description": "approves claims"},
+                {"name": "Store", "type": "system", "description": "the expense store"}
+            ],
+            "relations": [],
+            "steps": {"process": "Expense process", "steps": [
+                {"text": "Submit each expense in the Store", "role": "Employee", "systems": ["Store"]},
+                {"text": "Your manager approves or rejects the claim", "role": "Manager", "systems": []}
+            ]}
+        }});
+        knowledge::load_extraction_json(e.store(), None, &map.to_string()).unwrap();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("expense process".into()),
+                budget_tokens: 1024,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut stmt = e
+            .store()
+            .conn()
+            .prepare(
+                "SELECT rank, path, name, served, reasons_json FROM retrieval_items WHERE retrieval_id = ?1 ORDER BY rank",
+            )
+            .unwrap();
+        let items: Vec<(i64, String, String, bool, String)> = stmt
+            .query_map([resp.retrieval_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let section = items
+            .iter()
+            .find(|(_, p, n, _, _)| p == "docs/handbook.md" && n == "Expense process")
+            .unwrap_or_else(|| panic!("section not ranked: {items:?}"));
+        assert!(
+            section.3,
+            "the Expense process section is served: {items:?}"
+        );
+        let implementing: Vec<_> = items
+            .iter()
+            .filter(|(_, _, _, _, r)| r.contains("implements:"))
+            .collect();
+        assert!(!implementing.is_empty(), "{items:?}");
+        assert!(
+            implementing.iter().all(|(rank, ..)| *rank > section.0),
+            "section rank {} vs implementing {implementing:?}",
+            section.0
+        );
+    }
 }

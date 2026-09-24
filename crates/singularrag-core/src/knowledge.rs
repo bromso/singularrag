@@ -1334,7 +1334,7 @@ impl Seeds {
 }
 
 /// The code a matched process's steps' systems name, as `(symbol id, system name)`,
-/// once per pair. Only system-name links: a section's mentions are already reached
+/// once per pair, at most `LINK_LIMIT` links per step (the ones the `entities` tool prints). Only system-name links: a section's mentions are already reached
 /// through the section's own entity seed. The code index is built once, and only when
 /// a process matched.
 fn implements_seeds(conn: &Connection, matched: &[MatchedEntity]) -> Result<Vec<(i64, String)>> {
@@ -1355,8 +1355,13 @@ fn implements_seeds(conn: &Connection, matched: &[MatchedEntity]) -> Result<Vec<
         let index = index.as_ref().expect("built above");
         for row in crate::journeys::steps_for_process(conn, m.id)? {
             let systems = crate::journeys::systems_for_step(conn, row.id)?;
-            let (links, _) =
-                crate::journeys::implemented_by(conn, index, &row, &systems, usize::MAX)?;
+            let (links, _) = crate::journeys::implemented_by(
+                conn,
+                index,
+                &row,
+                &systems,
+                crate::journeys::LINK_LIMIT,
+            )?;
             for link in links {
                 if let crate::journeys::Via::System(name) = link.via {
                     let pair = (link.symbol_id, name);
