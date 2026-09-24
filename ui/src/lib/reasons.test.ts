@@ -39,6 +39,10 @@ describe("reasonsToSentences", () => {
     expect(s).toContain("Mentions Acme.");
     expect(s).toContain("Matches the theme x.");
   });
+  test("an implements seed reads as the systems the code implements", () => {
+    const s = reasonsToSentences({ ...base, implements: ["Expensify", "Workday"] }, 1, 1);
+    expect(s).toContain("Implements Expensify, Workday.");
+  });
   test("reasons recorded before the knowledge layer still read", () => {
     const { semantic: _s, entities: _e, themes: _t, ...old } = base;
     expect(reasonsToSentences(old as typeof base, 4, 0.02)).toEqual(["Ranked 4th, score 0.02."]);

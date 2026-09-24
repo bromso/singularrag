@@ -23,6 +23,7 @@ export function reasonsToSentences(r: Reasons, rank: number, score: number): str
   if (r.semantic != null) out.push(`Semantically close to the query (${r.semantic.toFixed(2)}).`);
   // Rows recorded before the knowledge layer carry no `entities` or `themes`.
   for (const e of r.entities ?? []) out.push(`Mentions ${e}.`);
+  if (r.implements?.length) out.push(`Implements ${r.implements.join(", ")}.`);
   for (const t of r.themes ?? []) out.push(`Matches the theme ${t}.`);
   if (r.seeds.includes("focus")) out.push("You focused this file.");
   if (r.pinned || r.seeds.includes("pinned")) out.push("Pinned.");

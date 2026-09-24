@@ -1320,6 +1320,8 @@ pub struct Seeds {
     pub entity_names: Vec<String>,
     pub theme_vecs: Vec<(String, Vec<f32>)>,
     pub models_unavailable: bool,
+    /// Code a matched process's systems name: `(symbol id, system name)`.
+    pub implements: Vec<(i64, String)>,
 }
 
 impl Seeds {
@@ -1329,6 +1331,43 @@ impl Seeds {
             self.entity_names.push(name);
         }
     }
+}
+
+/// The code a matched process's steps' systems name, as `(symbol id, system name)`,
+/// once per pair. Only system-name links: a section's mentions are already reached
+/// through the section's own entity seed. The code index is built once, and only when
+/// a process matched.
+fn implements_seeds(conn: &Connection, matched: &[MatchedEntity]) -> Result<Vec<(i64, String)>> {
+    let mut out: Vec<(i64, String)> = Vec::new();
+    let mut index = None;
+    for m in matched {
+        let ty: Option<String> = conn
+            .query_row("SELECT type FROM entities WHERE id = ?1", [m.id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if ty.as_deref() != Some("process") {
+            continue;
+        }
+        if index.is_none() {
+            index = Some(crate::journeys::load_code_index(conn)?);
+        }
+        let index = index.as_ref().expect("built above");
+        for row in crate::journeys::steps_for_process(conn, m.id)? {
+            let systems = crate::journeys::systems_for_step(conn, row.id)?;
+            let (links, _) =
+                crate::journeys::implemented_by(conn, index, &row, &systems, usize::MAX)?;
+            for link in links {
+                if let crate::journeys::Via::System(name) = link.via {
+                    let pair = (link.symbol_id, name);
+                    if !out.contains(&pair) {
+                        out.push(pair);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The seeds for one `repo_map` call, with at most two model calls: one embedding for
@@ -1348,6 +1387,7 @@ pub fn seeds_for(
 ) -> Result<Seeds> {
     let mut seeds = Seeds::default();
     let matched = matching_entities(store, models, query, entities)?;
+    seeds.implements = implements_seeds(store.conn(), &matched.entities)?;
     for m in matched.entities {
         seeds.add_entity(m.id, m.name);
     }
@@ -2784,5 +2824,42 @@ mod tests {
         );
         let footer = text.lines().last().unwrap();
         assert!(footer.contains(" · 2 steps · "), "{footer}");
+    }
+
+    #[test]
+    fn a_matched_process_seeds_the_code_its_systems_implement() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        std::fs::create_dir_all(dir.path().join("src/vendors")).unwrap();
+        std::fs::write(
+            dir.path().join("src/vendors/expensify.ts"),
+            "export function expensifyClient(key: string): string {\n  return key;\n}\n",
+        )
+        .unwrap();
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        reindex(dir.path(), &store);
+        let mut expense = process_extraction();
+        expense["steps"] = expense_steps();
+        let map = serde_json::json!({ "docs/handbook.md::Expense process": expense });
+        load_extraction_json(&store, None, &map.to_string()).unwrap();
+        let client: i64 = store
+            .conn()
+            .query_row(
+                "SELECT id FROM symbols WHERE name = 'expensifyClient'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let seeds = seeds_for(&store, None, Some("expense process"), &[], &[]).unwrap();
+        assert!(
+            seeds
+                .implements
+                .contains(&(client, "Expensify".to_string())),
+            "{:?}",
+            seeds.implements
+        );
+        // A query matching no process builds no implements seeds.
+        let none = seeds_for(&store, None, Some("Manager"), &[], &[]).unwrap();
+        assert!(none.implements.is_empty(), "{:?}", none.implements);
     }
 }

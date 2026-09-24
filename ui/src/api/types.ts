@@ -5,6 +5,8 @@ export type Reasons = {
   body_hit: boolean;
   /** Similarity to the query's vector when the section was among the nearest. */
   semantic: number | null; entities: string[]; themes: string[];
+  /** Systems a matched process names that this code implements; absent on older rows. */
+  implements?: string[];
 };
 export type Item = { rank: number; symbol_id: number; path: string; name: string; line_start: number; score: number; served: boolean; reasons: Reasons };
 export type RetrievalSummary = {

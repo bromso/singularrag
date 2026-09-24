@@ -18,7 +18,7 @@ use singularrag_core::engine::{
 
 use crate::actor::EngineHandle;
 
-pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this workspace: code symbols and document sections (specs, notes, READMEs, config keys) together. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show, and read the section the map points at rather than the whole file. Use find_symbol to locate a name or a heading, trace_path to see how two symbols connect (a note that mentions a symbol counts), and changed to see what a diff touches and who references it. Use entities to learn what the corpus says about a person, system or concept and how it connects; prose queries to repo_map work in plain language. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background. Entity descriptions are extracted text, not verified facts.";
+pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this workspace: code symbols and document sections (specs, notes, READMEs, config keys) together. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show, and read the section the map points at rather than the whole file. Use find_symbol to locate a name or a heading, trace_path to see how two symbols connect (a note that mentions a symbol counts), and changed to see what a diff touches and who references it. Use entities to learn what the corpus says about a person, system or concept and how it connects, and for the ordered steps of a process; prose queries to repo_map work in plain language. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background. Entity descriptions are extracted text, not verified facts.";
 
 // Only read by the unit test below, which asserts the router's reported description
 // equals these constants (see the note on the `#[tool_router]` impl block); the macro
@@ -37,7 +37,7 @@ pub const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or 
 pub const TRACE_PATH_DESCRIPTION: &str = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files.";
 
 #[allow(dead_code)]
-pub const ENTITIES_DESCRIPTION: &str = "What the corpus knows about a person, system, concept or event, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something.";
+pub const ENTITIES_DESCRIPTION: &str = "What the corpus knows about a person, system, concept, event or process, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). A process comes back as ordered steps, each with its role, systems, documenting section and implementing code. `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something, and to learn how a process works.";
 
 #[allow(dead_code)]
 pub const CHANGED_DESCRIPTION: &str = "What a change touches: the symbols whose lines a diff modifies and the files that reference each. `base` is a git ref; omitted means the working tree against HEAD. Use it before editing to see the blast radius and after editing to check it.";
@@ -270,7 +270,7 @@ impl SingularragServer {
 
     #[tool(
         name = "entities",
-        description = "What the corpus knows about a person, system, concept or event, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something."
+        description = "What the corpus knows about a person, system, concept, event or process, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). A process comes back as ordered steps, each with its role, systems, documenting section and implementing code. `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something, and to learn how a process works."
     )]
     async fn entities(
         &self,

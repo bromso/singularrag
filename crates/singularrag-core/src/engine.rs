@@ -1961,4 +1961,65 @@ mod tests {
             "{reasons}"
         );
     }
+
+    #[test]
+    fn repo_map_for_a_process_query_serves_the_implementing_file_with_an_implements_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        std::fs::create_dir_all(dir.path().join("src/vendors")).unwrap();
+        std::fs::write(
+            dir.path().join("src/vendors/expensify.ts"),
+            "export function expensifyClient(key: string): string {\n  return key;\n}\n",
+        )
+        .unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.refresh(Duration::from_secs(60)).unwrap();
+        let map = serde_json::json!({"docs/handbook.md::Expense process": {
+            "entities": [
+                {"name": "Expense process", "type": "process", "description": "how you get money back"},
+                {"name": "Manager", "type": "role", "description": "approves claims"},
+                {"name": "Expensify", "type": "system", "description": "the expense tool"}
+            ],
+            "relations": [],
+            "steps": {"process": "Expense process", "steps": [
+                {"text": "Submit each expense in Expensify", "role": "employee", "systems": ["Expensify"]},
+                {"text": "Your manager approves or rejects the claim", "role": "Manager", "systems": []}
+            ]}
+        }});
+        knowledge::load_extraction_json(e.store(), None, &map.to_string()).unwrap();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("expense process".into()),
+                budget_tokens: 4096,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            resp.text.contains("src/vendors/expensify.ts"),
+            "{}",
+            resp.text
+        );
+        let reasons: String = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT reasons_json FROM retrieval_items WHERE retrieval_id = ?1 AND served AND path = 'src/vendors/expensify.ts' AND name = 'expensifyClient'",
+                [resp.retrieval_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let reasons: serde_json::Value = serde_json::from_str(&reasons).unwrap();
+        assert_eq!(
+            reasons["implements"],
+            serde_json::json!(["Expensify"]),
+            "{reasons}"
+        );
+        assert!(
+            reasons["seeds"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("implements:Expensify")),
+            "{reasons}"
+        );
+    }
 }
