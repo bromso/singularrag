@@ -1,0 +1,134 @@
+{
+  "docs/voyage.md::The Aurelia voyage": {
+    "entities": [
+      {"name": "Aurelia", "type": "system", "description": "A schooner that made a short scientific cruise into the Greenland Sea in 1893."},
+      {"name": "Aurelia voyage", "type": "event", "description": "The 1893 scientific cruise of the Aurelia from the far north of Norway into the Greenland Sea."},
+      {"name": "Bergen Museum", "type": "organisation", "description": "The museum that paid for the voyage to gather specimens and soundings."}
+    ],
+    "relations": [
+      {"source": "Bergen Museum", "target": "Aurelia voyage", "description": "paid for the voyage, wanting specimens and soundings"},
+      {"source": "Aurelia", "target": "Aurelia voyage", "description": "the ship that made the voyage"}
+    ]
+  },
+  "docs/voyage.md::Departure": {
+    "entities": [
+      {"name": "Aurelia", "type": "system", "description": "A schooner that made a short scientific cruise into the Greenland Sea in 1893."},
+      {"name": "Tromsø", "type": "place", "description": "The Norwegian port the Aurelia sailed from and returned to."},
+      {"name": "Ingrid Halvorsen", "type": "person", "description": "Captain of the Aurelia, who had run sealing trips out of Tromsø for nearly a decade."},
+      {"name": "Tomas Berg", "type": "person", "description": "The naturalist on board the Aurelia, a curator from the Bergen Museum."},
+      {"name": "Bergen Museum", "type": "organisation", "description": "The museum that paid for the voyage to gather specimens and soundings."}
+    ],
+    "relations": [
+      {"source": "Aurelia", "target": "Tromsø", "description": "sailed from Tromsø on 2 August with a crew of eleven"},
+      {"source": "Ingrid Halvorsen", "target": "Aurelia", "description": "captain of the Aurelia"},
+      {"source": "Tomas Berg", "target": "Aurelia", "description": "naturalist on board"},
+      {"source": "Tomas Berg", "target": "Bergen Museum", "description": "a curator from the Bergen Museum"}
+    ]
+  },
+  "docs/voyage.md::The storm": {
+    "entities": [
+      {"name": "Storm of 14 August", "type": "event", "description": "A north-easterly gale that drove the Aurelia forty miles off course and tore her mainsail."},
+      {"name": "Aurelia", "type": "system", "description": "A schooner that made a short scientific cruise into the Greenland Sea in 1893."},
+      {"name": "Ingrid Halvorsen", "type": "person", "description": "Captain of the Aurelia, who had run sealing trips out of Tromsø for nearly a decade."},
+      {"name": "Tomas Berg", "type": "person", "description": "The naturalist on board the Aurelia, a curator from the Bergen Museum."}
+    ],
+    "relations": [
+      {"source": "Storm of 14 August", "target": "Aurelia", "description": "carried away the port boat and drove the ship forty miles off course"},
+      {"source": "Ingrid Halvorsen", "target": "Storm of 14 August", "description": "stood at the wheel through the night and called it the worst blow of her career"},
+      {"source": "Tomas Berg", "target": "Storm of 14 August", "description": "lost two specimen cases over the side in the storm"}
+    ]
+  },
+  "docs/voyage.md::Kolbeinsey": {
+    "entities": [
+      {"name": "Kolbeinsey", "type": "place", "description": "A low basalt islet north of Iceland with no soil or fresh water, only lichen and birds."},
+      {"name": "Iceland", "type": "place", "description": "The island Kolbeinsey lies north of."},
+      {"name": "Tomas Berg", "type": "person", "description": "The naturalist on board the Aurelia, a curator from the Bergen Museum."},
+      {"name": "Aurelia", "type": "system", "description": "A schooner that made a short scientific cruise into the Greenland Sea in 1893."}
+    ],
+    "relations": [
+      {"source": "Kolbeinsey", "target": "Iceland", "description": "a low rock north of Iceland"},
+      {"source": "Tomas Berg", "target": "Kolbeinsey", "description": "spent six hours ashore collecting lichens, kittiwake eggs and crustaceans, and paced out the islet"},
+      {"source": "Aurelia", "target": "Kolbeinsey", "description": "anchored in its lee to repair the sail"}
+    ]
+  },
+  "docs/voyage.md::The report": {
+    "entities": [
+      {"name": "Aurelia report", "type": "document", "description": "Tomas Berg's write-up of the cruise, delivered to the Bergen Museum in the spring of 1894."},
+      {"name": "Tomas Berg", "type": "person", "description": "The naturalist on board the Aurelia, a curator from the Bergen Museum."},
+      {"name": "Bergen Museum", "type": "organisation", "description": "The museum that paid for the voyage to gather specimens and soundings."},
+      {"name": "Kolbeinsey", "type": "place", "description": "A low basalt islet north of Iceland with no soil or fresh water, only lichen and birds."},
+      {"name": "Ingrid Halvorsen", "type": "person", "description": "Captain of the Aurelia, who had run sealing trips out of Tromsø for nearly a decade."}
+    ],
+    "relations": [
+      {"source": "Tomas Berg", "target": "Aurelia report", "description": "wrote up the cruise over the winter"},
+      {"source": "Aurelia report", "target": "Bergen Museum", "description": "delivered to the Museum, which printed it in its yearbook"},
+      {"source": "Aurelia report", "target": "Kolbeinsey", "description": "describes the shrinking of the islet"},
+      {"source": "Aurelia report", "target": "Ingrid Halvorsen", "description": "credits the captain with bringing the ship home through the storm"}
+    ]
+  },
+  "docs/handbook.md::Northwind handbook": {
+    "entities": [
+      {"name": "Northwind", "type": "organisation", "description": "The company the handbook describes."},
+      {"name": "Northwind handbook", "type": "document", "description": "Explains the four processes every new colleague at Northwind meets."},
+      {"name": "People team", "type": "organisation", "description": "The team that owns onboarding paperwork and changes the handbook."}
+    ],
+    "relations": [
+      {"source": "Northwind handbook", "target": "Northwind", "description": "explains how work gets done at Northwind"},
+      {"source": "People team", "target": "Northwind handbook", "description": "changes the handbook when it disagrees with practice"}
+    ]
+  },
+  "docs/handbook.md::Onboarding": {
+    "entities": [
+      {"name": "Onboarding", "type": "concept", "description": "A new colleague's first days and weeks at Northwind."},
+      {"name": "People team", "type": "organisation", "description": "The team that owns onboarding paperwork and changes the handbook."},
+      {"name": "IT desk", "type": "organisation", "description": "Prepares laptops and creates Okta accounts for new colleagues."},
+      {"name": "Okta", "type": "system", "description": "The single sign-on system that opens every other tool."},
+      {"name": "Buddy", "type": "concept", "description": "An experienced colleague from a neighbouring team, not the manager, assigned to each newcomer."}
+    ],
+    "relations": [
+      {"source": "People team", "target": "Onboarding", "description": "sends the contract, payroll forms and the first week's schedule"},
+      {"source": "IT desk", "target": "Okta", "description": "creates the new colleague's account and helps activate it on the first morning"},
+      {"source": "Buddy", "target": "Onboarding", "description": "has lunch in the first week and checks in weekly for two months"}
+    ]
+  },
+  "docs/handbook.md::Expense process": {
+    "entities": [
+      {"name": "Expense process", "type": "concept", "description": "How money spent on work is paid back to a colleague."},
+      {"name": "Expensify", "type": "system", "description": "Where expenses are submitted with a receipt photo and a reason."},
+      {"name": "Manager", "type": "person", "description": "Approves or rejects each expense claim."},
+      {"name": "Finance", "type": "organisation", "description": "Reviews approved claims within 5 days and pays them with the next salary."}
+    ],
+    "relations": [
+      {"source": "Expense process", "target": "Expensify", "description": "claims are submitted in Expensify within a month of paying"},
+      {"source": "Manager", "target": "Expense process", "description": "approves or rejects the claim, usually within a couple of days"},
+      {"source": "Finance", "target": "Expense process", "description": "reviews approved claims within 5 days"}
+    ]
+  },
+  "docs/handbook.md::Incident process": {
+    "entities": [
+      {"name": "Incident process", "type": "concept", "description": "How Northwind responds when a customer-facing system breaks."},
+      {"name": "On-call engineer", "type": "person", "description": "Is paged when a system breaks and leads the response until it is resolved or handed over."},
+      {"name": "PagerDuty", "type": "system", "description": "Pages the on-call engineer."},
+      {"name": "Incident channel", "type": "system", "description": "Where everyone working an incident talks, so the timeline stays in one place."},
+      {"name": "Post-mortem", "type": "document", "description": "A blameless write-up of an incident, due within 3 days of resolution."}
+    ],
+    "relations": [
+      {"source": "PagerDuty", "target": "On-call engineer", "description": "pages the on-call engineer when a customer-facing system breaks"},
+      {"source": "On-call engineer", "target": "Incident channel", "description": "opens a thread and posts what they know"},
+      {"source": "On-call engineer", "target": "Post-mortem", "description": "whoever led the response writes it within 3 days"}
+    ]
+  },
+  "docs/handbook.md::Release process": {
+    "entities": [
+      {"name": "Release process", "type": "concept", "description": "How a release goes from branch to production."},
+      {"name": "Release captain", "type": "person", "description": "An engineer chosen in turn who runs a release from branch cut to production."},
+      {"name": "Staging", "type": "system", "description": "Where the release branch is deployed and checked before production."},
+      {"name": "Changelog", "type": "document", "description": "Lists every change in a release with a link to its pull request."}
+    ],
+    "relations": [
+      {"source": "Release captain", "target": "Release process", "description": "decides when the branch is cut and promotes the build to production"},
+      {"source": "Release captain", "target": "Staging", "description": "deploys the release branch to staging and runs the checks"},
+      {"source": "Release captain", "target": "Changelog", "description": "writes the changelog once staging looks healthy"}
+    ]
+  }
+}

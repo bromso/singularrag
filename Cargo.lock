@@ -1435,6 +1435,7 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -1811,13 +1812,16 @@ dependencies = [
  "globset",
  "ignore",
  "regex",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sqlite-vec",
  "tempfile",
  "thiserror",
  "toml",
  "toml_edit",
+ "tracing",
  "tree-sitter",
  "tree-sitter-css",
  "tree-sitter-html",
@@ -1851,6 +1855,15 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sqlite-vec"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec77b84fb8dd5f0f8def127226db83b5d1152c5bf367f09af03998b76ba554a"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

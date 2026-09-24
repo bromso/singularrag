@@ -15,4 +15,9 @@ describe("summaryLabel", () => {
     expect(summaryLabel(1, null, 0)).toBe("Map of 1 file. No retrieval selected. 0 boundaries.");
     expect(summaryLabel(1, { id: 1, served: 1, cut: 0 }, 0)).toBe("Map of 1 file. Retrieval 1: 1 served, 0 cut, 0 untouched. 0 boundaries.");
   });
+  test("an entity count joins the file count", () => {
+    expect(summaryLabel(1, null, 0, 2)).toBe("Map of 1 file and 2 entities. No retrieval selected. 0 boundaries.");
+    expect(summaryLabel(3, null, 0, 1)).toBe("Map of 3 files and 1 entity. No retrieval selected. 0 boundaries.");
+    expect(summaryLabel(3, null, 0, 0)).toBe("Map of 3 files and 0 entities. No retrieval selected. 0 boundaries.");
+  });
 });

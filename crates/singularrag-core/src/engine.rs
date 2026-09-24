@@ -8,7 +8,9 @@ use rusqlite::params;
 
 use crate::config::MapConfig;
 use crate::index::{IndexStats, Indexer};
-use crate::map::{self, CUT_RECORDED};
+use crate::knowledge::{self, KnowledgeTick};
+use crate::map::{self, Extras, CUT_RECORDED};
+use crate::models::Models;
 use crate::rank::{rank_symbols, ScoredSymbol};
 use crate::store::{lock, Store};
 use crate::time::now_ms;
@@ -40,13 +42,27 @@ pub struct Engine {
     heartbeats: std::cell::Cell<usize>,
     last_heartbeat_ms: std::cell::Cell<i64>,
     refresh_budget: Duration,
+    /// The workspace's `[models]`, with `set_models_url` applied.
+    models_cfg: crate::models::ModelsConfig,
+    /// Built on first use: a `reqwest::blocking::Client` owns a runtime that must not be
+    /// dropped inside an async context, and most Engines never talk to a model.
+    /// `None` inside when the config names no Ollama URL.
+    models: std::cell::OnceCell<Option<Models>>,
+    models_enabled: bool,
 }
+
+/// The background knowledge tick's time budget per call.
+pub const KNOWLEDGE_TICK_BUDGET: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 pub struct MapRequest {
     pub query: Option<String>,
     pub focus_files: Vec<String>,
     pub budget_tokens: usize,
+    /// Entity names the caller already knows matter (knowledge spec §4).
+    pub entities: Vec<String>,
+    /// Themes as short phrases, matched against relation vectors.
+    pub themes: Vec<String>,
 }
 
 impl Default for MapRequest {
@@ -57,6 +73,8 @@ impl Default for MapRequest {
             query: None,
             focus_files: Vec::new(),
             budget_tokens: map::DEFAULT_BUDGET,
+            entities: Vec::new(),
+            themes: Vec::new(),
         }
     }
 }
@@ -145,6 +163,29 @@ pub struct ChangedResponse {
     pub lock_timeout: bool,
 }
 
+/// `entities` tool: default and maximum number of entities answered.
+pub const ENTITIES_LIMIT_DEFAULT: usize = 10;
+pub const ENTITIES_LIMIT_MAX: usize = 25;
+
+#[derive(Debug, Clone)]
+pub struct EntitiesRequest {
+    /// A name or a question.
+    pub query: String,
+    /// Names the caller already knows, matched exactly (after `norm_name`).
+    pub entities: Vec<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntitiesResponse {
+    pub retrieval_id: i64,
+    pub text: String,
+    /// Entities answered.
+    pub entities: usize,
+    pub stale_count: usize,
+    pub lock_timeout: bool,
+}
+
 impl Engine {
     pub fn open(dir: &Path, session_key: &str) -> Result<Engine> {
         let ws = Workspace::open(dir)?;
@@ -153,6 +194,7 @@ impl Engine {
         let config = MapConfig::load(&root)?;
         config.check_roots(&ws.names())?;
         let config_mtime = map_toml_mtime(&root);
+        let models_cfg = ws.models.clone();
         Ok(Engine {
             root,
             ws,
@@ -164,6 +206,65 @@ impl Engine {
             heartbeats: std::cell::Cell::new(0),
             last_heartbeat_ms: std::cell::Cell::new(0),
             refresh_budget: REFRESH_BUDGET,
+            models_cfg,
+            models: std::cell::OnceCell::new(),
+            models_enabled: true,
+        })
+    }
+
+    /// The model client, or `None` when models are disabled or unconfigured.
+    pub fn models(&self) -> Option<&Models> {
+        if !self.models_enabled {
+            return None;
+        }
+        self.models
+            .get_or_init(|| models_for(&self.models_cfg))
+            .as_ref()
+    }
+
+    pub fn set_models_enabled(&mut self, enabled: bool) {
+        self.models_enabled = enabled;
+    }
+
+    /// Point the model client at `url` (tests, and callers that override the workspace).
+    pub fn set_models_url(&mut self, url: &str) {
+        self.models_cfg.ollama = url.to_string();
+        self.models = std::cell::OnceCell::new();
+    }
+
+    /// One background knowledge step under `KNOWLEDGE_TICK_BUDGET`, ending early when
+    /// `should_yield` says a job is waiting. Without models it reports the pending count
+    /// and does nothing else.
+    pub fn knowledge_tick(&mut self, should_yield: &dyn Fn() -> bool) -> Result<KnowledgeTick> {
+        match self.models() {
+            Some(m) => knowledge::tick(&self.store, m, KNOWLEDGE_TICK_BUDGET, should_yield),
+            None => Ok(KnowledgeTick {
+                pending: knowledge::pending(&self.store)?,
+                ..KnowledgeTick::default()
+            }),
+        }
+    }
+
+    /// The knowledge layer's header segments: pending sections, a recorded model
+    /// outage and an embedding rebuild in progress.
+    ///
+    /// An outage only matters while something waits for the models: with nothing
+    /// pending no tick will run to clear `models_error`, so it is cleared here.
+    pub fn extras(&self) -> Result<Extras> {
+        let pending = knowledge::pending(&self.store)?;
+        let outage = self
+            .store
+            .get_meta("models_error")?
+            .is_some_and(|e| !e.is_empty());
+        if outage && pending == 0 {
+            self.store
+                .conn()
+                .execute("DELETE FROM meta WHERE key = 'models_error'", [])?;
+        }
+        Ok(Extras {
+            pending,
+            models_unavailable: outage && pending > 0,
+            rebuilding: self.store.get_meta("embeddings_rebuilding")?.as_deref() == Some("1"),
         })
     }
 
@@ -272,11 +373,25 @@ impl Engine {
     pub fn repo_map(&mut self, req: &MapRequest) -> Result<MapResponse> {
         let stats = self.refresh(self.refresh_budget)?;
         let budget = map::clamp_budget(req.budget_tokens);
+        // With no vectors yet no seed needs a model, so the client is not even built.
+        let models = if crate::store::vec::dim(&self.store)?.is_some() {
+            self.models()
+        } else {
+            None
+        };
+        let seeds = knowledge::seeds_for(
+            &self.store,
+            models,
+            req.query.as_deref(),
+            &req.entities,
+            &req.themes,
+        )?;
         let ranked = rank_symbols(
             &self.store,
             &self.config,
             req.query.as_deref(),
             &req.focus_files,
+            &seeds,
         )?;
         let served = map::fit(&ranked, budget, &self.config.note);
         // The budget is soft (the footer says so): a note-heavy top file at a tiny
@@ -298,9 +413,19 @@ impl Engine {
             &ranked,
             served,
         )?;
+        // A seed embedding that failed is this response's outage; `meta` stays the
+        // tick's to write.
+        let mut extras = self.extras()?;
+        extras.models_unavailable |= seeds.models_unavailable;
         let text = format!(
             "{}\n{}{}\n",
-            map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+            map::header(
+                &version,
+                head.as_deref(),
+                stats.remaining,
+                &extras,
+                retrieval_id,
+            ),
             body,
             map::footer(served, ranked.len(), cut_recorded)
         );
@@ -369,13 +494,103 @@ impl Engine {
         )?;
         let text = format!(
             "{}\n{}",
-            map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+            map::header(
+                &version,
+                head.as_deref(),
+                stats.remaining,
+                &self.extras()?,
+                retrieval_id,
+            ),
             crate::find::render_find(hits, &self.config.note)
         );
         Ok(FindResponse {
             retrieval_id,
             text,
             hits: served,
+            stale_count: stats.remaining,
+            lock_timeout: stats.lock_timeout,
+        })
+    }
+
+    /// What the corpus knows about the entities a query names or is near. Recorded as
+    /// tool `entities` with `limit_n`; the served items are the cited sections in
+    /// first-seen order, scored 1, 1/2, 1/3 … with the entities citing each as reasons.
+    pub fn entities(&mut self, req: &EntitiesRequest) -> Result<EntitiesResponse> {
+        let stats = self.refresh(self.refresh_budget)?;
+        let limit = req.limit.clamp(1, ENTITIES_LIMIT_MAX);
+        // With no vectors yet nothing can match by vector, so the client is not built.
+        let models = if crate::store::vec::dim(&self.store)?.is_some() {
+            self.models()
+        } else {
+            None
+        };
+        let (hits, models_unavailable) =
+            knowledge::match_entities(&self.store, models, &req.query, &req.entities, limit)?;
+        let mut ranked: Vec<ScoredSymbol> = Vec::new();
+        for h in &hits {
+            let cited = h
+                .sections
+                .iter()
+                .chain(h.relations.iter().map(|r| &r.section));
+            for c in cited {
+                let i = match ranked.iter().position(|s| s.symbol_id == c.symbol_id) {
+                    Some(i) => i,
+                    None => {
+                        ranked.push(ScoredSymbol {
+                            symbol_id: c.symbol_id,
+                            file_id: 0,
+                            path: c.path.clone(),
+                            name: c.name.clone(),
+                            kind: "section".into(),
+                            line_start: c.line_start,
+                            line_end: c.line_end,
+                            signature: String::new(),
+                            score: 1.0 / (ranked.len() as f64 + 1.0),
+                            reasons: crate::rank::Reasons::default(),
+                        });
+                        ranked.len() - 1
+                    }
+                };
+                let reasons = &mut ranked[i].reasons;
+                if !reasons.entities.contains(&h.name) {
+                    reasons.entities.push(h.name.clone());
+                    reasons.seeds.push(format!("entity:{}", h.name));
+                }
+            }
+        }
+        for s in &mut ranked {
+            s.reasons.score = s.score;
+        }
+        let (version, head) = self.index_meta()?;
+        let retrieval_id = self.record_retrieval(
+            "entities",
+            Some(&req.query),
+            &[],
+            None,
+            Some(limit),
+            &version,
+            head.as_deref(),
+            stats.remaining,
+            &ranked,
+            ranked.len(),
+        )?;
+        let mut extras = self.extras()?;
+        extras.models_unavailable |= models_unavailable;
+        let text = format!(
+            "{}\n{}",
+            map::header(
+                &version,
+                head.as_deref(),
+                stats.remaining,
+                &extras,
+                retrieval_id,
+            ),
+            knowledge::render_entities(&hits)
+        );
+        Ok(EntitiesResponse {
+            retrieval_id,
+            text,
+            entities: hits.len(),
             stale_count: stats.remaining,
             lock_timeout: stats.lock_timeout,
         })
@@ -486,7 +701,7 @@ impl Engine {
         Ok(AnnotateResponse {
             text: format!(
                 "{}\n{line}\n",
-                map::freshness_header(&version, head.as_deref(), stats.remaining)
+                map::freshness_line(&version, head.as_deref(), stats.remaining, &self.extras()?,)
             ),
             removed,
             notes_on_file,
@@ -581,7 +796,13 @@ impl Engine {
             retrieval_id,
             text: format!(
                 "{}\n{body}",
-                map::header(&version, head.as_deref(), stats.remaining, retrieval_id)
+                map::header(
+                    &version,
+                    head.as_deref(),
+                    stats.remaining,
+                    &self.extras()?,
+                    retrieval_id,
+                )
             ),
             hops: trace.as_ref().map(|t| t.hops.len()).unwrap_or(0),
             found: trace.is_some(),
@@ -628,7 +849,13 @@ impl Engine {
             retrieval_id,
             text: format!(
                 "{}\n{}",
-                map::header(&version, head.as_deref(), stats.remaining, retrieval_id),
+                map::header(
+                    &version,
+                    head.as_deref(),
+                    stats.remaining,
+                    &self.extras()?,
+                    retrieval_id,
+                ),
                 crate::changed::render_changed(&c)
             ),
             symbols: c.symbols.len(),
@@ -702,6 +929,14 @@ impl Engine {
 /// mtime of the repo's `map.toml`, or `None` when it does not exist (or cannot be
 /// stat'ed). Filesystem mtime granularity bounds this: two writes inside one tick
 /// look identical, as they do to the indexer's own stat walk.
+fn models_for(cfg: &crate::models::ModelsConfig) -> Option<Models> {
+    if cfg.ollama.trim().is_empty() {
+        None
+    } else {
+        Some(Models::new(cfg.clone()))
+    }
+}
+
 fn map_toml_mtime(root: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(root.join(crate::config::MAP_FILE))
         .and_then(|m| m.modified())
@@ -726,6 +961,81 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_outage_flag_clears_when_nothing_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.refresh(Duration::from_secs(60)).unwrap();
+        e.store()
+            .set_meta("models_error", "connection refused")
+            .unwrap();
+        assert!(e.extras().unwrap().models_unavailable);
+        e.store()
+            .conn()
+            .execute("DELETE FROM extract_queue", [])
+            .unwrap();
+        let r = e.repo_map(&MapRequest::default()).unwrap();
+        let first = r.text.lines().next().unwrap();
+        assert!(!first.contains("models: unavailable"), "{first}");
+        assert_eq!(e.store().get_meta("models_error").unwrap(), None);
+    }
+
+    #[test]
+    fn entity_seeds_reach_the_map_and_a_seed_outage_marks_only_that_header() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let f = crate::fake_ollama::FakeOllama::spawn(32);
+        f.set_extraction("Storage", serde_json::json!({"entities": [{"name": "SessionStore", "type": "system", "description": "keeps sessions"}], "relations": []}));
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.set_models_url(&f.url());
+        e.refresh(Duration::from_secs(60)).unwrap();
+        while knowledge::pending(e.store()).unwrap() > 0 {
+            e.knowledge_tick(&|| false).unwrap();
+        }
+        let r = e
+            .repo_map(&MapRequest {
+                entities: vec!["SessionStore".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(r.text.contains("docs/design.md:"), "{}", r.text);
+        assert!(r.text.contains("## Storage"), "{}", r.text);
+        let reasons: String = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT reasons_json FROM retrieval_items WHERE retrieval_id = ?1 AND name = 'Storage'",
+                [r.retrieval_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            reasons.contains(r#""entities":["SessionStore"]"#),
+            "{reasons}"
+        );
+
+        f.set_down(true);
+        let down = e
+            .repo_map(&MapRequest {
+                query: Some("session storage".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let first = down.text.lines().next().unwrap();
+        assert!(first.contains("models: unavailable"), "{first}");
+        assert!(
+            down.served > 0 && down.text.contains("docs/design.md:"),
+            "{}",
+            down.text
+        );
+        assert_eq!(
+            e.store().get_meta("models_error").unwrap(),
+            None,
+            "repo_map does not write the outage to meta"
+        );
+    }
+
+    #[test]
     fn repo_map_indexes_renders_and_records_provenance() {
         let (_dir, mut e) = engine();
         let resp = e
@@ -733,6 +1043,7 @@ mod tests {
                 query: Some("session".into()),
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         assert!(
@@ -816,6 +1127,7 @@ mod tests {
                 query: Some("session".into()),
                 focus_files: vec![],
                 budget_tokens: 64,
+                ..Default::default()
             })
             .unwrap();
         assert!(resp.served >= 1, "{}", resp.text);
@@ -842,6 +1154,7 @@ mod tests {
                 query: Some("log".into()),
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         let item = |e: &Engine| -> (i64, String, String, i64) {
@@ -902,6 +1215,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         for line in resp.text.lines().filter(|l| l.starts_with(' ')) {
@@ -927,6 +1241,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 64,
+                ..Default::default()
             })
             .unwrap();
         assert!(resp.served < resp.total);
@@ -958,6 +1273,7 @@ mod tests {
                 query: Some("createSession".into()),
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         assert!(
@@ -987,6 +1303,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         assert!(before.text.contains("src/util/log.ts:"));
@@ -1001,6 +1318,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         assert!(!after.text.contains("src/util/log.ts:"), "{}", after.text);
@@ -1013,6 +1331,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 4096,
+                ..Default::default()
             })
             .unwrap();
         assert!(back.text.contains("src/util/log.ts:"));
@@ -1035,6 +1354,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         assert!(started.elapsed() >= Duration::from_millis(LOCK_WAIT_MS));
@@ -1116,6 +1436,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         assert!(first.stale_count > 0, "{first:?}");
@@ -1126,6 +1447,7 @@ mod tests {
                 query: None,
                 focus_files: vec![],
                 budget_tokens: 1024,
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(second.stale_count, 0);
@@ -1409,6 +1731,77 @@ mod tests {
             })
             .unwrap();
         assert!(t.text.contains("# 1 hop"), "{}", t.text);
+    }
+
+    #[test]
+    fn entities_records_a_retrieval_serving_the_cited_sections_and_clamps_the_limit() {
+        let (dir, store, f, _m) = crate::rank::tests::knowledge_ready();
+        drop(store);
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.set_models_url(&f.url());
+        let r = e
+            .entities(&EntitiesRequest {
+                query: "stale header".into(),
+                entities: vec![],
+                limit: 10,
+            })
+            .unwrap();
+        assert!(r.text.starts_with("# singularrag · index "), "{}", r.text);
+        assert!(
+            r.text
+                .contains("\nSTALE header (concept): the header when files changed\n"),
+            "{}",
+            r.text
+        );
+        assert!(r.entities >= 1);
+        let (tool, query, limit_n): (String, String, i64) = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT tool, query, limit_n FROM retrievals WHERE id = ?1",
+                [r.retrieval_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (tool.as_str(), query.as_str(), limit_n),
+            ("entities", "stale header", 10)
+        );
+        let (path, name, served, reasons): (String, String, bool, String) = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT path, name, served, reasons_json FROM retrieval_items WHERE retrieval_id = ?1 AND rank = 1",
+                [r.retrieval_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(format!("{path}::{name}"), "docs/design.md::Freshness");
+        assert!(served);
+        assert!(
+            reasons.contains(r#""entities":["STALE header"]"#)
+                && reasons.contains("entity:STALE header"),
+            "{reasons}"
+        );
+
+        let r = e
+            .entities(&EntitiesRequest {
+                query: "stale header".into(),
+                entities: vec![],
+                limit: 100,
+            })
+            .unwrap();
+        let limit_n: i64 = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT limit_n FROM retrievals WHERE id = ?1",
+                [r.retrieval_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(limit_n as usize, ENTITIES_LIMIT_MAX);
+        assert_eq!(ENTITIES_LIMIT_MAX, 25);
     }
 
     #[test]

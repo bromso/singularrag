@@ -1,4 +1,4 @@
-//! The rmcp handler: five tools, server info, and the session key from clientInfo.
+//! The rmcp handler: six tools, server info, and the session key from clientInfo.
 //! All engine work goes through the actor; handlers only await a reply.
 
 use std::sync::{Arc, Mutex};
@@ -12,19 +12,20 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
 use singularrag_core::engine::{
-    AnnotateRequest, ChangedRequest, FindRequest, MapRequest, TraceRequest,
+    AnnotateRequest, ChangedRequest, EntitiesRequest, FindRequest, MapRequest, TraceRequest,
+    ENTITIES_LIMIT_DEFAULT,
 };
 
 use crate::actor::EngineHandle;
 
-pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this workspace: code symbols and document sections (specs, notes, READMEs, config keys) together. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show, and read the section the map points at rather than the whole file. Use find_symbol to locate a name or a heading, trace_path to see how two symbols connect (a note that mentions a symbol counts), and changed to see what a diff touches and who references it. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background.";
+pub const INSTRUCTIONS: &str = "singularrag gives you a ranked map of this workspace: code symbols and document sections (specs, notes, READMEs, config keys) together. Call repo_map first with your task as the query and answer from it; read only to confirm a detail the map does not show, and read the section the map points at rather than the whole file. Use find_symbol to locate a name or a heading, trace_path to see how two symbols connect (a note that mentions a symbol counts), and changed to see what a diff touches and who references it. Use entities to learn what the corpus says about a person, system or concept and how it connects; prose queries to repo_map work in plain language. When you learn something about a file that its signatures do not say, record it with annotate so the next session starts from it. Only annotate writes, and only a note into .singularrag/map.toml. A STALE header means files changed since indexing; the index catches up in the background. Entity descriptions are extracted text, not verified facts.";
 
 // Only read by the unit test below, which asserts the router's reported description
 // equals these constants (see the note on the `#[tool_router]` impl block); the macro
 // itself needs a string literal, not a path to these, so they're otherwise unused outside
 // `#[cfg(test)]`.
 #[allow(dead_code)]
-pub const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment.";
+pub const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment. `entities` and `themes` are optional: entity names you already know matter; themes as short phrases.";
 
 #[allow(dead_code)]
 pub const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module, section, document, element, rule, key. `limit` defaults to 10, max 50.";
@@ -34,6 +35,9 @@ pub const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or 
 
 #[allow(dead_code)]
 pub const TRACE_PATH_DESCRIPTION: &str = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files.";
+
+#[allow(dead_code)]
+pub const ENTITIES_DESCRIPTION: &str = "What the corpus knows about a person, system, concept or event, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something.";
 
 #[allow(dead_code)]
 pub const CHANGED_DESCRIPTION: &str = "What a change touches: the symbols whose lines a diff modifies and the files that reference each. `base` is a git ref; omitted means the working tree against HEAD. Use it before editing to see the blast radius and after editing to check it.";
@@ -63,6 +67,10 @@ pub struct MapArgs {
     pub focus_files: Option<Vec<String>>,
     /// Soft token budget for the map. Default 1024, max 8192.
     pub budget_tokens: Option<u32>,
+    /// Entity names you already know matter; they seed the sections that mention them.
+    pub entities: Option<Vec<String>>,
+    /// Themes as short phrases; they seed the sections stating the nearest relations.
+    pub themes: Option<Vec<String>>,
 }
 
 impl From<MapArgs> for MapRequest {
@@ -72,6 +80,8 @@ impl From<MapArgs> for MapRequest {
             query: a.query,
             focus_files: a.focus_files.unwrap_or_default(),
             budget_tokens: a.budget_tokens.map_or(d.budget_tokens, |b| b as usize),
+            entities: a.entities.unwrap_or_default(),
+            themes: a.themes.unwrap_or_default(),
         }
     }
 }
@@ -130,6 +140,26 @@ pub struct ChangedArgs {
     pub base: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EntitiesArgs {
+    /// A name or a question.
+    pub query: String,
+    /// Entity names you already know.
+    pub entities: Option<Vec<String>>,
+    /// Max entities. Default 10, max 25.
+    pub limit: Option<usize>,
+}
+
+impl From<EntitiesArgs> for EntitiesRequest {
+    fn from(a: EntitiesArgs) -> Self {
+        EntitiesRequest {
+            query: a.query,
+            entities: a.entities.unwrap_or_default(),
+            limit: a.limit.unwrap_or(ENTITIES_LIMIT_DEFAULT),
+        }
+    }
+}
+
 fn split_symbol(s: &str) -> Result<(String, String), String> {
     s.split_once("::")
         .filter(|(p, n)| !p.is_empty() && !n.is_empty())
@@ -169,7 +199,7 @@ impl SingularragServer {
     // literal and the constant fails the test.
     #[tool(
         name = "repo_map",
-        description = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment."
+        description = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment. `entities` and `themes` are optional: entity names you already know matter; themes as short phrases."
     )]
     async fn repo_map(
         &self,
@@ -237,6 +267,17 @@ impl SingularragServer {
                 .map(|r| r.text),
         )
     }
+
+    #[tool(
+        name = "entities",
+        description = "What the corpus knows about a person, system, concept or event, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something."
+    )]
+    async fn entities(
+        &self,
+        Parameters(args): Parameters<EntitiesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        text_result(self.handle.entities(args.into()).await.map(|r| r.text))
+    }
 }
 
 #[tool_handler(router = self.tool_router.clone())]
@@ -279,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_list_is_exactly_the_five_spec_tools() {
+    fn tool_list_is_exactly_the_six_spec_tools() {
         let router = SingularragServer::tool_router();
         let mut names: Vec<String> = router
             .list_all()
@@ -292,6 +333,7 @@ mod tests {
             vec![
                 "annotate",
                 "changed",
+                "entities",
                 "find_symbol",
                 "repo_map",
                 "trace_path"
@@ -308,6 +350,16 @@ mod tests {
         assert_eq!(trace.description.as_deref(), Some(TRACE_PATH_DESCRIPTION));
         let changed = tools.iter().find(|t| t.name == "changed").unwrap();
         assert_eq!(changed.description.as_deref(), Some(CHANGED_DESCRIPTION));
+        let ent = tools.iter().find(|t| t.name == "entities").unwrap();
+        assert_eq!(ent.description.as_deref(), Some(ENTITIES_DESCRIPTION));
+        let schema = serde_json::to_value(&ent.input_schema).unwrap();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("query")
+                && props.contains_key("entities")
+                && props.contains_key("limit")
+        );
+        assert_eq!(schema["required"], serde_json::json!(["query"]));
         let schema = serde_json::to_value(&ann.input_schema).unwrap();
         let props = schema["properties"].as_object().unwrap();
         assert!(
@@ -354,16 +406,23 @@ mod tests {
             query: None,
             focus_files: None,
             budget_tokens: None,
+            entities: None,
+            themes: None,
         }
         .into();
         assert_eq!(m.budget_tokens, singularrag_core::map::DEFAULT_BUDGET);
         assert!(m.focus_files.is_empty());
+        assert!(m.entities.is_empty() && m.themes.is_empty());
         let m: MapRequest = MapArgs {
             query: Some("x".into()),
             focus_files: Some(vec!["a.ts".into()]),
             budget_tokens: Some(99_999),
+            entities: Some(vec!["SessionStore".into()]),
+            themes: Some(vec!["refresh first".into()]),
         }
         .into();
+        assert_eq!(m.entities, vec!["SessionStore".to_string()]);
+        assert_eq!(m.themes, vec!["refresh first".to_string()]);
         assert_eq!(
             m.budget_tokens, 99_999,
             "clamping is the engine's job, not the server's"
@@ -375,5 +434,13 @@ mod tests {
         }
         .into();
         assert_eq!(f.limit, 10);
+        let e: EntitiesRequest = EntitiesArgs {
+            query: "q".into(),
+            entities: None,
+            limit: None,
+        }
+        .into();
+        assert_eq!(e.limit, ENTITIES_LIMIT_DEFAULT);
+        assert!(e.entities.is_empty());
     }
 }

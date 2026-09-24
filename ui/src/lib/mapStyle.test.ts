@@ -3,7 +3,7 @@ import { edgeStyle, nodeSize, nodeStyle, readPalette, type EdgeCtx, type NodeCtx
 
 const SIGMA_COLOR = /^#[0-9a-fA-F]{6}$|^rgba?\(/;
 
-const pal: Palette = { served: "#0a0", cut: "#a60", untouched: "#888", focus: "#00f", edge: "#666", edgeDim: "#ddd", label: "#000", background: "#fff", docs: "#70c", config: "#0aa", styles: "#c07" };
+const pal: Palette = { served: "#0a0", cut: "#a60", untouched: "#888", focus: "#00f", edge: "#666", edgeDim: "#ddd", label: "#000", background: "#fff", docs: "#70c", config: "#0aa", styles: "#c07", entityPerson: "#a00001", entityOrganisation: "#a00002", entitySystem: "#a00003", entityConcept: "#a00004", entityEvent: "#a00005", entityPlace: "#a00006", entityDocument: "#a00007" };
 const base: NodeCtx = { status: null, focused: false, blastDepth: null, blastActive: false, symbols: 4, hovered: false, zoomRatio: 1, group: "code" };
 
 describe("nodeStyle", () => {
@@ -55,6 +55,28 @@ describe("nodeStyle", () => {
   });
 });
 
+describe("entity nodes", () => {
+  test("an entity is a circle coloured by its type, labelled with its name", () => {
+    const s = nodeStyle("Ada", { ...base, entityType: "person", mentions: 1 }, pal);
+    expect(s).toMatchObject({ type: "circle", color: pal.entityPerson, label: "Ada" });
+    const types = ["person", "organisation", "system", "concept", "event", "place", "document"] as const;
+    const keys = ["entityPerson", "entityOrganisation", "entitySystem", "entityConcept", "entityEvent", "entityPlace", "entityDocument"] as const;
+    types.forEach((t, i) => expect(nodeStyle("X", { ...base, entityType: t, mentions: 1 }, pal).color).toBe(pal[keys[i]]));
+  });
+  test("size grows with mentions and caps at 14", () => {
+    const one = nodeStyle("Ada", { ...base, entityType: "person", mentions: 1 }, pal).size;
+    const nine = nodeStyle("Ada", { ...base, entityType: "person", mentions: 9 }, pal).size;
+    expect(one).toBeCloseTo(6);
+    expect(nine).toBeCloseTo(10);
+    expect(nodeStyle("Ada", { ...base, entityType: "person", mentions: 400 }, pal).size).toBe(14);
+  });
+  test("the label shows even when a retrieval leaves files untouched, and focus rings it", () => {
+    expect(nodeStyle("Ada", { ...base, status: "untouched", entityType: "concept", mentions: 2 }, pal).label).toBe("Ada");
+    const f = nodeStyle("Ada", { ...base, entityType: "concept", mentions: 2, focused: true }, pal);
+    expect(f).toMatchObject({ type: "border", borderColor: pal.focus, label: "Ada" });
+  });
+});
+
 describe("edgeStyle", () => {
   test("edges of the focused file are full, others dim; blast mode hides edges outside the radius", () => {
     expect(edgeStyle({ touchesFocused: true, blastActive: false, touchesBlast: false }, pal)).toMatchObject({ color: pal.edge, hidden: false });
@@ -75,7 +97,7 @@ describe("readPalette", () => {
 
 describe("sigma-parsable colours", () => {
   test("every colour the reducers emit is sigma-parsable", () => {
-    const pal6: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff", docs: "#7c3aed", config: "#0e7490", styles: "#be185d" };
+    const pal6: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff", docs: "#7c3aed", config: "#0e7490", styles: "#be185d", entityPerson: "#a00001", entityOrganisation: "#a00002", entitySystem: "#a00003", entityConcept: "#a00004", entityEvent: "#a00005", entityPlace: "#a00006", entityDocument: "#a00007" };
     const statuses: (NodeCtx["status"])[] = [null, "served", "cut", "untouched"];
     const bools = [false, true];
     const collected: string[] = [];

@@ -1,5 +1,6 @@
 pub mod lock;
 pub mod schema;
+pub mod vec;
 
 use std::path::Path;
 
@@ -16,6 +17,7 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
+        register_vec();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -29,6 +31,7 @@ impl Store {
     }
 
     pub fn open_in_memory() -> Result<Store> {
+        register_vec();
         Self::init(Connection::open_in_memory()?)
     }
 
@@ -45,6 +48,7 @@ impl Store {
     /// race a rebuild.
     pub fn open_read_only(path: &Path) -> Result<Store> {
         use rusqlite::OpenFlags;
+        register_vec();
         if !path.exists() {
             return Err(crate::Error::Config(format!(
                 "no index at {}; run `singularrag index`",
@@ -112,6 +116,26 @@ impl Store {
     }
 }
 
+/// Registers sqlite-vec as an auto extension, once per process, before any connection opens.
+#[allow(unsafe_code)] // the one exception to the crate-wide `deny(unsafe_code)`
+fn register_vec() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: `sqlite3_vec_init` is sqlite-vec's C entry point with the standard extension
+    // signature; `sqlite3_auto_extension` expects exactly that function pointer.
+    ONCE.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::ffi::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> std::ffi::c_int,
+        >(
+            sqlite_vec::sqlite3_vec_init as *const ()
+        )));
+    });
+}
+
 /// The `schema_version` already in the file, or `None` when this is a fresh database.
 fn stored_version(conn: &Connection) -> Result<Option<i64>> {
     let has_meta: bool = conn.query_row(
@@ -172,6 +196,11 @@ mod tests {
             let perm = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(perm, 0o600);
         }
+    }
+
+    #[test]
+    fn schema_version_is_5() {
+        assert_eq!(SCHEMA_VERSION, 5);
     }
 
     #[test]
@@ -269,6 +298,13 @@ mod tests {
             "retrievals",
             "retrieval_items",
             "indexer_lock",
+            "entities",
+            "entity_mentions",
+            "relations",
+            "extract_queue",
+            "section_embeddings",
+            "extraction_cache",
+            "embedding_cache",
         ] {
             let n: i64 = store
                 .conn()

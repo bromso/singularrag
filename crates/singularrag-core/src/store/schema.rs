@@ -1,6 +1,6 @@
 /// Bumped whenever the DDL below changes. The index is derived data: on a mismatch
 /// `Store::init` drops every table and rebuilds from scratch.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -73,5 +73,55 @@ CREATE TABLE IF NOT EXISTS indexer_lock (
   id              INTEGER PRIMARY KEY CHECK (id = 1),
   pid             INTEGER NOT NULL,
   heartbeat_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entities (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL,
+  norm_name   TEXT NOT NULL UNIQUE,
+  type        TEXT NOT NULL,
+  description TEXT NOT NULL,
+  mentions    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS entity_mentions (
+  entity_id    INTEGER NOT NULL,
+  symbol_id    INTEGER NOT NULL,
+  section_hash TEXT,
+  PRIMARY KEY (entity_id, symbol_id)
+);
+CREATE INDEX IF NOT EXISTS entity_mentions_symbol ON entity_mentions(symbol_id);
+CREATE TABLE IF NOT EXISTS relations (
+  id           INTEGER PRIMARY KEY,
+  src_entity   INTEGER NOT NULL,
+  dst_entity   INTEGER NOT NULL,
+  description  TEXT NOT NULL,
+  symbol_id    INTEGER NOT NULL,
+  section_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS relations_symbol ON relations(symbol_id);
+CREATE INDEX IF NOT EXISTS relations_src ON relations(src_entity);
+CREATE INDEX IF NOT EXISTS relations_dst ON relations(dst_entity);
+CREATE TABLE IF NOT EXISTS extract_queue (
+  symbol_id    INTEGER PRIMARY KEY,
+  hash         TEXT NOT NULL,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_error    TEXT,
+  queued_at_ms  INTEGER NOT NULL,
+  -- set while a tick works the row (knowledge::claim_rows); NULL when free
+  claimed_at_ms INTEGER
+);
+CREATE TABLE IF NOT EXISTS section_embeddings (
+  symbol_id INTEGER PRIMARY KEY,
+  hash      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS extraction_cache (
+  hash TEXT PRIMARY KEY,
+  json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS embedding_cache (
+  hash  TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dim   INTEGER NOT NULL,
+  blob  BLOB NOT NULL,
+  PRIMARY KEY (hash, model)
 );
 "#;

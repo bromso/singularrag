@@ -91,7 +91,7 @@ Results land in `eval/runs/<timestamp>-<label>/` with one record and raw stream 
 
 ## What the agent sees
 
-Five tools. `repo_map` returns something like:
+Six tools. `repo_map` returns something like:
 
 ```
 # singularrag · index 7f3a2c · HEAD 9b1e0d4 · fresh · retrieval r_000123
@@ -108,9 +108,13 @@ docs/design.md:
 
 Each file header ends with the files that reference it, strongest first, and a note (yours or the agent's) sits under the header or under its symbol's row, so locate, trace, blast-radius and placement questions can be answered from the map without opening files. `find_symbol` looks a name up and lists which files reference it. Neither tool ever returns function bodies, comments or string literals.
 
+The header line gains up to three more segments when they apply: ` · entities: N pending` while extraction is still catching up on the queue, ` · models: unavailable` while the last call to Ollama failed, and ` · embeddings: rebuilding` right after the embedding model or its dimension changes. None of them is an error: the map still answers, just without the knowledge layer's seeds until Ollama is reachable again.
+
 Documents rank alongside code: a Markdown or HTML heading is a `section` row showing its heading line, a config key is a `key` row showing its type (`scripts.build: string`), and the agent reads the section the map points at rather than the whole file.
 
 `annotate` lets the agent leave a one-paragraph note on a file or symbol; it lands in `map.toml`, shows in the next map with an `(agent)` tag, and the developer can delete it from the page.
+
+`entities` answers what the documents say about a person, system or concept: its type and description, its relations, and the sections that state them (descriptions are extracted by the local model, not verified).
 
 `trace_path` answers how two symbols connect; `changed` lists what your uncommitted (or branch) changes touch and who references each symbol. `singularrag init` installs a Claude Code hook that refuses the first file read of a session until the map has been consulted, once per session.
 
@@ -122,8 +126,10 @@ singularrag query "text"     # print the map the agent would get
 singularrag find NAME        # look a symbol up
 singularrag path FROM TO     # the shortest reference chain between two path::symbol
 singularrag changed          # the symbols a diff touches and who references them (--base REF)
+singularrag entities "text"  # what the documents say about a person, system or concept (--entity NAME, --limit N)
 singularrag init             # install the query-first hook and the MCP entry for this repo
 singularrag eval             # tier-one recall against eval/questions.toml
+singularrag doctor           # check Ollama, the two models and the extraction queue
 singularrag serve            # open the map UI on localhost
 singularrag mcp              # serve over stdio
 ```
@@ -161,6 +167,51 @@ Documents are indexed next to code:
 Every document also gets a `document` symbol named by its file stem, so `[[design]]` and `../specs/design.md` links resolve to it. Section text is searchable; code spans that name one identifier, wiki links and relative links become references; fenced code blocks and front matter do not.
 
 Skipped, with the reason shown in the UI's skipped sheet: documents over 256 KB, lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `bun.lock`, `bun.lockb`, `composer.lock`, `Gemfile.lock`, `poetry.lock`), minified files (average line over 500 characters) and anything that looks like a secret.
+
+## Local models (semantic search and entity extraction)
+
+`entities` and the semantic seed behind `repo_map` need a local [Ollama](https://ollama.com) for embeddings and extraction; nothing else in singularrag talks to a model, and nothing singularrag does downloads one. Install Ollama, then pull the two default models:
+
+```sh
+ollama pull nomic-embed-text
+ollama pull qwen2.5:7b-instruct
+```
+
+With Ollama running, indexing picks the queue up on its own: `serve` and `mcp` embed and extract document sections in the background, a few at a time, under a time budget; a tool call may wait for one in-flight extraction, up to the 30 s model timeout, while the background job is running. `index` never talks to a model, and no one-shot command extracts: `entities` answers from what the background job has already extracted and says on stderr how many sections are still waiting. `query`, `entities` and `eval` embed the query text once (one `/api/embed` call, the query only, never file contents) when the index already holds embeddings from that background job; `eval --no-models` turns that off. Before the index has any embeddings the seed is simply skipped; when Ollama is down the seed is skipped and the header says `models: unavailable`.
+
+Configure it in `.singularrag/workspace.toml`, all optional:
+
+```toml
+[models]
+ollama = "http://127.0.0.1:11434"   # default
+embed = "nomic-embed-text"          # default
+extract = "qwen2.5:7b-instruct"     # default
+```
+
+Extraction through a hosted API is planned; until then any `api` value in `[models]` is refused when the workspace opens.
+
+`SINGULARRAG_OLLAMA_URL` overrides the `ollama` URL from the environment (tests and a non-default Ollama host use this).
+
+`singularrag doctor` checks Ollama, the two models and the extraction queue, read-only:
+
+```
+$ singularrag doctor
+ollama: unreachable (model unavailable: /api/tags: error sending request for url (http://127.0.0.1:11434/api/tags))
+qwen2.5:7b-instruct: missing
+nomic-embed-text: missing
+embedding dimension: unknown
+pending: 10 sections · failed: 0 · last error: none
+```
+
+That's what it prints when Ollama isn't installed, as above. With Ollama up and both models pulled, the first two lines instead read `ollama: ok (http://127.0.0.1:11434)` and `qwen2.5:7b-instruct: pulled` / `nomic-embed-text: pulled`, and the embedding dimension is a number once at least one embedding call has succeeded. Ollama down or a model missing never fails a tool call: the map and `find_symbol` work as before, just without the semantic and entity seeds, and the header says `models: unavailable`.
+
+### The vault question set
+
+To check retrieval against your own notes rather than the prose fixture, declare them as a named root (see above) and author a question file outside the repo, `~/.singularrag/questions-vault.toml`, in the same shape as `eval/questions-prose.toml`. Gold entries are `path::Heading text`, exactly as `singularrag find` prints a section — look a heading up with `singularrag find "heading text"` and copy its `path::name` in. Run it with:
+
+```sh
+singularrag eval --questions ~/.singularrag/questions-vault.toml --budget 4096
+```
 
 ## Design
 

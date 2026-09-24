@@ -4,10 +4,24 @@ import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { App } from "./App";
 
-const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false, files: { indexed: 4, skipped: 1 }, roots: [{ name: "", path: "/repo", git_head: "9b1e0d4f" }] };
-const r = { score: 0.1, file_rank: 0.1, seeds: ["query:session"], referenced_by: [{ path: "src/http/middleware.ts", count: 2 }], pinned: false, fts_hit: true, query_ident_match: true };
+const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false, files: { indexed: 4, skipped: 1 }, roots: [{ name: "", path: "/repo", git_head: "9b1e0d4f" }], entities_pending: 0, models_unavailable: false, embeddings_rebuilding: false };
+const r = { score: 0.1, file_rank: 0.1, seeds: ["query:session"], referenced_by: [{ path: "src/http/middleware.ts", count: 2 }], pinned: false, fts_hit: true, query_ident_match: true, note_hit: false, body_hit: false, semantic: null, entities: [], themes: [] };
 const retrieval = { id: 7, session_key: "mcp:claude-code:1:2", session_label: "Claude Code", tool: "repo_map", query: "session", focus_files: [], budget: 1024, limit_n: null, index_version: "abc123", git_head: "9b1e0d4f", stale_count: 0, created_at_ms: Date.now(), served: 1, cut: 0 };
 const tree = [{ path: "src/auth/session.ts", lang: "typescript", skipped_reason: null, symbols: [{ id: 1, name: "createSession", kind: "function", line_start: 3, line_end: 6, signature: "export function createSession(user: User, ttl: number): Session" }] }];
+const docTree = [...tree, { path: "docs/guide.md", lang: "markdown", skipped_reason: null, symbols: [{ id: 10, name: "Intro", kind: "section", line_start: 1, line_end: 5, signature: "# Intro" }] }];
+const entitiesFixture = {
+  entities: [
+    { id: 1, name: "Ada Lovelace", type: "person", description: "Wrote the first program.", mentions: 3 },
+    { id: 2, name: "Analytical Engine", type: "system", description: "A mechanical computer.", mentions: 1 },
+  ],
+  relations: [{ id: 1, src: 1, dst: 2, description: "programmed", symbol_id: 10, path: "docs/guide.md", name: "Intro" }],
+  mentions: [{ entity_id: 1, symbol_id: 10, path: "docs/guide.md", name: "Intro" }, { entity_id: 2, symbol_id: 99, path: "docs/other.md", name: "Elsewhere" }],
+  truncated: false,
+};
+// Merged into every `GET /api/status` answer; a test can set knowledge-status flags.
+let statusExtra: Record<string, unknown> = {};
+// When set, `GET /api/entities` answers with it instead of `entitiesFixture`.
+let entitiesOverride: unknown = null;
 let saved: any = null;
 let mapState: any = null;
 // What `GET /api/retrievals` answers; a test can push to it before firing a change event.
@@ -78,6 +92,8 @@ beforeEach(() => {
   statusRootsOverride = null;
   treeOverride = null;
   statusGates = null;
+  statusExtra = {};
+  entitiesOverride = null;
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
@@ -91,7 +107,7 @@ beforeEach(() => {
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
     if (init?.headers && (init.headers as Record<string, string>).Authorization !== "Bearer deadbeef") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
     if (url.endsWith("/api/status")) {
-      const body = { ...status, index_version: statusVersion, roots: statusRootsOverride ?? status.roots };
+      const body = { ...status, ...statusExtra, index_version: statusVersion, roots: statusRootsOverride ?? status.roots };
       if (statusGates) await new Promise<void>((resolve) => { statusGates!.push(resolve); });
       return json(body);
     }
@@ -104,6 +120,7 @@ beforeEach(() => {
     if (url.includes("/api/retrievals?")) return json(retrievalList);
     if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [...detailItems, ...extraRetrievalItems] });
     if (url.endsWith("/api/tree")) return json(treeOverride ?? tree);
+    if (url.endsWith("/api/entities")) return json(entitiesOverride ?? entitiesFixture);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
     // GET /api/map returns a fresh object (new identity) each call, reflecting
     // whatever was last PUT — this both matches how the real server behaves
@@ -667,5 +684,130 @@ describe("App", () => {
     await user.selectOptions(screen.getByLabelText("Root"), "notes");
     await waitFor(() => expect(within(panel).queryByRole("heading", { name: "app/src/a.ts" })).toBeNull());
     expect(within(panel).getByText("Select a file or symbol.")).toBeTruthy();
+  });
+
+  test("the overlay toggle shows only in map view, and choosing entities adds them to the map", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    expect(screen.queryByRole("radiogroup", { name: "Overlay" })).toBeNull();
+    await user.click(screen.getByRole("radio", { name: "Map" }));
+    const overlay = await screen.findByRole("radiogroup", { name: "Overlay" });
+    expect(await screen.findByRole("img", { name: /^Map of 1 file\. No retrieval/ })).toBeTruthy();
+    await user.click(within(overlay).getByRole("radio", { name: "Files + entities" }));
+    expect(await screen.findByRole("img", { name: /^Map of 1 file and 2 entities\./ })).toBeTruthy();
+    expect(calls("/api/entities")).toBeGreaterThan(0);
+    expect(localStorage.getItem("singularrag.overlay")).toBe("entities");
+    const s = (globalThis as any).__sigma.instances.at(-1);
+    expect(s.graph.hasNode("entity:1")).toBe(true);
+  });
+
+  test("a change event refetches the entities", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await waitFor(() => expect(calls("/api/entities")).toBe(1));
+    await act(async () => { changeHandler!({ data: "{}" }); });
+    await waitFor(() => expect(calls("/api/entities")).toBe(2));
+  });
+
+  test("the freshness badge shows pending entities, unavailable models and a rebuild", async () => {
+    statusExtra = { entities_pending: 3, models_unavailable: true, embeddings_rebuilding: true };
+    render(<App />);
+    const badge = await screen.findByLabelText("Index freshness");
+    await waitFor(() => expect(badge.textContent).toContain("entities: 3 pending"));
+    expect(badge.textContent).toContain("models unavailable");
+    expect(badge.textContent).toContain("embeddings rebuilding");
+  });
+
+  test("the empty panel lists entities; choosing one shows its description, mentions and relations", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const panel = await screen.findByRole("region", { name: "Details" });
+    const list = await within(panel).findByRole("list", { name: "Entities" });
+    expect(within(list).getAllByRole("button").map((b) => b.textContent)).toEqual(["Ada Lovelace (person), 3 mentions", "Analytical Engine (system), 1 mention"]);
+    await user.click(within(list).getByRole("button", { name: /^Ada Lovelace/ }));
+    expect(within(panel).getByRole("heading", { name: "Ada Lovelace" })).toBeTruthy();
+    expect(within(panel).getByText("person")).toBeTruthy();
+    expect(within(panel).getByText("Wrote the first program.")).toBeTruthy();
+    const mentions = within(panel).getByRole("list", { name: "Mentioned in" });
+    expect(within(mentions).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(mentions).getAllByRole("button", { name: /^Go to section/ })).toHaveLength(1);
+    const relations = within(panel).getByRole("list", { name: "Relations" });
+    expect(within(relations).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Ada Lovelace → Analytical Engine: programmed"]);
+    await waitFor(() => expect(document.activeElement).toBe(within(panel).getByRole("heading", { name: "Ada Lovelace" })));
+    expect((await axe.run(panel)).violations).toEqual([]);
+  });
+
+  test("Go to section switches to the tree and focuses that section's row", async () => {
+    treeOverride = docTree;
+    localStorage.setItem("singularrag.view", "map");
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("img");
+    const panel = screen.getByRole("region", { name: "Details" });
+    const list = await within(panel).findByRole("list", { name: "Entities" });
+    await user.click(within(list).getByRole("button", { name: /^Ada Lovelace/ }));
+    await user.click(within(panel).getByRole("button", { name: /^Go to section/ }));
+    await screen.findByRole("treegrid", { name: "Repository" });
+    await waitFor(() => {
+      const ae = document.activeElement;
+      expect(ae?.getAttribute("role")).toBe("row");
+      expect(ae?.textContent).toContain("Intro");
+    });
+    await waitFor(() => expect(within(panel).getByRole("heading", { name: "docs/guide.md :: Intro" })).toBeTruthy());
+  });
+
+  test("a section row lists its entities and the relations it states", async () => {
+    treeOverride = docTree;
+    const user = userEvent.setup();
+    render(<App />);
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await user.click(within(grid).getByText("docs/guide.md"));
+    await user.keyboard("{ArrowRight}");
+    await user.click(await within(grid).findByText("Intro"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    await waitFor(() => expect(within(panel).getByRole("heading", { name: "docs/guide.md :: Intro" })).toBeTruthy());
+    const ents = within(panel).getByRole("list", { name: "Entities in this section" });
+    expect(within(ents).getAllByRole("button").map((b) => b.textContent)).toEqual(["Ada Lovelace (person)"]);
+    const rels = within(panel).getByRole("list", { name: "Relations stated here" });
+    expect(rels.textContent).toBe("Ada Lovelace → Analytical Engine: programmed");
+    await user.click(within(ents).getByRole("button", { name: "Ada Lovelace (person)" }));
+    expect(within(panel).getByRole("heading", { name: "Ada Lovelace" })).toBeTruthy();
+  });
+
+  test("the empty panel's entity buttons carry the description as visible text and as their description", async () => {
+    render(<App />);
+    const panel = await screen.findByRole("region", { name: "Details" });
+    const list = await within(panel).findByRole("list", { name: "Entities" });
+    const button = within(list).getByRole("button", { name: /^Ada Lovelace/ });
+    const id = button.getAttribute("aria-describedby");
+    expect(id).toBeTruthy();
+    expect(document.getElementById(id!)?.textContent).toBe("Wrote the first program.");
+    expect(within(list).getByText("Wrote the first program.")).toBeTruthy();
+  });
+
+  test("with a root selected the entity overlay keeps only that root's entities, and the label counts them", async () => {
+    statusRootsOverride = [{ name: "app", path: "/repo/app", git_head: "9b1e0d4f" }, { name: "notes", path: "/repo/notes", git_head: "9b1e0d4f" }];
+    treeOverride = [
+      { path: "app/src/a.ts", lang: "typescript", skipped_reason: null, symbols: [{ id: 20, name: "a", kind: "function", line_start: 1, line_end: 2, signature: "a()" }] },
+      { path: "notes/n.md", lang: "markdown", skipped_reason: null, symbols: [{ id: 21, name: "N", kind: "section", line_start: 1, line_end: 2, signature: "# N" }] },
+    ];
+    entitiesOverride = {
+      entities: [{ id: 1, name: "Ada", type: "person", description: "", mentions: 1 }, { id: 2, name: "Engine", type: "system", description: "", mentions: 1 }],
+      relations: [{ id: 1, src: 1, dst: 2, description: "maintains", symbol_id: 21, path: "notes/n.md", name: "N" }],
+      mentions: [{ entity_id: 1, symbol_id: 21, path: "notes/n.md", name: "N" }, { entity_id: 2, symbol_id: 20, path: "app/src/a.ts", name: "a" }],
+      truncated: false,
+    };
+    localStorage.setItem("singularrag.overlay", "entities");
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("app/src/a.ts");
+    await user.click(screen.getByRole("radio", { name: "Map" }));
+    expect(await screen.findByRole("img", { name: /^Map of 2 files and 2 entities\./ })).toBeTruthy();
+    await user.selectOptions(screen.getByLabelText("Root"), "notes");
+    expect(await screen.findByRole("img", { name: /^Map of 1 file and 1 entity\./ })).toBeTruthy();
+    const s = (globalThis as any).__sigma.instances.at(-1);
+    expect(s.graph.hasNode("entity:1")).toBe(true);
+    expect(s.graph.hasNode("entity:2")).toBe(false);
   });
 });

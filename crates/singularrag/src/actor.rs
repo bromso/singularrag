@@ -3,16 +3,19 @@
 //! where spec §8's background refresh lives.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use singularrag_core::engine::{
-    AnnotateRequest, AnnotateResponse, ChangedRequest, ChangedResponse, Engine, FindRequest,
-    FindResponse, MapRequest, MapResponse, TraceRequest, TraceResponse,
+    AnnotateRequest, AnnotateResponse, ChangedRequest, ChangedResponse, Engine, EntitiesRequest,
+    EntitiesResponse, FindRequest, FindResponse, MapRequest, MapResponse, TraceRequest,
+    TraceResponse,
 };
 use singularrag_core::index::IndexStats;
+use singularrag_core::knowledge::KnowledgeTick;
 use tokio::sync::oneshot;
 
 /// Errors are stringified at the actor boundary: replies must be `Send + 'static`,
@@ -31,6 +34,8 @@ pub type Reply<T> = Result<T, String>;
 pub struct DrainStats {
     pub last: IndexStats,
     pub chunks: u64,
+    /// Knowledge ticks run so far, automatic or asked for.
+    pub knowledge_ticks: u64,
 }
 
 pub enum Job {
@@ -39,6 +44,10 @@ pub enum Job {
     Annotate(AnnotateRequest, oneshot::Sender<Reply<AnnotateResponse>>),
     Trace(TraceRequest, oneshot::Sender<Reply<TraceResponse>>),
     Changed(ChangedRequest, oneshot::Sender<Reply<ChangedResponse>>),
+    Entities(EntitiesRequest, oneshot::Sender<Reply<EntitiesResponse>>),
+    /// One knowledge tick now. The loop ticks on its own; this is for tests.
+    #[allow(dead_code)]
+    Knowledge(oneshot::Sender<Reply<KnowledgeTick>>),
     /// One budgeted refresh with no retrieval recorded and no drain armed: the file
     /// watcher's job, not a tool response. Constructed by `serve::watcher` through
     /// `EngineHandle::refresh`, and exercised directly by the actor's unit tests.
@@ -68,11 +77,23 @@ pub struct EngineConfig {
     pub root: PathBuf,
     pub session_key: SessionKey,
     pub refresh_budget: Duration,
+    /// Overrides the workspace's Ollama URL (tests point it at a fake). `None` lets the
+    /// workspace config and `SINGULARRAG_OLLAMA_URL` apply.
+    pub models_url: Option<String>,
+    /// The knowledge tick's cadence while sections are pending; `None` is `KNOWLEDGE_IDLE`.
+    pub knowledge_idle: Option<Duration>,
 }
+
+/// How long the loop waits for a job before ticking the knowledge queue again, while
+/// sections are pending (or the last tick hit a model outage).
+const KNOWLEDGE_IDLE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct EngineHandle {
     tx: mpsc::Sender<Job>,
+    /// Jobs sent but not yet received by the actor: a knowledge tick yields while it is
+    /// above zero, so a tool call never waits behind a whole tick.
+    queued: Arc<AtomicUsize>,
 }
 
 const GONE: &str = "engine thread is gone";
@@ -80,6 +101,7 @@ const GONE: &str = "engine thread is gone";
 impl EngineHandle {
     async fn ask<T>(&self, make: impl FnOnce(oneshot::Sender<Reply<T>>) -> Job) -> Reply<T> {
         let (tx, rx) = oneshot::channel();
+        self.queued.fetch_add(1, Ordering::SeqCst);
         self.tx.send(make(tx)).map_err(|_| GONE.to_string())?;
         rx.await.unwrap_or_else(|_| Err(GONE.to_string()))
     }
@@ -104,6 +126,10 @@ impl EngineHandle {
         self.ask(|tx| Job::Changed(req, tx)).await
     }
 
+    pub async fn entities(&self, req: EntitiesRequest) -> Reply<EntitiesResponse> {
+        self.ask(|tx| Job::Entities(req, tx)).await
+    }
+
     // One budgeted refresh with no retrieval recorded. The watcher's job; see the
     // doc comment on `Job::Refresh`.
     pub async fn refresh(&self) -> Reply<IndexStats> {
@@ -117,11 +143,17 @@ impl EngineHandle {
     }
 
     #[allow(dead_code)]
+    pub async fn knowledge_tick(&self) -> Reply<KnowledgeTick> {
+        self.ask(Job::Knowledge).await
+    }
+
+    #[allow(dead_code)]
     pub async fn stats(&self) -> Reply<DrainStats> {
         self.ask(Job::Stats).await
     }
 
     pub fn shutdown(&self) {
+        self.queued.fetch_add(1, Ordering::SeqCst);
         let _ = self.tx.send(Job::Shutdown);
     }
 }
@@ -143,15 +175,17 @@ impl Drop for DiedGuard {
 /// actor thread is gone for any reason. `mcp::run` watches the third.
 pub fn spawn(config: EngineConfig) -> (EngineHandle, JoinHandle<()>, oneshot::Receiver<()>) {
     let (tx, rx) = mpsc::channel::<Job>();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let actor_queued = Arc::clone(&queued);
     let (died_tx, died_rx) = oneshot::channel();
     let join = std::thread::Builder::new()
         .name("singularrag-engine".into())
         .spawn(move || {
             let _died = DiedGuard(Some(died_tx));
-            run(config, rx)
+            run(config, rx, actor_queued)
         })
         .expect("spawn engine thread");
-    (EngineHandle { tx }, join, died_rx)
+    (EngineHandle { tx, queued }, join, died_rx)
 }
 
 struct Actor {
@@ -171,6 +205,15 @@ struct Actor {
     /// Backlog the current drain is working against: the `stale_count` that armed it,
     /// then each chunk's `remaining`. A chunk that does not shrink it made no progress.
     drain_remaining: usize,
+    /// True while sections wait for the knowledge tick: the loop then waits on
+    /// `recv_timeout(KNOWLEDGE_IDLE)` instead of blocking forever.
+    knowledge_pending: bool,
+    /// When the next automatic tick is due while `knowledge_pending`: a deadline rather
+    /// than a fresh timeout per job, so steady traffic cannot postpone it forever.
+    next_tick_at: Instant,
+    knowledge_ticks: u64,
+    /// Shared with `EngineHandle`: jobs sent and not yet received.
+    queued: Arc<AtomicUsize>,
 }
 
 impl Actor {
@@ -194,6 +237,9 @@ impl Actor {
             let opened = Engine::open(&self.config.root, &key)
                 .map(|mut e| {
                     e.set_refresh_budget(self.config.refresh_budget);
+                    if let Some(url) = &self.config.models_url {
+                        e.set_models_url(url);
+                    }
                     e
                 })
                 .map_err(|e| e.to_string());
@@ -215,7 +261,59 @@ impl Actor {
         self.drain_remaining = if self.drain_pending { stale_count } else { 0 };
     }
 
+    /// Re-reads the pending count after a job that may have queued sections.
+    fn refresh_knowledge_pending(&mut self) {
+        if let Some(Ok(e)) = &self.engine {
+            if let Ok(x) = e.extras() {
+                self.set_knowledge_pending(x.pending > 0);
+            }
+        }
+    }
+
+    fn knowledge_idle(&self) -> Duration {
+        self.config.knowledge_idle.unwrap_or(KNOWLEDGE_IDLE)
+    }
+
+    /// Arms the cadence deadline when the queue goes from empty to pending.
+    fn set_knowledge_pending(&mut self, pending: bool) {
+        if pending && !self.knowledge_pending {
+            self.next_tick_at = Instant::now() + self.knowledge_idle();
+        }
+        self.knowledge_pending = pending;
+    }
+
+    /// One knowledge tick, yielding as soon as a job is waiting. An outage keeps the
+    /// queue armed so the next deadline retries.
+    fn knowledge_tick_once(&mut self) -> Reply<KnowledgeTick> {
+        let queued = Arc::clone(&self.queued);
+        let should_yield = move || queued.load(Ordering::SeqCst) > 0;
+        let out = self
+            .engine()
+            .and_then(|e| e.knowledge_tick(&should_yield).map_err(|e| e.to_string()));
+        self.knowledge_ticks += 1;
+        match &out {
+            Ok(t) => self.set_knowledge_pending(t.pending > 0 || t.model_error.is_some()),
+            Err(e) => tracing::warn!("knowledge tick failed: {e}"),
+        }
+        self.next_tick_at = Instant::now() + self.knowledge_idle();
+        out
+    }
+
     fn handle(&mut self, job: Job) -> bool {
+        // Every received job passes through here exactly once.
+        let _ = self
+            .queued
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        let refreshes = matches!(
+            job,
+            Job::Map(..)
+                | Job::Find(..)
+                | Job::Annotate(..)
+                | Job::Trace(..)
+                | Job::Changed(..)
+                | Job::Entities(..)
+                | Job::Refresh(..)
+        );
         match job {
             Job::Map(req, reply) => {
                 let out = self
@@ -262,6 +360,15 @@ impl Actor {
                 }
                 let _ = reply.send(out);
             }
+            Job::Entities(req, reply) => {
+                let out = self
+                    .engine()
+                    .and_then(|e| e.entities(&req).map_err(|e| e.to_string()));
+                if let Ok(r) = &out {
+                    self.note(r.stale_count, r.lock_timeout);
+                }
+                let _ = reply.send(out);
+            }
             Job::Refresh(reply) => {
                 let budget = self.config.refresh_budget;
                 let out = self
@@ -289,9 +396,17 @@ impl Actor {
                 let _ = reply.send(Ok(DrainStats {
                     last: self.last_stats.clone(),
                     chunks: self.drain_chunks,
+                    knowledge_ticks: self.knowledge_ticks,
                 }));
             }
+            Job::Knowledge(reply) => {
+                let out = self.knowledge_tick_once();
+                let _ = reply.send(out);
+            }
             Job::Shutdown => return false,
+        }
+        if refreshes {
+            self.refresh_knowledge_pending();
         }
         true
     }
@@ -339,7 +454,7 @@ impl Actor {
     }
 }
 
-fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
+fn run(config: EngineConfig, rx: mpsc::Receiver<Job>, queued: Arc<AtomicUsize>) {
     let mut actor = Actor {
         config,
         start_ms: singularrag_core::time::now_ms(),
@@ -348,6 +463,10 @@ fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
         drain_chunks: 0,
         drain_pending: false,
         drain_remaining: 0,
+        knowledge_pending: false,
+        next_tick_at: Instant::now(),
+        knowledge_ticks: 0,
+        queued,
     };
     loop {
         if actor.drain_pending {
@@ -362,13 +481,35 @@ fn run(config: EngineConfig, rx: mpsc::Receiver<Job>) {
                 Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => {
                     actor.drain_pending = actor.drain_chunk();
+                    if !actor.drain_pending {
+                        let _ = actor.knowledge_tick_once();
+                    }
                     continue;
                 }
             }
         }
-        // Nothing to drain: block. `drain_pending` only ever changes inside this loop
-        // (in `handle`), so there is nothing a timeout could wake up to notice — the
-        // old 20 ms poll just woke the thread fifty times a second to find that out.
+        if actor.knowledge_pending {
+            let wait = actor.next_tick_at.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+                let _ = actor.knowledge_tick_once();
+                continue;
+            }
+            match rx.recv_timeout(wait) {
+                Ok(job) => {
+                    if !actor.handle(job) {
+                        return;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = actor.knowledge_tick_once();
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            continue;
+        }
+        // Nothing to drain and nothing queued for the knowledge tick: block.
+        // `drain_pending` and `knowledge_pending` only change inside this loop, so there
+        // is nothing a timeout could wake up to notice.
         match rx.recv() {
             Ok(job) => {
                 if !actor.handle(job) {
@@ -401,6 +542,8 @@ mod tests {
                 "test-client".into(),
             )))),
             refresh_budget: budget,
+            models_url: None,
+            knowledge_idle: None,
         }
     }
 
@@ -569,6 +712,8 @@ mod tests {
             root: std::path::PathBuf::from("/nonexistent/singularrag-test-root"),
             session_key: SessionKey::FromHandshake(Arc::new(Mutex::new(None))),
             refresh_budget: REFRESH_BUDGET,
+            models_url: None,
+            knowledge_idle: None,
         };
         let (handle, _join, _died) = spawn(cfg);
         let err = handle.map(MapRequest::default()).await.unwrap_err();
@@ -619,6 +764,8 @@ mod tests {
             root: dir.path().to_path_buf(),
             session_key: SessionKey::Fixed("serve".into()),
             refresh_budget: REFRESH_BUDGET,
+            models_url: None,
+            knowledge_idle: None,
         });
         handle.map(MapRequest::default()).await.unwrap();
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
@@ -664,5 +811,129 @@ mod tests {
         assert!(stats.lock_timeout);
         assert_eq!(stats.indexed, 0);
         lock::release(&store, foreign).unwrap();
+    }
+
+    fn models_config(root: &std::path::Path, url: String) -> EngineConfig {
+        EngineConfig {
+            models_url: Some(url),
+            ..config(root, REFRESH_BUDGET)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_actor_ticks_the_queue_between_jobs_and_the_header_counts_down() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(dir.path());
+        let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+        let (handle, join, _died) = spawn(models_config(dir.path(), f.url()));
+        let first = handle
+            .map(MapRequest {
+                query: Some("stale".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            first.text.contains("entities: ") && first.text.contains(" pending"),
+            "{}",
+            first.text.lines().next().unwrap()
+        );
+        for _ in 0..10 {
+            handle.knowledge_tick().await.unwrap();
+        }
+        let later = handle
+            .map(MapRequest {
+                query: Some("stale".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !later.text.contains("pending"),
+            "{}",
+            later.text.lines().next().unwrap()
+        );
+        handle.shutdown();
+        join.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_model_outage_mid_tick_leaves_the_queue_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(dir.path());
+        let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+        let (handle, join, _died) = spawn(models_config(dir.path(), f.url()));
+        let stale = || MapRequest {
+            query: Some("stale".into()),
+            ..Default::default()
+        };
+        handle.map(stale()).await.unwrap();
+        let t = handle.knowledge_tick().await.unwrap();
+        assert!(t.embedded > 0);
+        f.set_down(true);
+        let t = handle.knowledge_tick().await.unwrap();
+        assert!(t.model_error.is_some() && t.extracted == 0, "{t:?}");
+        let m = handle.map(stale()).await.unwrap();
+        assert!(
+            m.text.contains("models: unavailable") && m.text.contains("pending"),
+            "{}",
+            m.text.lines().next().unwrap()
+        );
+        f.set_down(false);
+        for _ in 0..10 {
+            handle.knowledge_tick().await.unwrap();
+        }
+        let m = handle.map(stale()).await.unwrap();
+        assert!(
+            !m.text.contains("models: unavailable") && !m.text.contains("pending"),
+            "{}",
+            m.text.lines().next().unwrap()
+        );
+        handle.shutdown();
+        join.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_waiting_job_stops_the_tick_between_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(dir.path());
+        let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+        let (handle, join, _died) = spawn(models_config(dir.path(), f.url()));
+        handle.map(MapRequest::default()).await.unwrap();
+        f.set_generate_delay(Duration::from_millis(300));
+        let h = handle.clone();
+        let tick = tokio::spawn(async move { h.knowledge_tick().await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        handle.map(MapRequest::default()).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let t = tick.await.unwrap().unwrap();
+        assert!(t.extracted <= 1 && t.pending > 0, "{t:?}");
+        handle.shutdown();
+        join.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_tick_keeps_its_cadence_under_steady_traffic() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(dir.path());
+        let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+        let (handle, join, _died) = spawn(EngineConfig {
+            knowledge_idle: Some(Duration::from_millis(200)),
+            ..models_config(dir.path(), f.url())
+        });
+        let until = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < until {
+            handle.map(MapRequest::default()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let stats = handle.stats().await.unwrap();
+        assert!(stats.knowledge_ticks >= 1, "{stats:?}");
+        handle.shutdown();
+        join.join().unwrap();
     }
 }

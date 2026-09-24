@@ -3,6 +3,8 @@ export type Reasons = {
   referenced_by: { path: string; count: number }[];
   pinned: boolean; fts_hit: boolean; query_ident_match: boolean; note_hit: boolean;
   body_hit: boolean;
+  /** Similarity to the query's vector when the section was among the nearest. */
+  semantic: number | null; entities: string[]; themes: string[];
 };
 export type Item = { rank: number; symbol_id: number; path: string; name: string; line_start: number; score: number; served: boolean; reasons: Reasons };
 export type RetrievalSummary = {
@@ -24,6 +26,7 @@ export type Status = {
   index_version: string; git_head: string | null; indexed_at_ms: number | null; stale_count: number;
   lock_timeout: boolean; foreign_indexing: boolean; indexing: boolean; files: { indexed: number; skipped: number };
   roots: { name: string; path: string; git_head: string | null }[];
+  entities_pending: number; models_unavailable: boolean; embeddings_rebuilding: boolean;
 };
 export type GraphNode = { path: string; symbols: number; lang: string | null };
 export type GraphEdge = { src: number; dst: number; weight: number; names: number };
@@ -31,3 +34,9 @@ export type GraphPayload = { index_version: string; nodes: GraphNode[]; edges: G
 export type BlastFile = { path: string; depth: number; via: string };
 export type BlastResult = { root: { path: string; symbol: string }; files: BlastFile[]; truncated: null | "depth" | "files" };
 export type QueryResult = { retrieval_id: number; served: number; cut: number };
+/** Entity types the extractor emits: person, organisation, system, concept, event, place, document. */
+export type Entity = { id: number; name: string; type: string; description: string; mentions: number };
+/** A relation between two entities, stated by one section (`symbol_id`, at `path` / `name`). */
+export type Relation = { id: number; src: number; dst: number; description: string; symbol_id: number; path: string; name: string };
+export type Mention = { entity_id: number; symbol_id: number; path: string; name: string };
+export type EntitiesPayload = { entities: Entity[]; relations: Relation[]; mentions: Mention[]; truncated: boolean };

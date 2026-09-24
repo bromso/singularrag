@@ -81,6 +81,10 @@ pub async fn skipped(
     Ok(Json(locked(&s, queries::skipped)?))
 }
 
+pub async fn entities(State(s): State<AppState>) -> Result<Json<queries::EntitiesDto>, ApiError> {
+    Ok(Json(locked(&s, queries::entities)?))
+}
+
 /// `MapConfig` plus the token a client must hand back to write: `map.toml`'s mtime in
 /// milliseconds, 0 when the file does not exist. Kept here rather than in core so
 /// `MapConfig` stays the on-disk shape (spec §3).
@@ -230,6 +234,7 @@ pub async fn query(
         budget_tokens: singularrag_core::map::clamp_budget(
             b.budget.unwrap_or(singularrag_core::map::DEFAULT_BUDGET),
         ),
+        ..Default::default()
     };
     match s.handle.map(req).await {
         Ok(r) => Ok(Json(QueryDto {
@@ -284,6 +289,84 @@ pub async fn blast(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn entities_lists_entities_relations_and_mentions_from_the_prose_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_prose(dir.path());
+        let mut e = singularrag_core::engine::Engine::open(dir.path(), "t").unwrap();
+        e.refresh(std::time::Duration::from_secs(120)).unwrap();
+        drop(e);
+        let store = singularrag_core::store::Store::open(&dir.path().join(".singularrag/index.db"))
+            .unwrap();
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../singularrag-core/fixtures/prose/extraction.json"
+        ))
+        .unwrap();
+        singularrag_core::knowledge::load_extraction_json(&store, None, &json).unwrap();
+        drop(store);
+
+        let (state, handle) = crate::serve::state::test_state(dir.path(), 1);
+        let token = state.token.to_string();
+        let app = crate::serve::router(state);
+        let res = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/api/entities")
+                .header("host", "127.0.0.1:1")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["truncated"], false, "{v}");
+
+        let entities = v["entities"].as_array().unwrap();
+        assert!(entities.len() >= 12, "{v}");
+        assert!(entities
+            .windows(2)
+            .all(
+                |w| w[0]["mentions"].as_i64().unwrap() > w[1]["mentions"].as_i64().unwrap()
+                    || (w[0]["mentions"].as_i64().unwrap() == w[1]["mentions"].as_i64().unwrap()
+                        && w[0]["name"].as_str().unwrap() <= w[1]["name"].as_str().unwrap())
+            ));
+        for f in ["id", "name", "type", "description", "mentions"] {
+            assert!(entities[0].get(f).is_some(), "entity missing {f}: {v}");
+        }
+
+        let relations = v["relations"].as_array().unwrap();
+        assert!(relations.len() >= 10, "{v}");
+        for f in [
+            "id",
+            "src",
+            "dst",
+            "description",
+            "symbol_id",
+            "path",
+            "name",
+        ] {
+            assert!(relations[0].get(f).is_some(), "relation missing {f}: {v}");
+        }
+        assert!(relations[0]["path"].as_str().unwrap().starts_with("docs/"));
+
+        let mentions = v["mentions"].as_array().unwrap();
+        assert!(!mentions.is_empty(), "{v}");
+        for f in ["entity_id", "symbol_id", "path", "name"] {
+            assert!(mentions[0].get(f).is_some(), "mention missing {f}: {v}");
+        }
+        assert!(mentions[0]["path"].as_str().unwrap().starts_with("docs/"));
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
     async fn query_records_a_ui_retrieval_and_validates_input() {
         let dir = tempfile::tempdir().unwrap();
         singularrag_core::fixture::write_docs_mini(dir.path());
@@ -291,6 +374,8 @@ mod tests {
             root: dir.path().to_path_buf(),
             session_key: crate::actor::SessionKey::Fixed("serve".into()),
             refresh_budget: std::time::Duration::from_secs(5),
+            models_url: None,
+            knowledge_idle: None,
         });
         handle.refresh().await.unwrap();
         let state = crate::serve::state::AppState::new(dir.path().to_path_buf(), 1, handle.clone())

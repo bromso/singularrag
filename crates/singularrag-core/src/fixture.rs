@@ -155,3 +155,19 @@ pub fn write_rust_mini(root: &Path) {
         "fn main() {\n    let n = mini::parse(\"x\");\n    println!(\"{n}\");\n}\n",
     );
 }
+
+/// Two prose documents with no code around them, for the knowledge layer: a fictional
+/// 1890s research voyage and a fictional company handbook. `fixtures/prose/extraction.json`
+/// holds a hand-written extraction for every section, keyed `docs/<file>::<heading>`.
+pub fn write_prose(root: &Path) {
+    w(
+        root,
+        "docs/voyage.md",
+        include_str!("../fixtures/prose/voyage.md"),
+    );
+    w(
+        root,
+        "docs/handbook.md",
+        include_str!("../fixtures/prose/handbook.md"),
+    );
+}

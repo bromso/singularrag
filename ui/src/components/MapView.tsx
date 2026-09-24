@@ -3,9 +3,10 @@ import Sigma from "sigma";
 import { createNodeBorderProgram } from "@sigma/node-border";
 import type Graph from "graphology";
 import { Button } from "@/components/ui/button";
-import type { BlastResult, Boundary, GraphPayload } from "@/api/types";
+import type { BlastResult, Boundary, EntitiesPayload, GraphPayload } from "@/api/types";
+import { entityAccessibleName, hoverLines } from "@/lib/entities";
 import type { FileRow } from "@/lib/join";
-import { applyPositions, buildGraph, layoutGraph, loadLayout, saveLayout, type Positions } from "@/lib/graph";
+import { applyPositions, buildGraph, entityKey, layoutGraph, loadLayout, saveLayout, type Positions } from "@/lib/graph";
 import { convexHull, padHull } from "@/lib/hull";
 import { langGroup } from "@/lib/langGroup";
 import { edgeStyle, fileStatusOf, nodeStyle, readPalette, satelliteKey, type Palette } from "@/lib/mapStyle";
@@ -16,7 +17,10 @@ export type MapViewProps = {
   blast: BlastResult | null; boundaries: Boundary[]; ariaLabel: string;
   onSelectNode: (path: string, symbol?: string) => void; onToggleExpand: (path: string) => void;
   onSwitchToTable: () => void; onLayoutReady: (indexVersion: string) => void;
+  /** The knowledge overlay: drawn only when given (the Overlay toggle is on). */
+  entities: EntitiesPayload | null; focusedEntity: number | null; onSelectEntity: (id: number) => void;
 };
+
 
 const HULL_PADDING = 18;
 const hue = (name: string) => { let h = 0; for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360; return h; };
@@ -29,17 +33,19 @@ function useLatest<T>(v: T) { const r = useRef(v); r.current = v; return r; }
  *  and the label size) but fill it from the theme palette. Reads `palRef.current` so a
  *  `prefers-color-scheme` change updates it without reinstalling the setting. */
 function hoverDrawer(palRef: { current: Palette | null }) {
-  return (context: CanvasRenderingContext2D, data: { x: number; y: number; size: number; label?: string | null }, settings: { labelSize: number; labelFont: string; labelWeight: string }) => {
+  return (context: CanvasRenderingContext2D, data: { x: number; y: number; size: number; label?: string | null; kind?: unknown; description?: unknown }, settings: { labelSize: number; labelFont: string; labelWeight: string }) => {
     const pal = palRef.current;
-    if (!pal || typeof data.label !== "string") return;
+    // An entity's description goes under its name (`hoverLines`); a file draws its label alone.
+    const lines = hoverLines(data);
+    if (!pal || lines.length === 0) return;
     const size = settings.labelSize, font = settings.labelFont, weight = settings.labelWeight;
     context.font = `${weight} ${size}px ${font}`;
-    const PADDING = 3;
-    const textWidth = context.measureText(data.label).width;
+    const PADDING = 3, LEADING = size + 2;
+    const textWidth = Math.max(...lines.map((l) => context.measureText(l).width));
     const x = data.x + data.size + 3 - PADDING;
     const boxWidth = Math.round(textWidth + PADDING * 2);
-    const boxHeight = Math.round(size + PADDING * 2);
-    const y = data.y - boxHeight / 2;
+    const boxHeight = Math.round(size + PADDING * 2 + (lines.length - 1) * LEADING);
+    const y = data.y - Math.round(size + PADDING * 2) / 2;
     context.fillStyle = pal.background;
     const rc = context as CanvasRenderingContext2D & { roundRect?: (x: number, y: number, w: number, h: number, r: number) => void };
     if (typeof rc.roundRect === "function") {
@@ -50,12 +56,12 @@ function hoverDrawer(palRef: { current: Palette | null }) {
       context.fillRect(x, y, boxWidth, boxHeight);
     }
     context.fillStyle = pal.label;
-    context.fillText(data.label, data.x + data.size + 3, data.y + size / 3);
+    lines.forEach((l, i) => context.fillText(l, data.x + data.size + 3, data.y + size / 3 + i * LEADING));
   };
 }
 
 export function MapView(props: MapViewProps) {
-  const { payload, expandedPath, focusedPath, onLayoutReady, onSelectNode, onToggleExpand, onSwitchToTable, ariaLabel } = props;
+  const { payload, entities, expandedPath, focusedPath, onLayoutReady, onSelectNode, onToggleExpand, onSwitchToTable, ariaLabel } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const hullRef = useRef<HTMLCanvasElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
@@ -95,7 +101,7 @@ export function MapView(props: MapViewProps) {
   useEffect(() => {
     const el = containerRef.current;
     if (!payload || !el) return;
-    const graph = buildGraph(payload);
+    const graph = buildGraph(payload, entities);
     const cached = loadLayout(payload.index_version);
     // A cache that predates a file being added/removed no longer covers every node; a
     // partial cache is still a useful seed (existing files keep their position), but the
@@ -128,6 +134,11 @@ export function MapView(props: MapViewProps) {
         const d = latestDerived.current;
         const ratio = ratioRef.current;
         const pal = palRef.current!;
+        if (data.kind === "entity") {
+          const name = data.label as string, type = data.entityType as string, mentions = (data.mentions as number) ?? 0;
+          const s = nodeStyle(name, { status: null, focused: p.focusedEntity === data.entityId, blastDepth: null, blastActive: false, symbols: 0, hovered: false, zoomRatio: ratio, group: "code", entityType: type, mentions }, pal);
+          return { ...data, size: s.size, color: s.color, borderColor: s.borderColor ?? pal.focus, type: s.type, label: s.label, zIndex: s.zIndex, ariaLabel: entityAccessibleName({ name, type, mentions }) };
+        }
         const sat = data.symbolOf as string | undefined;
         if (sat) {
           const s = nodeStyle(data.symbolName as string, { status: (data.symbolStatus as never) ?? null, focused: p.focusedPath === sat && p.focusedSymbol === data.symbolName, blastDepth: null, blastActive: false, symbols: 0, hovered: false, zoomRatio: ratio, group: "code" }, pal);
@@ -150,6 +161,14 @@ export function MapView(props: MapViewProps) {
         const d = latestDerived.current;
         const pal = palRef.current!;
         const [a, b] = graph.extremities(edge);
+        // The overlay's edges: a mention (entity to file) is a thin dim line, a relation
+        // (entity to entity) a full one. Sigma 3 ships no dashed edge program, so the
+        // "dashed" mention reads as lighter and thinner instead.
+        if (data.kind === "mention" || data.kind === "relation") {
+          const touches = (k: string) => k === p.focusedPath || (p.focusedEntity !== null && k === entityKey(p.focusedEntity));
+          const strong = data.kind === "relation" || touches(a) || touches(b);
+          return { ...data, color: strong ? pal.edge : pal.edgeDim, size: data.kind === "relation" ? 1 : 0.5, hidden: d.blastDepth !== null };
+        }
         const touchesFocused = p.focusedPath === a || p.focusedPath === b;
         const touchesBlast = !!d.blastDepth && d.blastDepth.has(a) && d.blastDepth.has(b);
         const s = edgeStyle({ touchesFocused, blastActive: d.blastDepth !== null, touchesBlast }, pal);
@@ -171,10 +190,11 @@ export function MapView(props: MapViewProps) {
     });
     sigma.on("clickNode", ({ node }) => {
       const a = graph.getNodeAttributes(node);
-      if (a.symbolOf) latest.current.onSelectNode(a.symbolOf as string, a.symbolName as string);
+      if (a.kind === "entity") latest.current.onSelectEntity(a.entityId as number);
+      else if (a.symbolOf) latest.current.onSelectNode(a.symbolOf as string, a.symbolName as string);
       else latest.current.onSelectNode(node, undefined);
     });
-    sigma.on("doubleClickNode", ({ node }) => { if (!graph.getNodeAttribute(node, "symbolOf")) latest.current.onToggleExpand(node); });
+    sigma.on("doubleClickNode", ({ node }) => { const a = graph.getNodeAttributes(node); if (!a.symbolOf && a.kind !== "entity") latest.current.onToggleExpand(node); });
     sigma.on("enterNode", ({ node }) => { hovered.current = node; sigma.refresh(); });
     sigma.on("leaveNode", () => { hovered.current = null; sigma.refresh(); });
     sigma.on("afterRender", () => drawHulls(sigma, graph, hullRef.current, latest.current.boundaries, palRef.current!));
@@ -187,7 +207,7 @@ export function MapView(props: MapViewProps) {
       graphRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload]);
+  }, [payload, entities]);
 
   // A theme switch (system dark/light change) does not remount Sigma: re-read the
   // palette into the ref the reducers/hover-drawer read, push the label colour and
@@ -211,15 +231,16 @@ export function MapView(props: MapViewProps) {
   }, []);
 
   // Repaint when the inputs the reducers read change.
-  useEffect(() => { sigmaRef.current?.refresh(); }, [statusByPath, blastDepth, props.focusedPath, props.focusedSymbol, props.boundaries]);
+  useEffect(() => { sigmaRef.current?.refresh(); }, [statusByPath, blastDepth, props.focusedPath, props.focusedSymbol, props.focusedEntity, props.boundaries]);
 
-  // Camera follows the focused file, no easing.
+  // Camera follows the focused file (or entity), no easing.
+  const focusedNode = props.focusedEntity !== null ? entityKey(props.focusedEntity) : focusedPath;
   useEffect(() => {
     const sigma = sigmaRef.current, graph = graphRef.current;
-    if (!sigma || !graph || !focusedPath || !graph.hasNode(focusedPath)) return;
-    const d = sigma.getNodeDisplayData(focusedPath);
+    if (!sigma || !graph || !focusedNode || !graph.hasNode(focusedNode)) return;
+    const d = sigma.getNodeDisplayData(focusedNode);
     if (d) sigma.getCamera().setState({ x: d.x, y: d.y });
-  }, [focusedPath, payload]);
+  }, [focusedNode, payload, entities]);
 
   // Symbol satellites for the expanded file.
   useEffect(() => {
@@ -240,7 +261,7 @@ export function MapView(props: MapViewProps) {
       });
     }
     sigmaRef.current?.refresh();
-  }, [expandedPath, props.rows, props.hasRetrieval, payload]);
+  }, [expandedPath, props.rows, props.hasRetrieval, payload, entities]);
 
   if (!payload) return <div className="p-3 text-sm text-muted-foreground">Loading the map…</div>;
   return (

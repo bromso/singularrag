@@ -122,6 +122,30 @@ fn budget_over_cap_is_clamped_not_rejected() {
 }
 
 #[test]
+fn query_takes_repeatable_entities_and_themes() {
+    let dir = fixture();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "query",
+            "session",
+            "--entity",
+            "SessionStore",
+            "--entity",
+            "createSession",
+            "--theme",
+            "refresh first",
+            "--theme",
+            "login flow",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\nsrc/auth/session.ts:"));
+}
+
+#[test]
 fn help_lists_the_mcp_subcommand() {
     Command::cargo_bin("singularrag")
         .unwrap()
@@ -257,14 +281,14 @@ fn init_writes_the_claude_files() {
 }
 
 #[test]
-fn mcp_help_names_all_five_tools() {
+fn mcp_help_names_all_six_tools() {
     Command::cargo_bin("singularrag")
         .unwrap()
         .arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "repo_map, find_symbol, trace_path, changed and annotate",
+            "repo_map, find_symbol, trace_path, changed, annotate and entities",
         ));
 }
 
@@ -370,11 +394,25 @@ fn readme_cli_block_lists_the_new_subcommands() {
         "singularrag path ",
         "singularrag changed",
         "singularrag init",
+        "singularrag entities ",
     ] {
         assert!(
             block.contains(sub),
             "README CLI block lacks `{sub}`:\n{block}"
         );
+    }
+}
+
+#[test]
+fn readme_lists_six_tools_and_the_models_setup() {
+    let readme =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
+    for needle in [
+        "Six tools",
+        "ollama pull nomic-embed-text",
+        "singularrag doctor",
+    ] {
+        assert!(readme.contains(needle), "README lacks `{needle}`");
     }
 }
 
@@ -424,6 +462,75 @@ fn the_docs_question_file_loads_and_names_sections_that_exist() {
     }
 }
 
+fn prose_questions_path() -> &'static str {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../e",
+        "val/questions-prose.toml"
+    )
+}
+
+#[test]
+fn the_prose_question_file_loads_and_names_sections_that_exist() {
+    let qs = singularrag_core::eval::load_questions(std::path::Path::new(prose_questions_path()))
+        .unwrap();
+    assert_eq!(qs.len(), 12);
+    let mut cats: std::collections::BTreeMap<&str, usize> = Default::default();
+    for q in &qs {
+        *cats.entry(q.category.as_str()).or_default() += 1;
+    }
+    assert_eq!(
+        cats.into_iter().collect::<Vec<_>>(),
+        vec![("entity", 4), ("paraphrase", 4), ("relation", 4)]
+    );
+    // Gold is checked against an index of the fixture in a tempdir, the corpus the questions
+    // were authored from.
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_prose(dir.path());
+    let mut e = singularrag_core::engine::Engine::open(dir.path(), "prose-gold-check").unwrap();
+    e.set_models_enabled(false);
+    e.refresh(std::time::Duration::from_secs(120)).unwrap();
+    for q in &qs {
+        assert!(!q.gold.is_empty(), "{} has no gold", q.id);
+        for g in &q.gold {
+            let (path, name) = g.split_once("::").unwrap();
+            let n: i64 = e
+                .store()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1 AND s.name = ?2",
+                    [path, name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(n > 0, "{} gold {g} is not in the index", q.id);
+        }
+    }
+}
+
+#[test]
+fn eval_no_models_runs_the_prose_questions() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_prose(dir.path());
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        // Nothing listens here: with --no-models the run must never ask.
+        .env("SINGULARRAG_OLLAMA_URL", "http://127.0.0.1:9")
+        .args([
+            "eval",
+            "--questions",
+            prose_questions_path(),
+            "--budget",
+            "4096",
+            "--no-models",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mean recall"));
+}
+
 /// Recursively copy `from` into `to`, skipping build output, dependencies, VCS and index
 /// directories.
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
@@ -444,4 +551,74 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
             std::fs::copy(entry.path(), to.join(&name)).unwrap();
         }
     }
+}
+
+#[test]
+fn doctor_reports_ollama_and_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_docs_mini(dir.path());
+    let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args(["--repo", dir.path().to_str().unwrap(), "index"])
+        .assert()
+        .success();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .env("SINGULARRAG_OLLAMA_URL", f.url())
+        .args(["--repo", dir.path().to_str().unwrap(), "doctor"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ollama: ok")
+                .and(predicate::str::contains("qwen2.5:7b-instruct: pulled"))
+                .and(predicate::str::contains("pending:")),
+        );
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .env("SINGULARRAG_OLLAMA_URL", "http://127.0.0.1:9")
+        .args(["--repo", dir.path().to_str().unwrap(), "doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ollama: unreachable"));
+}
+
+#[test]
+fn entities_answers_from_what_is_extracted_and_never_extracts() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_docs_mini(dir.path());
+    let f = singularrag_core::fake_ollama::FakeOllama::spawn(32);
+    f.set_extraction("Freshness", serde_json::json!({"entities": [{"name": "STALE header", "type": "concept", "description": "the header when files changed"}], "relations": []}));
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .env("SINGULARRAG_OLLAMA_URL", f.url())
+        .args([
+            "entities",
+            "stale header",
+            "--limit",
+            "5",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::starts_with("# singularrag · index ")
+                .and(predicate::str::contains("pending"))
+                .and(predicate::str::contains("STALE header").not()),
+        )
+        .stderr(predicate::str::is_match(
+            r"entities: [1-9][0-9]* sections not yet extracted; run singularrag serve or mcp to extract them",
+        ).unwrap());
+    let generate = f
+        .calls()
+        .iter()
+        .filter(|p| p.as_str() == "/api/generate")
+        .count();
+    assert_eq!(
+        generate,
+        0,
+        "the one-shot CLI never extracts: {:?}",
+        f.calls()
+    );
 }

@@ -33,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/retrievals/{id}", get(routes::retrieval))
         .route("/tree", get(routes::tree))
         .route("/skipped", get(routes::skipped))
+        .route("/entities", get(routes::entities))
         .route("/map", get(routes::get_map).put(routes::put_map))
         .route("/graph", get(routes::graph))
         .route("/blast", get(routes::blast))
@@ -88,6 +89,8 @@ pub fn run(root: PathBuf, port: u16, open_browser: bool) -> anyhow::Result<()> {
         root: root.clone(),
         session_key: crate::actor::SessionKey::Fixed("serve".into()),
         refresh_budget: singularrag_core::engine::REFRESH_BUDGET,
+        models_url: None,
+        knowledge_idle: None,
     });
 
     let result = rt.block_on(async {

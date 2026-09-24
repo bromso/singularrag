@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { applyPositions, buildGraph, layoutCacheKey, layoutGraph, loadLayout, saveLayout, separateCoincident } from "./graph";
-import type { GraphPayload } from "@/api/types";
+import { applyPositions, buildGraph, filterEntitiesToRoot, layoutCacheKey, layoutGraph, loadLayout, saveLayout, separateCoincident } from "./graph";
+import type { EntitiesPayload, GraphPayload } from "@/api/types";
 
 const payload: GraphPayload = {
   index_version: "v1",
@@ -19,6 +19,72 @@ describe("buildGraph", () => {
     // Sum, not max: a name referenced both ways (once from each direction) is counted
     // in each direction's `names`, so the merged undirected edge's total is 1 + 2 = 3.
     expect(g.getEdgeAttribute(g.edge("a.ts", "b.ts")!, "names")).toBe(3);
+  });
+});
+
+describe("buildGraph with entities", () => {
+  const docs: GraphPayload = { index_version: "v1", nodes: [{ path: "docs/a.md", symbols: 2, lang: "markdown" }, { path: "a.ts", symbols: 1, lang: "typescript" }], edges: [] };
+  const entities: EntitiesPayload = {
+    entities: [
+      { id: 1, name: "Ada", type: "person", description: "Wrote the notes.", mentions: 4 },
+      { id: 2, name: "Engine", type: "system", description: "The engine.", mentions: 1 },
+    ],
+    relations: [{ id: 9, src: 1, dst: 2, description: "maintains", symbol_id: 5, path: "docs/a.md", name: "Intro" }],
+    mentions: [
+      { entity_id: 1, symbol_id: 5, path: "docs/a.md", name: "Intro" },
+      { entity_id: 1, symbol_id: 6, path: "docs/gone.md", name: "Old" },
+    ],
+    truncated: false,
+  };
+
+  test("adds entity nodes, a mention edge to the file and a relation edge between entities", () => {
+    const g = buildGraph(docs, entities);
+    expect(g.order).toBe(4);
+    expect(g.getNodeAttributes("entity:1")).toMatchObject({ kind: "entity", label: "Ada", entityType: "person", mentions: 4, description: "Wrote the notes." });
+    expect(g.getNodeAttribute("docs/a.md", "kind")).toBe("file");
+    const mention = g.edge("entity:1", "docs/a.md");
+    expect(mention).toBeDefined();
+    expect(g.getEdgeAttribute(mention!, "kind")).toBe("mention");
+    const relation = g.edge("entity:1", "entity:2");
+    expect(relation).toBeDefined();
+    expect(g.getEdgeAttribute(relation!, "kind")).toBe("relation");
+    // A mention whose file is not on the map adds no edge (and no phantom node).
+    expect(g.hasNode("docs/gone.md")).toBe(false);
+  });
+
+  test("without entities the graph is only files", () => {
+    const g = buildGraph(docs);
+    expect(g.order).toBe(2);
+    expect(g.nodes().some((n) => n.startsWith("entity:"))).toBe(false);
+  });
+});
+
+describe("filterEntitiesToRoot", () => {
+  const two: EntitiesPayload = {
+    entities: [
+      { id: 1, name: "Ada", type: "person", description: "", mentions: 1 },
+      { id: 2, name: "Engine", type: "system", description: "", mentions: 1 },
+    ],
+    relations: [{ id: 5, src: 1, dst: 2, description: "maintains", symbol_id: 7, path: "a/doc.md", name: "Intro" }],
+    mentions: [
+      { entity_id: 1, symbol_id: 7, path: "a/doc.md", name: "Intro" },
+      { entity_id: 2, symbol_id: 8, path: "b/doc.md", name: "Other" },
+    ],
+    truncated: false,
+  };
+  test("a root keeps entities mentioned under it, and relations only when both ends remain", () => {
+    const f = filterEntitiesToRoot(two, "a");
+    expect(f.entities.map((e) => e.id)).toEqual([1]);
+    expect(f.relations).toEqual([]);
+    expect(f.mentions.map((m) => m.entity_id)).toEqual([1]);
+  });
+  test("a root matches the first path segment exactly, not a prefix of it", () => {
+    expect(filterEntitiesToRoot(two, "").entities).toHaveLength(2);
+    const ab: EntitiesPayload = { ...two, mentions: [{ entity_id: 1, symbol_id: 7, path: "ab/doc.md", name: "Intro" }] };
+    expect(filterEntitiesToRoot(ab, "a").entities).toEqual([]);
+  });
+  test("no root keeps everything, as the same object", () => {
+    expect(filterEntitiesToRoot(two, "")).toBe(two);
   });
 });
 

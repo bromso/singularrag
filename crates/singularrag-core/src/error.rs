@@ -10,6 +10,8 @@ pub enum Error {
     PathEscape(String),
     #[error("tags: {0}")]
     Tags(String),
+    #[error("model unavailable: {0}")]
+    ModelUnavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

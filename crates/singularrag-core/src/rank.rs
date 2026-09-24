@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::config::MapConfig;
 use crate::graph::{build_graph, query_ident_match, FileGraph};
+use crate::knowledge::{Seeds, SEMANTIC_K, THEME_K};
 use crate::store::Store;
 use crate::tokens::query_terms;
 use crate::Result;
@@ -38,6 +39,12 @@ pub struct Reasons {
     pub query_ident_match: bool,
     pub note_hit: bool,
     pub body_hit: bool,
+    /// Similarity of the section to the query's vector, when it was among the nearest.
+    pub semantic: Option<f64>,
+    /// Entities the section mentions that the query or the caller named.
+    pub entities: Vec<String>,
+    /// Themes whose nearest relations this section states.
+    pub themes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,23 +149,31 @@ pub fn fts_body_hits(store: &Store, terms: &[String]) -> Result<Vec<(i64, f64)>>
     Ok(out)
 }
 
-/// How a file's FTS bonus is shared between its hits (documents spec §5, amended). Each
-/// hit is `(name hit, body rank)`: a name hit weighs 1.0; a body hit weighs its rank
-/// normalised so the strongest body hit in the file weighs 1.0; a symbol with both adds
-/// them. Returns each hit's share of the bonus, summing to one. An even split falls out
-/// when every hit is a name hit, which is what code files had before.
-pub fn hit_shares(hits: &[(bool, Option<f64>)]) -> Vec<f64> {
-    let max_body = hits.iter().filter_map(|(_, b)| *b).fold(0.0_f64, f64::max);
+/// One hit for `hit_shares`: `(name hit, body rank, semantic similarity)`.
+pub type Hit = (bool, Option<f64>, Option<f64>);
+
+/// How a file's FTS bonus is shared between its hits (documents spec §5, amended;
+/// knowledge spec §4). Each hit is `(name hit, body rank, semantic similarity)`: a name
+/// hit weighs 1.0; a body rank is normalised so the strongest body hit in the file
+/// weighs 1.0 (similarities never enter that maximum); the symbol then takes the larger
+/// of its normalised rank and its similarity, and adds the name weight. Returns each
+/// hit's share of the bonus, summing to one. An even split falls out when every hit is
+/// a name hit, which is what code files had before.
+pub fn hit_shares(hits: &[Hit]) -> Vec<f64> {
+    let max_body = hits
+        .iter()
+        .filter_map(|(_, b, _)| *b)
+        .fold(0.0_f64, f64::max);
     let weights: Vec<f64> = hits
         .iter()
-        .map(|(name, body)| {
+        .map(|(name, body, semantic)| {
             let n = if *name { 1.0 } else { 0.0 };
             let b = match body {
                 Some(r) if max_body > 0.0 => r / max_body,
                 Some(_) => 1.0,
                 None => 0.0,
             };
-            n + b
+            n + b.max(semantic.unwrap_or(0.0))
         })
         .collect();
     let total: f64 = weights.iter().sum();
@@ -206,11 +221,66 @@ pub fn note_matches(text: &str, terms: &[String]) -> bool {
     terms.iter().any(|t| words.contains(t))
 }
 
+/// The sections the knowledge seeds reach, by symbol id (knowledge spec §4). Computed
+/// from vectors already in `Seeds`: ranking never calls a model.
+#[derive(Default)]
+struct KnowledgeHits {
+    /// Nearest sections to the query vector, with their similarity.
+    semantic: HashMap<i64, f64>,
+    /// Sections mentioning a matched entity, with the entities' names.
+    entities: HashMap<i64, Vec<String>>,
+    /// Sections stating a relation near a theme: `(theme, similarity)`, best per theme.
+    themes: HashMap<i64, Vec<(String, f64)>>,
+}
+
+fn knowledge_hits(store: &Store, seeds: &Seeds) -> Result<KnowledgeHits> {
+    let mut hits = KnowledgeHits::default();
+    let conn = store.conn();
+    if let Some(qv) = &seeds.query_vec {
+        for (id, sim) in crate::store::vec::knn(store, "section_vec", qv, SEMANTIC_K)? {
+            if sim > 0.0 {
+                hits.semantic.insert(id, sim);
+            }
+        }
+    }
+    if !seeds.entity_ids.is_empty() {
+        let mut stmt =
+            conn.prepare("SELECT symbol_id FROM entity_mentions WHERE entity_id = ?1")?;
+        for (id, name) in seeds.entity_ids.iter().zip(&seeds.entity_names) {
+            for row in stmt.query_map([id], |r| r.get::<_, i64>(0))? {
+                let names = hits.entities.entry(row?).or_default();
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+    }
+    if !seeds.theme_vecs.is_empty() {
+        let mut stmt = conn.prepare("SELECT symbol_id FROM relations WHERE id = ?1")?;
+        for (theme, tv) in &seeds.theme_vecs {
+            for (rel, sim) in crate::store::vec::knn(store, "relation_vec", tv, THEME_K)? {
+                if sim <= 0.0 {
+                    continue;
+                }
+                for row in stmt.query_map([rel], |r| r.get::<_, i64>(0))? {
+                    let list = hits.themes.entry(row?).or_default();
+                    match list.iter_mut().find(|(t, _)| t == theme) {
+                        Some(best) => best.1 = best.1.max(sim),
+                        None => list.push((theme.clone(), sim)),
+                    }
+                }
+            }
+        }
+    }
+    Ok(hits)
+}
+
 pub fn rank_symbols(
     store: &Store,
     config: &MapConfig,
     query: Option<&str>,
     focus_files: &[String],
+    seeds: &Seeds,
 ) -> Result<Vec<ScoredSymbol>> {
     let terms = query.map(query_terms).unwrap_or_default();
     let conn = store.conn();
@@ -263,6 +333,7 @@ pub fn rank_symbols(
             .map(|i| body_hits[i].1)
     };
     let is_body_hit = |id: i64| body_rank(id).is_some();
+    let kh = knowledge_hits(store, seeds)?;
 
     let g: FileGraph = build_graph(store, config, &terms, &fts_names)?;
     let n = g.nodes.len();
@@ -276,6 +347,32 @@ pub fn rank_symbols(
         .filter(|s| is_fts_hit(s.id) || is_body_hit(s.id))
         .map(|s| s.file_id)
         .collect();
+    // Per file: the best semantic similarity, the matched entity names in seed order,
+    // and the best theme similarity.
+    let mut semantic_files: HashMap<i64, f64> = HashMap::new();
+    let mut entity_files: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut theme_files: HashMap<i64, f64> = HashMap::new();
+    for s in &symbols {
+        if let Some(&sim) = kh.semantic.get(&s.id) {
+            let best = semantic_files.entry(s.file_id).or_default();
+            *best = best.max(sim);
+        }
+        if let Some(names) = kh.entities.get(&s.id) {
+            let file_names = entity_files.entry(s.file_id).or_default();
+            for n in names {
+                if !file_names.contains(n) {
+                    file_names.push(n.clone());
+                }
+            }
+        }
+        if let Some(themes) = kh.themes.get(&s.id) {
+            let best = theme_files.entry(s.file_id).or_default();
+            *best = themes.iter().map(|(_, sim)| *sim).fold(*best, f64::max);
+        }
+    }
+    for names in entity_files.values_mut() {
+        names.sort_by_key(|n| seeds.entity_names.iter().position(|e| e == n));
+    }
 
     // Personalization + seeds per file.
     let mut personalization = vec![1.0; n];
@@ -296,6 +393,18 @@ pub fn rank_symbols(
         if note_files.contains(&node.path) {
             personalization[i] += NOTE_BOOST;
             seeds[i].push("note".to_string());
+        }
+        if let Some(sim) = semantic_files.get(&node.id) {
+            personalization[i] += FTS_FILE_BOOST * sim;
+            seeds[i].push("semantic".to_string());
+        }
+        if let Some(names) = entity_files.get(&node.id) {
+            personalization[i] += NOTE_BOOST;
+            seeds[i].extend(names.iter().map(|n| format!("entity:{n}")));
+        }
+        if let Some(sim) = theme_files.get(&node.id) {
+            personalization[i] += FTS_FILE_BOOST * sim;
+            seeds[i].push("theme".to_string());
         }
     }
     let edge_triples: Vec<(usize, usize, f64)> =
@@ -337,23 +446,27 @@ pub fn rank_symbols(
     // strength (`hit_shares`): a spec section that really answers the query keeps most
     // of its document's bonus instead of a twentieth of it.
     let mut group_size: HashMap<(usize, String), usize> = HashMap::new();
-    let mut hits_by_file: HashMap<usize, Vec<(i64, bool, Option<f64>)>> = HashMap::new();
+    let mut hits_by_file: HashMap<usize, Vec<(i64, Hit)>> = HashMap::new();
     for s in &symbols {
         let fi = g.index_of[&s.file_id];
         *group_size.entry((fi, s.name.clone())).or_default() += 1;
-        let name_hit = is_fts_hit(s.id);
+        // Entity and theme hits weigh like a name hit; a semantic hit weighs its
+        // similarity against the file's normalised body ranks (`hit_shares`).
+        let name_hit =
+            is_fts_hit(s.id) || kh.entities.contains_key(&s.id) || kh.themes.contains_key(&s.id);
         let body = body_rank(s.id);
-        if name_hit || body.is_some() {
+        let semantic = kh.semantic.get(&s.id).copied();
+        if name_hit || body.is_some() || semantic.is_some() {
             hits_by_file
                 .entry(fi)
                 .or_default()
-                .push((s.id, name_hit, body));
+                .push((s.id, (name_hit, body, semantic)));
         }
     }
     let mut share_of: HashMap<i64, f64> = HashMap::new();
     for hits in hits_by_file.values() {
-        let kinds: Vec<(bool, Option<f64>)> = hits.iter().map(|(_, n, b)| (*n, *b)).collect();
-        for ((id, _, _), share) in hits.iter().zip(hit_shares(&kinds)) {
+        let kinds: Vec<Hit> = hits.iter().map(|(_, h)| *h).collect();
+        for ((id, _), share) in hits.iter().zip(hit_shares(&kinds)) {
             share_of.insert(*id, share);
         }
     }
@@ -418,6 +531,13 @@ pub fn rank_symbols(
                     query_ident_match: query_ident_match(&s.name, &terms, &fts_names),
                     note_hit,
                     body_hit,
+                    semantic: kh.semantic.get(&s.id).copied(),
+                    entities: kh.entities.get(&s.id).cloned().unwrap_or_default(),
+                    themes: kh
+                        .themes
+                        .get(&s.id)
+                        .map(|t| t.iter().map(|(theme, _)| theme.clone()).collect())
+                        .unwrap_or_default(),
                 },
             }
         })
@@ -433,7 +553,7 @@ pub fn rank_symbols(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::MapConfig;
     use crate::fixture::write_ts_mini;
@@ -483,7 +603,8 @@ mod tests {
     #[test]
     fn most_referenced_definition_outranks_unreferenced_ones() {
         let (_dir, store) = indexed();
-        let ranked = rank_symbols(&store, &MapConfig::default(), None, &[]).unwrap();
+        let ranked =
+            rank_symbols(&store, &MapConfig::default(), None, &[], &Seeds::default()).unwrap();
         let names = || ranked.iter().map(|s| &s.name).collect::<Vec<_>>();
         let pos = |n: &str| ranked.iter().position(|s| s.name == n).unwrap();
         // Referenced from two other files; `attachSession` and `login` are referenced
@@ -533,7 +654,8 @@ mod tests {
         .unwrap()
         .refresh(None)
         .unwrap();
-        let ranked = rank_symbols(&store, &MapConfig::default(), None, &[]).unwrap();
+        let ranked =
+            rank_symbols(&store, &MapConfig::default(), None, &[], &Seeds::default()).unwrap();
 
         let children: Vec<&ScoredSymbol> = ranked.iter().filter(|s| s.name == "Child").collect();
         assert_eq!(
@@ -564,7 +686,8 @@ mod tests {
     #[test]
     fn self_references_count_for_the_score_and_appear_in_reasons() {
         let (_dir, store) = indexed();
-        let ranked = rank_symbols(&store, &MapConfig::default(), None, &[]).unwrap();
+        let ranked =
+            rank_symbols(&store, &MapConfig::default(), None, &[], &Seeds::default()).unwrap();
         // `SessionStore` is only ever referenced from src/auth/session.ts (`new SessionStore()`).
         let store_sym = ranked.iter().find(|s| s.name == "SessionStore").unwrap();
         assert!(
@@ -589,7 +712,14 @@ mod tests {
     #[test]
     fn stemmed_fts_hits_count_as_query_identifier_matches() {
         let (_dir, store) = indexed();
-        let ranked = rank_symbols(&store, &MapConfig::default(), Some("sessions"), &[]).unwrap();
+        let ranked = rank_symbols(
+            &store,
+            &MapConfig::default(),
+            Some("sessions"),
+            &[],
+            &Seeds::default(),
+        )
+        .unwrap();
         let cs = ranked.iter().find(|s| s.name == "createSession").unwrap();
         assert!(cs.reasons.fts_hit, "porter stemming should match sessions");
         assert!(
@@ -616,6 +746,7 @@ mod tests {
             &MapConfig::default(),
             Some("where is log written"),
             &[],
+            &Seeds::default(),
         )
         .unwrap();
         let log = ranked.iter().find(|s| s.name == "log").unwrap();
@@ -670,7 +801,7 @@ mod tests {
             "[[exclude]]\npath = \"src/util/\"\n[[pin]]\npath = \"src/cli/login.ts\"\n",
         )
         .unwrap();
-        let ranked = rank_symbols(&store, &cfg, None, &[]).unwrap();
+        let ranked = rank_symbols(&store, &cfg, None, &[], &Seeds::default()).unwrap();
         assert!(ranked.iter().all(|s| s.path != "src/util/log.ts"));
         let login = ranked.iter().find(|s| s.name == "login").unwrap();
         assert!(login.reasons.pinned);
@@ -685,6 +816,7 @@ mod tests {
             &MapConfig::default(),
             None,
             &["src/cli/login.ts".to_string()],
+            &Seeds::default(),
         )
         .unwrap();
         let login = ranked.iter().find(|s| s.name == "login").unwrap();
@@ -698,9 +830,22 @@ mod tests {
             "[[note]]\npath = \"src/cli/login.ts\"\nsymbol = \"login\"\ntext = \"the onboarding flow starts here\"\nby = \"agent\"\nsession = \"s\"\nat = \"t\"\n",
         )
         .unwrap();
-        let plain =
-            rank_symbols(&store, &MapConfig::default(), Some("onboarding flow"), &[]).unwrap();
-        let noted = rank_symbols(&store, &config, Some("onboarding flow"), &[]).unwrap();
+        let plain = rank_symbols(
+            &store,
+            &MapConfig::default(),
+            Some("onboarding flow"),
+            &[],
+            &Seeds::default(),
+        )
+        .unwrap();
+        let noted = rank_symbols(
+            &store,
+            &config,
+            Some("onboarding flow"),
+            &[],
+            &Seeds::default(),
+        )
+        .unwrap();
         let pos = |v: &[ScoredSymbol]| v.iter().position(|s| s.name == "login").unwrap();
         assert!(
             pos(&noted) < pos(&plain),
@@ -739,6 +884,7 @@ mod tests {
             &MapConfig::default(),
             Some("what does the STALE header mean"),
             &[],
+            &Seeds::default(),
         )
         .unwrap();
         let top: Vec<String> = ranked
@@ -788,8 +934,14 @@ mod tests {
             .unwrap()
             .refresh(None)
             .unwrap();
-        let ranked =
-            rank_symbols(&store, &MapConfig::default(), Some("createSession"), &[]).unwrap();
+        let ranked = rank_symbols(
+            &store,
+            &MapConfig::default(),
+            Some("createSession"),
+            &[],
+            &Seeds::default(),
+        )
+        .unwrap();
         let sess = ranked
             .iter()
             .find(|s| s.path == "src/auth/session.ts" && s.name == "createSession")
@@ -807,20 +959,24 @@ mod tests {
     #[test]
     fn hit_shares_weigh_body_hits_by_rank_and_name_hits_as_one() {
         // Two name hits: even split, as before.
-        let even = hit_shares(&[(true, None), (true, None)]);
+        let even = hit_shares(&[(true, None, None), (true, None, None)]);
         assert!((even[0] - 0.5).abs() < 1e-9 && (even[1] - 0.5).abs() < 1e-9);
         // One strong body hit and three weak ones: the strong one weighs 1.0, the weak
         // ones 0.1 each, so the strong section takes 1 / 1.3 of the file's bonus.
         let s = hit_shares(&[
-            (false, Some(10.0)),
-            (false, Some(1.0)),
-            (false, Some(1.0)),
-            (false, Some(1.0)),
+            (false, Some(10.0), None),
+            (false, Some(1.0), None),
+            (false, Some(1.0), None),
+            (false, Some(1.0), None),
         ]);
         assert!((s[0] - 1.0 / 1.3).abs() < 1e-9, "{s:?}");
         assert!((s[1] - 0.1 / 1.3).abs() < 1e-9, "{s:?}");
         // A name hit beside body hits weighs 1.0, the same as the strongest body hit.
-        let m = hit_shares(&[(true, None), (false, Some(4.0)), (false, Some(2.0))]);
+        let m = hit_shares(&[
+            (true, None, None),
+            (false, Some(4.0), None),
+            (false, Some(2.0), None),
+        ]);
         assert!(
             (m[0] - 1.0 / 2.5).abs() < 1e-9
                 && (m[1] - 1.0 / 2.5).abs() < 1e-9
@@ -828,12 +984,24 @@ mod tests {
             "{m:?}"
         );
         // Shares always sum to one; a symbol with both a name and a body hit adds them.
-        let both = hit_shares(&[(true, Some(3.0)), (false, Some(3.0))]);
+        let both = hit_shares(&[(true, Some(3.0), None), (false, Some(3.0), None)]);
         assert!(
             (both.iter().sum::<f64>() - 1.0).abs() < 1e-9 && both[0] > both[1],
             "{both:?}"
         );
         assert!(hit_shares(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_semantic_hit_weighs_against_normalised_body_ranks() {
+        // Body ranks are raw bm25 sums; they are normalised before the similarity is
+        // compared, and a similarity never enters the body maximum.
+        let s = hit_shares(&[(false, Some(8.0), None), (false, None, Some(0.85))]);
+        assert!((s[0] - 1.0 / 1.85).abs() < 1e-9, "{s:?}");
+        assert!((s[1] - 0.85 / 1.85).abs() < 1e-9, "{s:?}");
+        // A symbol with both takes the larger of its normalised rank and its similarity.
+        let b = hit_shares(&[(false, Some(8.0), None), (false, Some(2.0), Some(0.6))]);
+        assert!((b[1] - 0.6 / 1.6).abs() < 1e-9, "{b:?}");
     }
 
     #[test]
@@ -852,7 +1020,14 @@ mod tests {
             .unwrap()
             .refresh(None)
             .unwrap();
-        let ranked = rank_symbols(&store, &MapConfig::default(), Some("routing"), &[]).unwrap();
+        let ranked = rank_symbols(
+            &store,
+            &MapConfig::default(),
+            Some("routing"),
+            &[],
+            &Seeds::default(),
+        )
+        .unwrap();
         let score = |name: &str| {
             ranked
                 .iter()
@@ -871,6 +1046,143 @@ mod tests {
             (1..=5).all(|i| pos("Strong") < pos(&format!("Weak{i}"))),
             "{:?}",
             ranked.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// A docs fixture with the knowledge layer drained against the fake: section, entity
+    /// and relation vectors exist. Task 6 reuses it.
+    pub(crate) fn knowledge_ready() -> (
+        tempfile::TempDir,
+        Store,
+        crate::fake_ollama::FakeOllama,
+        crate::models::Models,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_docs_mini(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = crate::workspace::Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        let f = crate::fake_ollama::FakeOllama::spawn(32);
+        // A relation only lands when both ends are known entities, and Freshness is
+        // extracted before Storage, so Freshness names `createSession` itself.
+        f.set_extraction("Freshness", serde_json::json!({"entities": [{"name": "STALE header", "type": "concept", "description": "the header when files changed"}, {"name": "createSession", "type": "system", "description": "creates a session"}], "relations": [{"source": "STALE header", "target": "createSession", "description": "refresh runs before session creation"}]}));
+        f.set_extraction("Storage", serde_json::json!({"entities": [{"name": "SessionStore", "type": "system", "description": "keeps sessions"}, {"name": "createSession", "type": "system", "description": "creates a session"}], "relations": []}));
+        let m = crate::models::Models::new(crate::models::ModelsConfig {
+            ollama: f.url(),
+            ..Default::default()
+        });
+        while crate::knowledge::pending(&store).unwrap() > 0 {
+            crate::knowledge::tick(&store, &m, std::time::Duration::from_secs(20), &|| false)
+                .unwrap();
+        }
+        (dir, store, f, m)
+    }
+
+    #[test]
+    fn the_semantic_seed_finds_a_section_with_no_keyword_overlap() {
+        let (_d, store, _f, m) = knowledge_ready();
+        // The fake embeds by bag of words; "Wait and call again" is the runbook's prose, and
+        // the query shares those words but none of the heading's, so FTS on names finds nothing.
+        let seeds =
+            crate::knowledge::seeds_for(&store, Some(&m), Some("wait and call again"), &[], &[])
+                .unwrap();
+        assert!(seeds.query_vec.is_some() && !seeds.models_unavailable);
+        let ranked = rank_symbols(
+            &store,
+            &MapConfig::default(),
+            Some("wait and call again"),
+            &[],
+            &seeds,
+        )
+        .unwrap();
+        let hit = ranked
+            .iter()
+            .find(|s| s.name == "When the header says STALE")
+            .unwrap();
+        assert!(
+            hit.reasons.semantic.is_some_and(|v| v > 0.5),
+            "{:?}",
+            hit.reasons
+        );
+        assert!(hit.reasons.seeds.contains(&"semantic".to_string()));
+        assert!(
+            ranked
+                .iter()
+                .position(|s| s.name == "When the header says STALE")
+                .unwrap()
+                < 5,
+            "{:?}",
+            ranked.iter().take(5).map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_entity_seed_matches_by_term_argument_and_vector() {
+        let (_d, store, _f, m) = knowledge_ready();
+        let by_term = crate::knowledge::seeds_for(
+            &store,
+            Some(&m),
+            Some("what is the stale header"),
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            by_term.entity_names.iter().any(|n| n == "STALE header"),
+            "{:?}",
+            by_term.entity_names
+        );
+        let by_arg = crate::knowledge::seeds_for(
+            &store,
+            None,
+            Some("anything"),
+            &["sessionstore".into()],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(by_arg.entity_names, vec!["SessionStore".to_string()]);
+        let ranked = rank_symbols(
+            &store,
+            &MapConfig::default(),
+            Some("anything"),
+            &[],
+            &by_arg,
+        )
+        .unwrap();
+        let storage = ranked.iter().find(|s| s.name == "Storage").unwrap();
+        assert_eq!(storage.reasons.entities, vec!["SessionStore".to_string()]);
+        assert!(storage
+            .reasons
+            .seeds
+            .contains(&"entity:SessionStore".to_string()));
+    }
+
+    #[test]
+    fn themes_match_relations_and_seeds_are_empty_without_models() {
+        let (_d, store, f, m) = knowledge_ready();
+        let s = crate::knowledge::seeds_for(
+            &store,
+            Some(&m),
+            None,
+            &[],
+            &["refresh before session creation".into()],
+        )
+        .unwrap();
+        assert_eq!(s.theme_vecs.len(), 1);
+        let ranked = rank_symbols(&store, &MapConfig::default(), None, &[], &s).unwrap();
+        let fresh = ranked.iter().find(|s| s.name == "Freshness").unwrap();
+        assert!(!fresh.reasons.themes.is_empty(), "{:?}", fresh.reasons);
+        f.set_down(true);
+        let off =
+            crate::knowledge::seeds_for(&store, Some(&m), Some("x"), &[], &["y".into()]).unwrap();
+        assert!(off.models_unavailable && off.query_vec.is_none() && off.theme_vecs.is_empty());
+        let none = crate::knowledge::seeds_for(&store, None, Some("x"), &[], &[]).unwrap();
+        assert!(
+            !none.models_unavailable && none.query_vec.is_none(),
+            "models disabled is not an outage"
         );
     }
 }

@@ -3,7 +3,8 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { MapView } from "./MapView";
-import type { GraphPayload } from "@/api/types";
+import { entityAccessibleName } from "@/lib/entities";
+import type { EntitiesPayload, GraphPayload } from "@/api/types";
 import type { FileRow } from "@/lib/join";
 
 const Fake = (globalThis as any).__sigma;
@@ -21,9 +22,59 @@ const rows: FileRow[] = [
 const props = () => ({
   payload, rows, hasRetrieval: true, focusedPath: null as string | null, focusedSymbol: null as string | null, expandedPath: null as string | null, blast: null, boundaries: [],
   ariaLabel: "Map of 3 files.", onSelectNode: mock(), onToggleExpand: mock(), onSwitchToTable: mock(), onLayoutReady: mock(),
+  entities: null as EntitiesPayload | null, focusedEntity: null as number | null, onSelectEntity: mock(),
 });
 
 beforeEach(() => { Fake.instances = []; localStorage.clear(); });
+
+const entities: EntitiesPayload = {
+  entities: [{ id: 1, name: "Ada", type: "person", description: "Wrote it.", mentions: 4 }, { id: 2, name: "Engine", type: "system", description: "", mentions: 1 }],
+  relations: [{ id: 3, src: 1, dst: 2, description: "maintains", symbol_id: 1, path: "src/a.ts", name: "x" }],
+  mentions: [{ entity_id: 1, symbol_id: 1, path: "src/a.ts", name: "x" }],
+  truncated: false,
+};
+
+describe("MapView entities", () => {
+  test("entity nodes are named, coloured by type, labelled by name, and a click selects the entity", async () => {
+    const p = { ...props(), entities };
+    render(<MapView {...p} />);
+    await act(async () => {});
+    const s = Fake.instances[0];
+    expect(s.graph.hasNode("entity:1")).toBe(true);
+    const out = (s.settings.nodeReducer as any)("entity:1", s.graph.getNodeAttributes("entity:1"));
+    expect(out).toMatchObject({ type: "circle", label: "Ada", ariaLabel: "Ada (person), 4 mentions" });
+    act(() => s.emit("clickNode", { node: "entity:1" }));
+    expect(p.onSelectEntity).toHaveBeenCalledWith(1);
+    expect(p.onSelectNode).not.toHaveBeenCalled();
+    // Every edge reduces without throwing, mention and relation alike.
+    for (const e of s.graph.edges()) (s.settings.edgeReducer as any)(e, s.graph.getEdgeAttributes(e));
+  });
+  test("hovering an entity draws its description under the name; a file draws only its label", async () => {
+    render(<MapView {...props()} entities={entities} />);
+    await act(async () => {});
+    const s = Fake.instances[0];
+    const reduce = s.settings.nodeReducer as any;
+    const draw = s.settings.defaultDrawNodeHover as (c: unknown, d: unknown, st: unknown) => void;
+    const drawn = (node: string) => {
+      const texts: string[] = [];
+      const ctx = { font: "", fillStyle: "", measureText: (t: string) => ({ width: t.length * 6 }), fillText: (t: string) => texts.push(t), fillRect() {}, beginPath() {}, fill() {}, roundRect() {} };
+      draw(ctx, { ...reduce(node, s.graph.getNodeAttributes(node)), x: 10, y: 10 }, { labelSize: 12, labelFont: "sans-serif", labelWeight: "normal" });
+      return texts;
+    };
+    expect(drawn("entity:1")).toEqual(["Ada", "Wrote it."]);
+    expect(drawn("src/a.ts")).toEqual(["src/a.ts"]);
+  });
+  test("a focused entity is ringed", async () => {
+    render(<MapView {...props()} entities={entities} focusedEntity={2} />);
+    await act(async () => {});
+    const s = Fake.instances[0];
+    expect((s.settings.nodeReducer as any)("entity:2", s.graph.getNodeAttributes("entity:2")).type).toBe("border");
+  });
+  test("the accessible name reads name, type and count", () => {
+    expect(entityAccessibleName({ name: "Ada", type: "person", mentions: 1 })).toBe("Ada (person), 1 mention");
+    expect(entityAccessibleName({ name: "Ada", type: "person", mentions: 3 })).toBe("Ada (person), 3 mentions");
+  });
+});
 
 describe("MapView", () => {
   test("renders the summary label, the switch control before the canvas, and mounts Sigma once", async () => {

@@ -33,6 +33,12 @@ pub struct StatusDto {
     pub indexing: bool,
     pub files: FileCounts,
     pub roots: Vec<RootDto>,
+    /// Sections waiting for the knowledge tick.
+    pub entities_pending: usize,
+    /// The last knowledge tick hit a model outage.
+    pub models_unavailable: bool,
+    /// A dimension change is re-embedding every section.
+    pub embeddings_rebuilding: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,6 +124,43 @@ pub struct GraphDto {
     pub edges: Vec<GraphEdge>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityDto {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+    pub description: String,
+    pub mentions: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRelationDto {
+    pub id: i64,
+    pub src: i64,
+    pub dst: i64,
+    pub description: String,
+    pub symbol_id: i64,
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityMentionDto {
+    pub entity_id: i64,
+    pub symbol_id: i64,
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntitiesDto {
+    pub entities: Vec<EntityDto>,
+    pub relations: Vec<EntityRelationDto>,
+    pub mentions: Vec<EntityMentionDto>,
+    /// Set when any of the three caps below cut a list short.
+    pub truncated: bool,
+}
+
 /// Spec §3: `mcp:<slug>:…` → title-cased slug; `cli-<pid>` → CLI; `serve` → UI; else raw.
 pub fn session_label(key: &str) -> String {
     if let Some(rest) = key.strip_prefix("mcp:") {
@@ -177,6 +220,7 @@ pub fn status(store: &Store, f: &Freshness, ws: &Workspace) -> Result<StatusDto>
             git_head: store.get_meta(&key)?.filter(|h| !h.is_empty()),
         });
     }
+    let entities_pending = singularrag_core::knowledge::pending(store)?;
     Ok(StatusDto {
         index_version: store.get_meta("index_version")?.unwrap_or_default(),
         git_head: store.get_meta("git_head")?.filter(|h| !h.is_empty()),
@@ -189,6 +233,13 @@ pub fn status(store: &Store, f: &Freshness, ws: &Workspace) -> Result<StatusDto>
         indexing: f.indexing,
         files: FileCounts { indexed, skipped },
         roots,
+        entities_pending,
+        // Same rule as the header: an outage with nothing pending is not reported.
+        models_unavailable: entities_pending > 0
+            && store
+                .get_meta("models_error")?
+                .is_some_and(|e| !e.is_empty()),
+        embeddings_rebuilding: store.get_meta("embeddings_rebuilding")?.as_deref() == Some("1"),
     })
 }
 
@@ -322,7 +373,16 @@ pub fn skipped(store: &Store) -> Result<Vec<SkippedFile>> {
             reason: r.get(1)?,
         })
     })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    let mut out: Vec<SkippedFile> = rows.collect::<std::result::Result<_, _>>()?;
+    out.extend(
+        singularrag_core::knowledge::failed_sections(store)?
+            .into_iter()
+            .map(|(path, name, error)| SkippedFile {
+                path: format!("{path}::{name}"),
+                reason: format!("extraction failed: {error}"),
+            }),
+    );
+    Ok(out)
 }
 
 /// The ranking's file graph, projected for drawing: excluded files absent, self-edges
@@ -389,6 +449,92 @@ pub fn graph(store: &Store, config: &singularrag_core::config::MapConfig) -> Res
     })
 }
 
+/// Caps for the knowledge overlay (task brief): entities ordered by `mentions` desc then
+/// `name`, relations and mentions ordered by id so paging (if ever added) is stable. Each
+/// cap is checked by asking for one row past the limit; three queries total, no N+1.
+const ENTITY_CAP: i64 = 500;
+const REL_MENTION_CAP: i64 = 2000;
+
+pub fn entities(store: &Store) -> Result<EntitiesDto> {
+    let conn = store.conn();
+    let mut truncated = false;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, name, type, description, mentions FROM entities ORDER BY mentions DESC, name LIMIT ?1",
+    )?;
+    let mut entities: Vec<EntityDto> = stmt
+        .query_map([ENTITY_CAP + 1], |r| {
+            Ok(EntityDto {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                r#type: r.get(2)?,
+                description: r.get(3)?,
+                mentions: r.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if entities.len() as i64 > ENTITY_CAP {
+        entities.truncate(ENTITY_CAP as usize);
+        truncated = true;
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.src_entity, r.dst_entity, r.description, r.symbol_id, f.path, s.name
+           FROM relations r
+           JOIN symbols s ON s.id = r.symbol_id
+           JOIN files f ON f.id = s.file_id
+          ORDER BY r.id
+          LIMIT ?1",
+    )?;
+    let mut relations: Vec<EntityRelationDto> = stmt
+        .query_map([REL_MENTION_CAP + 1], |r| {
+            Ok(EntityRelationDto {
+                id: r.get(0)?,
+                src: r.get(1)?,
+                dst: r.get(2)?,
+                description: r.get(3)?,
+                symbol_id: r.get(4)?,
+                path: r.get(5)?,
+                name: r.get(6)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if relations.len() as i64 > REL_MENTION_CAP {
+        relations.truncate(REL_MENTION_CAP as usize);
+        truncated = true;
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT m.entity_id, m.symbol_id, f.path, s.name
+           FROM entity_mentions m
+           JOIN symbols s ON s.id = m.symbol_id
+           JOIN files f ON f.id = s.file_id
+          ORDER BY m.entity_id, m.symbol_id
+          LIMIT ?1",
+    )?;
+    let mut mentions: Vec<EntityMentionDto> = stmt
+        .query_map([REL_MENTION_CAP + 1], |r| {
+            Ok(EntityMentionDto {
+                entity_id: r.get(0)?,
+                symbol_id: r.get(1)?,
+                path: r.get(2)?,
+                name: r.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if mentions.len() as i64 > REL_MENTION_CAP {
+        mentions.truncate(REL_MENTION_CAP as usize);
+        truncated = true;
+    }
+
+    Ok(EntitiesDto {
+        entities,
+        relations,
+        mentions,
+        truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +553,7 @@ mod tests {
             // ts_mini fixture is guaranteed to cut something (at 256 tokens, every
             // symbol fits and nothing is cut, which the assertions below require).
             budget_tokens: 64,
+            ..Default::default()
         })
         .unwrap();
         e.find_symbol(&FindRequest {
@@ -522,6 +669,25 @@ mod tests {
             vec!["app", "notes"]
         );
         assert!(s.roots[0].git_head.is_none());
+    }
+
+    #[test]
+    fn status_reports_the_knowledge_queue() {
+        let d = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(d.path());
+        let mut e = singularrag_core::engine::Engine::open(d.path(), "t").unwrap();
+        e.refresh(std::time::Duration::from_secs(60)).unwrap();
+        let ws = e.workspace().clone();
+        let f = crate::serve::state::Freshness::default();
+        let s = status(e.store(), &f, &ws).unwrap();
+        assert!(s.entities_pending > 0);
+        assert!(!s.models_unavailable && !s.embeddings_rebuilding);
+        e.store()
+            .set_meta("models_error", "connection refused")
+            .unwrap();
+        e.store().set_meta("embeddings_rebuilding", "1").unwrap();
+        let s = status(e.store(), &f, &ws).unwrap();
+        assert!(s.models_unavailable && s.embeddings_rebuilding);
     }
 
     #[test]

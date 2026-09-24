@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use singularrag_core::engine::{ChangedRequest, Engine, FindRequest, MapRequest, TraceRequest};
+use singularrag_core::engine::{
+    ChangedRequest, Engine, EntitiesRequest, FindRequest, MapRequest, TraceRequest,
+    ENTITIES_LIMIT_DEFAULT,
+};
 use singularrag_core::map::DEFAULT_BUDGET;
 
 mod actor;
@@ -40,6 +43,12 @@ enum Cmd {
         /// Repo-relative files to seed the ranking; repeatable
         #[arg(long = "focus", value_name = "PATH")]
         focus: Vec<String>,
+        /// Entity names that matter; repeatable
+        #[arg(long = "entity", value_name = "NAME")]
+        entity: Vec<String>,
+        /// Themes as short phrases; repeatable
+        #[arg(long = "theme", value_name = "TEXT")]
+        theme: Vec<String>,
     },
     /// Look up symbols by name (what the find_symbol tool returns)
     Find {
@@ -57,6 +66,9 @@ enum Cmd {
         budget: usize,
         #[arg(long)]
         json: bool,
+        /// Run without the knowledge layer's models: no query embeddings, no semantic seeds
+        #[arg(long)]
+        no_models: bool,
     },
     /// The shortest chain of references between two symbols (what the trace_path tool returns)
     Path {
@@ -71,7 +83,17 @@ enum Cmd {
         #[arg(long)]
         base: Option<String>,
     },
-    /// Serve the repo_map, find_symbol, trace_path, changed and annotate tools to an agent over stdio (MCP)
+    /// What the corpus says about an entity and how it connects (what the entities tool returns)
+    Entities {
+        /// A name or a question
+        query: String,
+        /// Entity names you already know; repeatable
+        #[arg(long = "entity", value_name = "NAME")]
+        entity: Vec<String>,
+        #[arg(long, default_value_t = ENTITIES_LIMIT_DEFAULT)]
+        limit: usize,
+    },
+    /// Serve the repo_map, find_symbol, trace_path, changed, annotate and entities tools to an agent over stdio (MCP)
     Mcp {
         /// Inline refresh budget in milliseconds (spec §8). Tests lower it.
         #[arg(long, default_value_t = 2000, hide = true)]
@@ -89,6 +111,8 @@ enum Cmd {
         #[arg(value_enum)]
         event: hook::HookEvent,
     },
+    /// Check Ollama, the configured models and the knowledge queue
+    Doctor,
     /// Install the query-first hook and the MCP entry for this repo
     Init {
         /// Write .claude/settings.json (shared) instead of .claude/settings.local.json
@@ -151,11 +175,15 @@ fn main() -> anyhow::Result<()> {
             text,
             budget,
             focus,
+            entity,
+            theme,
         } => {
             let r = engine.repo_map(&MapRequest {
                 query: text,
                 focus_files: focus,
                 budget_tokens: budget,
+                entities: entity,
+                themes: theme,
             })?;
             print!("{}", r.text);
         }
@@ -179,6 +207,27 @@ fn main() -> anyhow::Result<()> {
             })?;
             print!("{}", r.text);
         }
+        Cmd::Entities {
+            query,
+            entity,
+            limit,
+        } => {
+            // A one-shot command never extracts (knowledge spec §3: the background job runs
+            // only under serve and mcp); it answers from what is already extracted.
+            engine.refresh(Duration::from_secs(600))?;
+            let pending = engine.extras()?.pending;
+            if pending > 0 {
+                eprintln!(
+                    "entities: {pending} sections not yet extracted; run singularrag serve or mcp to extract them"
+                );
+            }
+            let r = engine.entities(&EntitiesRequest {
+                query,
+                entities: entity,
+                limit,
+            })?;
+            print!("{}", r.text);
+        }
         Cmd::Changed { base } => {
             let r = engine.changed(&ChangedRequest { base })?;
             print!("{}", r.text);
@@ -187,7 +236,11 @@ fn main() -> anyhow::Result<()> {
             questions,
             budget,
             json,
+            no_models,
         } => {
+            if no_models {
+                engine.set_models_enabled(false);
+            }
             let qs = singularrag_core::eval::load_questions(&questions)?;
             let results = singularrag_core::eval::run(&mut engine, &qs, budget)?;
             if json {
@@ -196,10 +249,59 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", singularrag_core::eval::render_report(&results));
             }
         }
+        Cmd::Doctor => print!("{}", doctor(&engine)?),
         Cmd::Mcp { .. } => unreachable!("handled above before Engine::open"),
         Cmd::Serve { .. } => unreachable!("handled above before Engine::open"),
         Cmd::Hook { .. } => unreachable!("handled above before Engine::open"),
         Cmd::Init { .. } => unreachable!("handled above before Engine::open"),
     }
     Ok(())
+}
+
+/// `singularrag doctor`: five lines on Ollama, the two models, the embedding dimension
+/// and the knowledge queue. An unreachable Ollama is a line of output, not a failure.
+fn doctor(engine: &Engine) -> anyhow::Result<String> {
+    use singularrag_core::knowledge;
+    let cfg = &engine.workspace().models;
+    let tags = match engine.models() {
+        Some(m) => m.tags().map_err(|e| e.to_string()),
+        None => Err("no Ollama URL configured".to_string()),
+    };
+    let url = &cfg.ollama;
+    let mut out = match &tags {
+        Ok(_) => format!("ollama: ok ({url})\n"),
+        Err(e) => format!("ollama: unreachable ({e})\n"),
+    };
+    for name in [&cfg.extract, &cfg.embed] {
+        let pulled = tags.as_ref().is_ok_and(|t| is_pulled(t, name));
+        let state = if pulled { "pulled" } else { "missing" };
+        out.push_str(&format!("{name}: {state}\n"));
+    }
+    let store = engine.store();
+    let dim =
+        singularrag_core::store::vec::dim(store)?.map_or("unknown".to_string(), |d| d.to_string());
+    out.push_str(&format!("embedding dimension: {dim}\n"));
+    let failed = knowledge::failed_sections(store)?;
+    let last_error = store
+        .get_meta("models_error")?
+        .filter(|e| !e.is_empty())
+        .or_else(|| {
+            failed
+                .last()
+                .map(|(_, _, e)| e.clone())
+                .filter(|e| !e.is_empty())
+        })
+        .unwrap_or_else(|| "none".to_string());
+    out.push_str(&format!(
+        "pending: {} sections · failed: {} · last error: {last_error}\n",
+        knowledge::pending(store)?,
+        failed.len()
+    ));
+    Ok(out)
+}
+
+/// Ollama lists `nomic-embed-text` as `nomic-embed-text:latest`.
+fn is_pulled(tags: &[String], name: &str) -> bool {
+    tags.iter()
+        .any(|t| t == name || (!name.contains(':') && t.strip_prefix(name) == Some(":latest")))
 }

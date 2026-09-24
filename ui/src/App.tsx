@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { ApiError, api, setToken, tokenFromFragment } from "@/api/client";
 import { subscribe } from "@/api/events";
-import type { BlastResult, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
+import type { BlastResult, EntitiesPayload, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
+import { filterEntitiesToRoot } from "@/lib/graph";
 import { joinRetrieval } from "@/lib/join";
 import { addToBoundary, boundariesOf, noteFor, removeAgentNote, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
 import { fileStatusOf } from "@/lib/mapStyle";
@@ -13,10 +14,10 @@ import { LiveRegion } from "@/components/LiveRegion";
 import { MapErrorBoundary } from "@/components/MapErrorBoundary";
 import { MapView } from "@/components/MapView";
 import { QueryPanel } from "@/components/QueryPanel";
-import { RepoTree, type TreeRow } from "@/components/RepoTree";
+import { RepoTree, type RevealRequest, type TreeRow } from "@/components/RepoTree";
 import { RetrievalsRail } from "@/components/RetrievalsRail";
 import { SkippedSheet } from "@/components/SkippedSheet";
-import { ViewToggle, loadView, saveView, type View } from "@/components/ViewToggle";
+import { OverlayToggle, ViewToggle, loadOverlay, loadView, saveOverlay, saveView, type Overlay, type View } from "@/components/ViewToggle";
 
 const emptyMap: MapConfig = { pin: [], exclude: [], note: [], boundary: [], deny: { extra_patterns: [] } };
 
@@ -44,7 +45,15 @@ export function App() {
   const announce = useCallback((m: string) => setMessages((ms) => [...ms.slice(-9), m]), []);
   const [view, setView] = useState<View>(loadView);
   const changeView = (v: View) => { setView(v); saveView(v); };
+  const [overlay, setOverlay] = useState<Overlay>(loadOverlay);
+  const changeOverlay = (o: Overlay) => { setOverlay(o); saveOverlay(o); };
   const [graph, setGraph] = useState<GraphPayload | null>(null);
+  const [entities, setEntities] = useState<EntitiesPayload | null>(null);
+  // Every change event refetches the entities; an unchanged answer keeps the old object,
+  // so the map (which rebuilds its graph when `entities` changes identity) stays put.
+  const entitiesJson = useRef("");
+  const [reveal, setReveal] = useState<RevealRequest | null>(null);
+  const revealSeq = useRef(0);
   const indexRef = useRef<string | null>(null);
   // SSE "change" events are not coalesced, so two `load()` calls can overlap.
   // Without a guard, whichever resolves last wins even if it started first,
@@ -81,6 +90,11 @@ export function App() {
     let knownMax: number | null = null;
     const load = async () => {
       const gen = ++loadGen.current;
+      // Extraction moves on without the index version changing, so the entities are
+      // refetched on every load. Handled here so an early return below leaves no
+      // unhandled rejection; the `await` at the end reports a failure.
+      const entitiesReq = api.entities();
+      entitiesReq.catch(() => {});
       const [s, rs, sk, m] = await Promise.all([api.status(), api.retrievals(), api.skipped(), api.map()]);
       if (gen !== loadGen.current) return;
       setStatus(s); setRetrievals(rs); setSkipped(sk); applyMapDoc(m);
@@ -103,6 +117,10 @@ export function App() {
         }
       }
       knownMax = Math.max(seen ?? 0, ...rs.map((r) => r.id));
+      const e = await entitiesReq;
+      if (gen !== loadGen.current) return;
+      const json = JSON.stringify(e);
+      if (json !== entitiesJson.current) { entitiesJson.current = json; setEntities(e); }
     };
     load().catch((e: unknown) => toastError(e));
     return subscribe(
@@ -153,7 +171,7 @@ export function App() {
   useEffect(() => {
     if (!root) return;
     const prefix = `${root}/`;
-    setFocused((f) => (f && !f.path.startsWith(prefix) ? null : f));
+    setFocused((f) => (f && f.kind !== "entity" && !f.path.startsWith(prefix) ? null : f));
     setExpandedPath((p) => (p && !p.startsWith(prefix) ? null : p));
   }, [root]);
 
@@ -174,6 +192,7 @@ export function App() {
   // focused now. `pendingBlastRef` records which (path, symbol) the current
   // generation is for, so a second click while that request is still loading is a
   // no-op instead of double-fetching.
+  const focusedPath = focused && focused.kind !== "entity" ? focused.path : null;
   const focusedSymbol = focused?.kind === "symbol" ? focused.symbol.symbol.name : undefined;
   const blastReq = useRef(0);
   const pendingBlastRef = useRef<{ gen: number; path: string; symbol: string } | null>(null);
@@ -181,7 +200,7 @@ export function App() {
     blastReq.current += 1;
     setBlast(null);
     setBlastLoading(false);
-  }, [focused?.path, focusedSymbol]);
+  }, [focusedPath, focusedSymbol]);
 
   const toggleBlast = (path: string, symbol: string) => {
     const pending = pendingBlastRef.current;
@@ -211,6 +230,35 @@ export function App() {
     setFocused({ kind: "file", path, file });
   }, [filteredRows]);
 
+  // An entity shares the `focused` slot with rows. From the panel's list (the keyboard
+  // path) focus moves to the panel's heading, as a row action does; a map click does not.
+  const focusEntity = useCallback((id: number, moveFocus: boolean) => {
+    const entity = entities?.entities.find((e) => e.id === id);
+    if (!entity) return;
+    setFocused({ kind: "entity", entity });
+    if (moveFocus) requestAnimationFrame(() => document.getElementById("detail-heading")?.focus());
+  }, [entities]);
+  const onSelectEntity = useCallback((id: number) => focusEntity(id, false), [focusEntity]);
+
+  // A refetch replaces the entity objects: keep a focused entity current, or drop it if gone.
+  useEffect(() => {
+    setFocused((f) => {
+      if (f?.kind !== "entity") return f;
+      const e = entities?.entities.find((x) => x.id === f.entity.id);
+      return e ? (e === f.entity ? f : { kind: "entity", entity: e }) : null;
+    });
+  }, [entities]);
+
+  // "Go to section": reveal the section's row in the tree (switching from the map) and
+  // focus it; the row's own focus report then moves the panel to that section.
+  const focusSection = (path: string, name: string, symbolId?: number) => {
+    const file = filteredRows.find((r) => r.path === path);
+    const sym = file && (file.symbols.find((s) => s.symbol.id === symbolId) ?? file.symbols.find((s) => s.symbol.name === name));
+    if (!file || !sym) { toast.error(`${path} :: ${name} is not in the tree`); return; }
+    if (view !== "tree") changeView("tree");
+    setReveal({ path, key: sym.key, seq: ++revealSeq.current });
+  };
+
   // `MapView`'s treegrid target may be freshly (re)mounted this same tick — a real
   // rAF never fires in a hidden/background tab (and happy-dom does not schedule it
   // reliably either), so a macrotask tick is what actually lands the focus.
@@ -229,7 +277,9 @@ export function App() {
     served: rows.filter((r) => graphPaths.has(r.path) && fileStatusOf(r, true) === "served").length,
     cut: rows.filter((r) => graphPaths.has(r.path) && fileStatusOf(r, true) === "cut").length,
   }), [rows, graphPaths]);
-  const mapLabel = summaryLabel(filteredGraph?.nodes.length ?? 0, detail ? { id: detail.id, ...fileCounts } : null, map.boundary.length);
+  // The overlay follows the root filter, as the file nodes do.
+  const mapEntities = useMemo(() => (overlay === "entities" && entities ? filterEntitiesToRoot(entities, root) : null), [overlay, entities, root]);
+  const mapLabel = summaryLabel(filteredGraph?.nodes.length ?? 0, detail ? { id: detail.id, ...fileCounts } : null, map.boundary.length, mapEntities?.entities.length);
 
   // Sorted-path JSON, so add-then-remove-in-a-different-order still reads as unchanged.
   const excludeKey = (exclude: MapConfig["exclude"]) => JSON.stringify(exclude.map((t) => t.path).slice().sort());
@@ -267,6 +317,7 @@ export function App() {
         <FreshnessBadge status={status} />
         <SkippedSheet skipped={skipped} />
         <ViewToggle value={view} onChange={changeView} />
+        {view === "map" && <OverlayToggle value={overlay} onChange={changeOverlay} />}
         {status && status.roots.length > 1 && (
           <label className="text-sm">
             Root
@@ -288,17 +339,20 @@ export function App() {
       </div>
       <main className={view === "tree" ? "min-h-0 overflow-auto" : "relative min-h-0 overflow-hidden"}>
         {view === "tree" ? (
-          <RepoTree rows={filteredRows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail} />
+          <RepoTree rows={filteredRows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail}
+            reveal={reveal} onRevealed={() => setReveal(null)} />
         ) : (
           <MapErrorBoundary onSwitchToTable={switchToTable}>
             <MapView payload={filteredGraph} rows={filteredRows} hasRetrieval={detail !== null}
-              focusedPath={focused?.path ?? null} focusedSymbol={focused?.kind === "symbol" ? focused.symbol.symbol.name : null}
+              focusedPath={focusedPath} focusedSymbol={focusedSymbol ?? null}
+              entities={mapEntities} focusedEntity={focused?.kind === "entity" ? focused.entity.id : null} onSelectEntity={onSelectEntity}
               expandedPath={expandedPath} blast={blast} boundaries={map.boundary} ariaLabel={mapLabel}
               onSelectNode={onSelectNode} onToggleExpand={toggleExpand} onSwitchToTable={switchToTable} onLayoutReady={onLayoutReady} />
           </MapErrorBoundary>
         )}
       </main>
-      <DetailPanel row={focused} map={map}
+      <DetailPanel row={focused} map={map} entities={entities}
+        onFocusEntity={(id) => focusEntity(id, true)} onFocusSection={focusSection}
         onPin={(p, s) => save((c) => togglePin(c, p, s))}
         onExclude={(p) => save((c) => toggleExclude(c, p))}
         onNote={(p, s, t) => { if (t !== noteFor(map, p, s)) save((c) => setNote(c, p, s, t)); }}
