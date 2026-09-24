@@ -51,7 +51,7 @@ pub fn ensure_tables(store: &Store, dim_now: usize, model_now: &str) -> Result<b
                 tx.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
             }
             tx.execute_batch(
-                "DELETE FROM section_embeddings; DELETE FROM entity_mentions; DELETE FROM relations; DELETE FROM entities; DELETE FROM embedding_cache;",
+                "DELETE FROM section_embeddings; DELETE FROM entity_mentions; DELETE FROM relations; DELETE FROM step_systems; DELETE FROM steps; DELETE FROM entities; DELETE FROM embedding_cache;",
             )?;
             tx.execute(
                 "INSERT OR REPLACE INTO extract_queue(symbol_id, hash, attempts, last_error, queued_at_ms)

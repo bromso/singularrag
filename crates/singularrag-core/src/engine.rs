@@ -182,6 +182,8 @@ pub struct EntitiesResponse {
     pub text: String,
     /// Entities answered.
     pub entities: usize,
+    /// `path::name` of every section a rendered process step cites, deduped, in order.
+    pub step_sections: Vec<String>,
     pub stale_count: usize,
     pub lock_timeout: bool,
 }
@@ -224,6 +226,12 @@ impl Engine {
 
     pub fn set_models_enabled(&mut self, enabled: bool) {
         self.models_enabled = enabled;
+    }
+
+    /// Applies a checked-in extraction (`knowledge::load_extraction_json`) to this index,
+    /// embedding what it loads when models are enabled. Returns the sections applied.
+    pub fn load_extraction_json(&mut self, json: &str) -> Result<usize> {
+        knowledge::load_extraction_json(&self.store, self.models(), json)
     }
 
     /// Point the model client at `url` (tests, and callers that override the workspace).
@@ -558,6 +566,51 @@ impl Engine {
                 }
             }
         }
+        // The code a process's steps link to, after every cited section, once per symbol.
+        let sections_end = ranked.len();
+        for h in &hits {
+            let Some(p) = &h.steps else { continue };
+            for link in p.steps.iter().flat_map(|s| &s.code) {
+                let i = match ranked[sections_end..]
+                    .iter()
+                    .position(|s| s.symbol_id == link.symbol_id)
+                {
+                    Some(i) => sections_end + i,
+                    None => {
+                        let (kind, line_end, file_id): (String, u32, i64) =
+                            self.store.conn().query_row(
+                                "SELECT kind, line_end, file_id FROM symbols WHERE id = ?1",
+                                [link.symbol_id],
+                                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                            )?;
+                        ranked.push(ScoredSymbol {
+                            symbol_id: link.symbol_id,
+                            file_id,
+                            path: link.path.clone(),
+                            name: link.name.clone(),
+                            kind,
+                            line_start: link.line,
+                            line_end,
+                            signature: String::new(),
+                            score: 1.0 / (ranked.len() as f64 + 1.0),
+                            reasons: crate::rank::Reasons::default(),
+                        });
+                        ranked.len() - 1
+                    }
+                };
+                // What the code implements: the system a name match came from, else the
+                // process whose section mentions it.
+                let what = match &link.via {
+                    crate::journeys::Via::System(name) => name,
+                    crate::journeys::Via::Mention => &h.name,
+                };
+                let reasons = &mut ranked[i].reasons;
+                if !reasons.implements.contains(what) {
+                    reasons.implements.push(what.clone());
+                    reasons.seeds.push(format!("implements:{what}"));
+                }
+            }
+        }
         for s in &mut ranked {
             s.reasons.score = s.score;
         }
@@ -587,10 +640,22 @@ impl Engine {
             ),
             knowledge::render_entities(&hits)
         );
+        let mut step_sections: Vec<String> = Vec::new();
+        for s in hits
+            .iter()
+            .filter_map(|h| h.steps.as_ref())
+            .flat_map(|p| &p.steps)
+        {
+            let key = format!("{}::{}", s.section.path, s.section.name);
+            if !step_sections.contains(&key) {
+                step_sections.push(key);
+            }
+        }
         Ok(EntitiesResponse {
             retrieval_id,
             text,
             entities: hits.len(),
+            step_sections,
             stale_count: stats.remaining,
             lock_timeout: stats.lock_timeout,
         })
@@ -1830,5 +1895,252 @@ mod tests {
         .unwrap();
         let err = Engine::open(d.path(), "t").unwrap_err().to_string();
         assert!(err.contains("does not start with a root name"), "{err}");
+    }
+
+    #[test]
+    fn entities_serves_the_linked_code_after_the_cited_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let handbook = std::fs::read_to_string(dir.path().join("docs/handbook.md")).unwrap();
+        let handbook = handbook.replace(
+            "which pauses the clock until you reply.",
+            "which pauses the clock until you reply. The approval runs through `approveClaim`.",
+        );
+        assert!(handbook.contains("`approveClaim`"));
+        std::fs::write(dir.path().join("docs/handbook.md"), handbook).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/payroll")).unwrap();
+        std::fs::write(
+            dir.path().join("src/payroll/expense.ts"),
+            "export function approveClaim(id: string): boolean {\n  return id.length > 0;\n}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src/vendors")).unwrap();
+        std::fs::write(
+            dir.path().join("src/vendors/expensify.ts"),
+            "export function expensifyClient(key: string): string {\n  return key;\n}\n",
+        )
+        .unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.refresh(Duration::from_secs(60)).unwrap();
+        let map = serde_json::json!({"docs/handbook.md::Expense process": {
+            "entities": [
+                {"name": "Expense process", "type": "process", "description": "how you get money back"},
+                {"name": "Manager", "type": "role", "description": "approves claims"},
+                {"name": "Expensify", "type": "system", "description": "the expense tool"}
+            ],
+            "relations": [],
+            "steps": {"process": "Expense process", "steps": [
+                {"text": "Submit each expense in Expensify", "role": "employee", "systems": ["Expensify"]},
+                {"text": "Your manager approves or rejects the claim", "role": "Manager", "systems": []}
+            ]}
+        }});
+        knowledge::load_extraction_json(e.store(), None, &map.to_string()).unwrap();
+        let r = e
+            .entities(&EntitiesRequest {
+                query: "expense process".into(),
+                entities: vec![],
+                limit: 10,
+            })
+            .unwrap();
+        assert!(
+            r.text
+                .contains(" — code: src/payroll/expense.ts::approveClaim"),
+            "{}",
+            r.text
+        );
+        let mut stmt = e
+            .store()
+            .conn()
+            .prepare(
+                "SELECT ri.path, ri.name, COALESCE(s.kind, ''), ri.reasons_json FROM retrieval_items ri LEFT JOIN symbols s ON s.id = ri.symbol_id WHERE ri.retrieval_id = ?1 AND ri.served ORDER BY ri.rank",
+            )
+            .unwrap();
+        let items: Vec<(String, String, String, String)> = stmt
+            .query_map([r.retrieval_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let pos = |p: &str| {
+            items
+                .iter()
+                .position(|(path, name, _, _)| format!("{path}::{name}") == p)
+                .unwrap_or_else(|| panic!("{p} not served: {items:?}"))
+        };
+        let section = pos("docs/handbook.md::Expense process");
+        let code = pos("src/payroll/expense.ts::approveClaim");
+        assert!(section < code, "{items:?}");
+        assert!(
+            items[..code]
+                .iter()
+                .all(|(_, _, kind, _)| kind == "section"),
+            "code comes after every cited section: {items:?}"
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|(p, n, _, _)| format!("{p}::{n}") == "src/payroll/expense.ts::approveClaim")
+                .count(),
+            1,
+            "deduplicated by symbol"
+        );
+        let (_, _, kind, reasons) = &items[code];
+        assert_eq!(kind, "function");
+        assert!(
+            reasons.contains("implements:Expense process")
+                && reasons.contains(r#""implements":["Expense process"]"#),
+            "{reasons}"
+        );
+        // A system-matched link names the system it implements, not the process.
+        let (_, _, _, reasons) = &items[pos("src/vendors/expensify.ts::expensifyClient")];
+        assert!(
+            reasons.contains("implements:Expensify")
+                && reasons.contains(r#""implements":["Expensify"]"#),
+            "{reasons}"
+        );
+    }
+
+    #[test]
+    fn repo_map_for_a_process_query_serves_the_implementing_file_with_an_implements_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        std::fs::create_dir_all(dir.path().join("src/vendors")).unwrap();
+        std::fs::write(
+            dir.path().join("src/vendors/expensify.ts"),
+            "export function expensifyClient(key: string): string {\n  return key;\n}\n",
+        )
+        .unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.refresh(Duration::from_secs(60)).unwrap();
+        let map = serde_json::json!({"docs/handbook.md::Expense process": {
+            "entities": [
+                {"name": "Expense process", "type": "process", "description": "how you get money back"},
+                {"name": "Manager", "type": "role", "description": "approves claims"},
+                {"name": "Expensify", "type": "system", "description": "the expense tool"}
+            ],
+            "relations": [],
+            "steps": {"process": "Expense process", "steps": [
+                {"text": "Submit each expense in Expensify", "role": "employee", "systems": ["Expensify"]},
+                {"text": "Your manager approves or rejects the claim", "role": "Manager", "systems": []}
+            ]}
+        }});
+        knowledge::load_extraction_json(e.store(), None, &map.to_string()).unwrap();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("expense process".into()),
+                budget_tokens: 4096,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            resp.text.contains("src/vendors/expensify.ts"),
+            "{}",
+            resp.text
+        );
+        let reasons: String = e
+            .store()
+            .conn()
+            .query_row(
+                "SELECT reasons_json FROM retrieval_items WHERE retrieval_id = ?1 AND served AND path = 'src/vendors/expensify.ts' AND name = 'expensifyClient'",
+                [resp.retrieval_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let reasons: serde_json::Value = serde_json::from_str(&reasons).unwrap();
+        assert_eq!(
+            reasons["implements"],
+            serde_json::json!(["Expensify"]),
+            "{reasons}"
+        );
+        assert!(
+            reasons["seeds"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("implements:Expensify")),
+            "{reasons}"
+        );
+    }
+
+    #[test]
+    fn a_process_whose_system_names_many_symbols_still_serves_its_own_section_first() {
+        // The reviewer's flood: a system named `Store` matches dozens of symbols; the
+        // process's documenting section must survive a small budget and outrank them all.
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let mut main = String::new();
+        for i in 0..40 {
+            let (file, sym) = if i % 2 == 0 {
+                (format!("src/m{i}/store.ts"), format!("storeItem{i}"))
+            } else {
+                (format!("src/m{i}/cache.ts"), format!("userStore{i}"))
+            };
+            std::fs::create_dir_all(dir.path().join(format!("src/m{i}"))).unwrap();
+            std::fs::write(
+                dir.path().join(&file),
+                format!("export function {sym}(k: string): string {{\n  return k;\n}}\n"),
+            )
+            .unwrap();
+            let module = file.trim_end_matches(".ts");
+            main = format!(
+                "import {{ {sym} }} from \"./{}\";\n{main}{sym}(\"x\");\n",
+                &module[4..]
+            );
+        }
+        std::fs::write(dir.path().join("src/main.ts"), main).unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.refresh(Duration::from_secs(60)).unwrap();
+        let map = serde_json::json!({"docs/handbook.md::Expense process": {
+            "entities": [
+                {"name": "Expense process", "type": "process", "description": "how you get money back"},
+                {"name": "Manager", "type": "role", "description": "approves claims"},
+                {"name": "Store", "type": "system", "description": "the expense store"}
+            ],
+            "relations": [],
+            "steps": {"process": "Expense process", "steps": [
+                {"text": "Submit each expense in the Store", "role": "Employee", "systems": ["Store"]},
+                {"text": "Your manager approves or rejects the claim", "role": "Manager", "systems": []}
+            ]}
+        }});
+        knowledge::load_extraction_json(e.store(), None, &map.to_string()).unwrap();
+        let resp = e
+            .repo_map(&MapRequest {
+                query: Some("expense process".into()),
+                budget_tokens: 1024,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut stmt = e
+            .store()
+            .conn()
+            .prepare(
+                "SELECT rank, path, name, served, reasons_json FROM retrieval_items WHERE retrieval_id = ?1 ORDER BY rank",
+            )
+            .unwrap();
+        let items: Vec<(i64, String, String, bool, String)> = stmt
+            .query_map([resp.retrieval_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let section = items
+            .iter()
+            .find(|(_, p, n, _, _)| p == "docs/handbook.md" && n == "Expense process")
+            .unwrap_or_else(|| panic!("section not ranked: {items:?}"));
+        assert!(
+            section.3,
+            "the Expense process section is served: {items:?}"
+        );
+        let implementing: Vec<_> = items
+            .iter()
+            .filter(|(_, _, _, _, r)| r.contains("implements:"))
+            .collect();
+        assert!(!implementing.is_empty(), "{items:?}");
+        assert!(
+            implementing.iter().all(|(rank, ..)| *rank > section.0),
+            "section rank {} vs implementing {implementing:?}",
+            section.0
+        );
     }
 }

@@ -116,6 +116,8 @@ Documents rank alongside code: a Markdown or HTML heading is a `section` row sho
 
 `entities` answers what the documents say about a person, system or concept: its type and description, its relations, and the sections that state them (descriptions are extracted by the local model, not verified).
 
+A process (the handbook's "Expense process", say) comes back from `entities` as its ordered steps, one line each: what happens, the role who acts, the systems touched, the section that documents it and, when any is found, the code that implements it (`code: src/payroll/expense.ts::approveClaim (+2)`). Those links are derived when you ask, never stored: first the code the step's section already mentions, then code, config keys and files whose names contain a touched system's name (`Expensify` finds `expensifyClient`). The Journeys view in `singularrag serve` shows the same steps, filterable by role.
+
 `trace_path` answers how two symbols connect; `changed` lists what your uncommitted (or branch) changes touch and who references each symbol. `singularrag init` installs a Claude Code hook that refuses the first file read of a session until the map has been consulted, once per session.
 
 ## CLI
@@ -128,7 +130,7 @@ singularrag path FROM TO     # the shortest reference chain between two path::sy
 singularrag changed          # the symbols a diff touches and who references them (--base REF)
 singularrag entities "text"  # what the documents say about a person, system or concept (--entity NAME, --limit N)
 singularrag init             # install the query-first hook and the MCP entry for this repo
-singularrag eval             # tier-one recall against eval/questions.toml
+singularrag eval             # tier-one recall against eval/questions.toml (--extraction FILE loads a checked-in extraction first)
 singularrag doctor           # check Ollama, the two models and the extraction queue
 singularrag serve            # open the map UI on localhost
 singularrag mcp              # serve over stdio
@@ -177,7 +179,7 @@ ollama pull nomic-embed-text
 ollama pull qwen2.5:7b-instruct
 ```
 
-With Ollama running, indexing picks the queue up on its own: `serve` and `mcp` embed and extract document sections in the background, a few at a time, under a time budget; a tool call may wait for one in-flight extraction, up to the 30 s model timeout, while the background job is running. `index` never talks to a model, and no one-shot command extracts: `entities` answers from what the background job has already extracted and says on stderr how many sections are still waiting. `query`, `entities` and `eval` embed the query text once (one `/api/embed` call, the query only, never file contents) when the index already holds embeddings from that background job; `eval --no-models` turns that off. Before the index has any embeddings the seed is simply skipped; when Ollama is down the seed is skipped and the header says `models: unavailable`.
+With Ollama running, indexing picks the queue up on its own: `serve` and `mcp` embed and extract document sections in the background, a few at a time, under a time budget; a tool call may wait for one in-flight extraction, up to the 30 s model timeout, while the background job is running. Extraction asks the model a second question only about a section whose first answer named a process: its ordered steps, with the role and systems of each. That second prompt runs in the same background pass, right after the first, and sends the same section text, heading and path to the same Ollama URL; nothing else is sent. `index` never talks to a model, and no one-shot command extracts: `entities` answers from what the background job has already extracted and says on stderr how many sections are still waiting. `query`, `entities` and `eval` embed the query text once (one `/api/embed` call, the query only, never file contents) when the index already holds embeddings from that background job; `eval --no-models` turns that off. `eval --extraction FILE` loads a checked-in extraction (entities, relations and steps per section) instead of asking a model; with models on it also embeds the sections it loads, as the background job would, so pair it with `--no-models` to keep the run offline. Before the index has any embeddings the seed is simply skipped; when Ollama is down the seed is skipped and the header says `models: unavailable`.
 
 Configure it in `.singularrag/workspace.toml`, all optional:
 
@@ -207,7 +209,7 @@ That's what it prints when Ollama isn't installed, as above. With Ollama up and 
 
 ### The vault question set
 
-To check retrieval against your own notes rather than the prose fixture, declare them as a named root (see above) and author a question file outside the repo, `~/.singularrag/questions-vault.toml`, in the same shape as `eval/questions-prose.toml`. Gold entries are `path::Heading text`, exactly as `singularrag find` prints a section — look a heading up with `singularrag find "heading text"` and copy its `path::name` in. Run it with:
+To check retrieval against your own notes rather than the prose fixture, declare them as a named root (see above) and author a question file outside the repo, `~/.singularrag/questions-vault.toml`, in the same shape as `eval/questions-prose.toml`. Gold entries are `path::Heading text`, exactly as `singularrag find` prints a section — look a heading up with `singularrag find "heading text"` and copy its `path::name` in. A `process` question asks about a step of one process in your notes ("who approves an expense claim"), with the section that describes that process as its gold. Run it with:
 
 ```sh
 singularrag eval --questions ~/.singularrag/questions-vault.toml --budget 4096

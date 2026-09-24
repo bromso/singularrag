@@ -14,7 +14,7 @@ pub const EMBED_BATCH: usize = 50;
 pub const MAX_PART_CHARS: usize = 6000;
 pub const NAME_MAX: usize = 80;
 pub const DESCRIPTION_MAX: usize = 300;
-pub const ENTITY_TYPES: [&str; 7] = [
+pub const ENTITY_TYPES: [&str; 9] = [
     "person",
     "organisation",
     "system",
@@ -22,15 +22,26 @@ pub const ENTITY_TYPES: [&str; 7] = [
     "event",
     "place",
     "document",
+    "process",
+    "role",
 ];
+pub const MAX_STEPS: usize = 30;
+pub const STEP_TEXT_MAX: usize = 300;
+pub const ROLE_MAX: usize = 80;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const EXTRACT_PROMPT: &str = "You extract a knowledge graph from one section of a document.\n\
 Return ONLY a JSON object of the shape {\"entities\": [{\"name\": string, \"type\": string, \"description\": string}], \"relations\": [{\"source\": string, \"target\": string, \"description\": string}]}.\n\
-Types are exactly one of: person, organisation, system, concept, event, place, document.\n\
+Types are exactly one of: person, organisation, system, concept, event, place, document, process (a named sequence of steps people follow), role (a job or position that acts in a process).\n\
 Descriptions are one short sentence from the text. Relations connect two entity names from your list.\n\
 Document: {path}\nSection: {heading}\n\nText:\n{text}\n";
 const STRICT_SUFFIX: &str = "\nYour previous answer was not valid JSON. Answer with the JSON object only, no prose, no code fence.";
+
+pub const STEPS_PROMPT_FIRST_LINE: &str = "You list the steps of a process";
+pub const STEPS_PROMPT: &str = "You list the steps of a process described in one section of a document.\n\
+Return ONLY a JSON object of the shape {\"process\": string, \"steps\": [{\"text\": string, \"role\": string, \"systems\": [string]}]}, steps in reading order.\n\
+\"process\" is the name of the process the section describes, as the text names it. Each step's \"text\" is one short sentence from the text; \"role\" is who acts, or an empty string; \"systems\" are the tools or systems the step touches, by the names the text uses.\n\
+Document: {path}\nSection: {heading}\n\nText:\n{text}\n";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelsConfig {
@@ -93,6 +104,22 @@ pub struct ExtractedRelation {
     pub target: String,
     #[serde(default)]
     pub description: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StepsAnswer {
+    #[serde(default)]
+    pub process: String,
+    #[serde(default)]
+    pub steps: Vec<ExtractedStep>,
+}
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExtractedStep {
+    pub text: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub systems: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -159,14 +186,53 @@ pub fn normalise_extraction(e: Extraction) -> Extraction {
     }
 }
 
+pub fn normalise_steps(a: StepsAnswer) -> StepsAnswer {
+    let steps = a
+        .steps
+        .into_iter()
+        .filter_map(|s| {
+            let text = clean(&s.text, STEP_TEXT_MAX);
+            if text.is_empty() {
+                return None;
+            }
+            let systems = s
+                .systems
+                .iter()
+                .map(|x| clean(x, NAME_MAX))
+                .filter(|x| !x.is_empty())
+                .collect();
+            Some(ExtractedStep {
+                text,
+                role: clean(&s.role, ROLE_MAX),
+                systems,
+            })
+        })
+        .take(MAX_STEPS)
+        .collect();
+    StepsAnswer {
+        process: clean(&a.process, NAME_MAX),
+        steps,
+    }
+}
+
 /// The JSON object inside a model answer: fences and prose around it are dropped.
-pub fn parse_extraction(text: &str) -> Option<Extraction> {
+fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     if end <= start {
         return None;
     }
-    serde_json::from_str::<Extraction>(&text[start..=end]).ok()
+    serde_json::from_str::<T>(&text[start..=end]).ok()
+}
+
+/// The JSON object inside a model answer: fences and prose around it are dropped.
+pub fn parse_extraction(text: &str) -> Option<Extraction> {
+    parse_json(text)
+}
+
+/// The JSON object inside a model answer: fences and prose around it are dropped.
+pub fn parse_steps(text: &str) -> Option<StepsAnswer> {
+    parse_json(text)
 }
 
 /// Paragraph-bounded parts of at most `MAX_PART_CHARS`; a single oversized paragraph is cut hard.
@@ -354,6 +420,35 @@ impl Models {
             merged.relations.extend(e.relations);
         }
         Ok(merged)
+    }
+
+    /// The steps prompt for one section: one call per part, one strict retry per part on malformed JSON.
+    pub fn steps(&self, input: &SectionInput) -> Result<StepsAnswer> {
+        let mut merged = StepsAnswer::default();
+        for part in split_parts(input.text) {
+            let prompt = STEPS_PROMPT
+                .replace("{path}", input.path)
+                .replace("{heading}", input.heading)
+                .replace("{text}", &part);
+            let first = self.generate(&prompt)?;
+            let parsed = match parse_steps(&first) {
+                Some(a) => a,
+                None => {
+                    let second = self.generate(&format!("{prompt}{STRICT_SUFFIX}"))?;
+                    parse_steps(&second).ok_or_else(|| {
+                        unavailable(format!(
+                            "steps: not JSON after retry: {}",
+                            clean(&second, 120)
+                        ))
+                    })?
+                }
+            };
+            if merged.process.is_empty() {
+                merged.process = parsed.process;
+            }
+            merged.steps.extend(parsed.steps);
+        }
+        Ok(normalise_steps(merged))
     }
 }
 
@@ -549,6 +644,109 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn the_type_list_has_process_and_role_and_the_prompt_defines_them() {
+        assert!(ENTITY_TYPES.contains(&"process") && ENTITY_TYPES.contains(&"role"));
+        assert!(EXTRACT_PROMPT.contains("process (a named sequence of steps people follow)"));
+        assert!(EXTRACT_PROMPT.contains("role (a job or position that acts in a process)"));
+        assert!(STEPS_PROMPT.starts_with(STEPS_PROMPT_FIRST_LINE));
+    }
+
+    #[test]
+    fn normalise_steps_cleans_truncates_and_drops_empty_steps() {
+        let mut steps: Vec<ExtractedStep> = (0..40)
+            .map(|i| ExtractedStep {
+                text: format!("step {i}"),
+                role: " Manager\u{0} ".into(),
+                systems: vec!["Okta".into(), "".into()],
+            })
+            .collect();
+        steps.push(ExtractedStep {
+            text: "   ".into(),
+            role: "".into(),
+            systems: vec![],
+        });
+        let a = normalise_steps(StepsAnswer {
+            process: " Expense process ".into(),
+            steps,
+        });
+        assert_eq!(a.process, "Expense process");
+        assert_eq!(a.steps.len(), MAX_STEPS);
+        assert_eq!(a.steps[0].role, "Manager");
+        assert_eq!(a.steps[0].systems, vec!["Okta".to_string()]);
+        let long = normalise_steps(StepsAnswer {
+            process: "p".into(),
+            steps: vec![ExtractedStep {
+                text: "x".repeat(400),
+                role: "r".repeat(100),
+                systems: vec![],
+            }],
+        });
+        assert_eq!(long.steps[0].text.chars().count(), STEP_TEXT_MAX);
+        assert_eq!(long.steps[0].role.chars().count(), ROLE_MAX);
+    }
+
+    #[test]
+    fn parse_steps_accepts_fences_and_missing_optional_fields() {
+        let a = parse_steps(
+            "```json\n{\"process\": \"Onboarding\", \"steps\": [{\"text\": \"Activate Okta\"}]}\n```",
+        )
+        .unwrap();
+        assert_eq!(a.process, "Onboarding");
+        assert_eq!(a.steps[0].role, "");
+        assert!(a.steps[0].systems.is_empty());
+        assert!(parse_steps("not json").is_none());
+    }
+
+    #[test]
+    fn steps_asks_once_per_part_and_retries_strictly_on_malformed_json() {
+        let fake = FakeOllama::spawn(8);
+        fake.set_steps(
+            "Expense",
+            serde_json::json!({"process": "Expense process", "steps": [{"text": "Submit in Expensify", "role": "employee", "systems": ["Expensify"]}]}),
+        );
+        let m = Models::new(ModelsConfig {
+            ollama: fake.url(),
+            ..ModelsConfig::default()
+        });
+        let input = SectionInput {
+            path: "docs/handbook.md",
+            heading: "Expense process",
+            text: "Submit each expense in Expensify.",
+        };
+        let a = m.steps(&input).unwrap();
+        assert_eq!(a.steps.len(), 1);
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .filter(|c| *c == "/api/generate:steps")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .filter(|c| *c == "/api/generate")
+                .count(),
+            0
+        );
+        fake.fail_next_generate(1);
+        let a = m.steps(&input).unwrap();
+        assert_eq!(a.steps.len(), 1, "one strict retry recovers");
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .filter(|c| *c == "/api/generate:steps")
+                .count(),
+            3
+        );
+        fake.fail_next_generate(2);
+        assert!(matches!(
+            m.steps(&input),
+            Err(crate::Error::ModelUnavailable(_))
+        ));
     }
 
     #[test]

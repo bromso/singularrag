@@ -5,6 +5,8 @@ export type Reasons = {
   body_hit: boolean;
   /** Similarity to the query's vector when the section was among the nearest. */
   semantic: number | null; entities: string[]; themes: string[];
+  /** Systems a matched process names that this code implements; absent on older rows. */
+  implements?: string[];
 };
 export type Item = { rank: number; symbol_id: number; path: string; name: string; line_start: number; score: number; served: boolean; reasons: Reasons };
 export type RetrievalSummary = {
@@ -34,9 +36,21 @@ export type GraphPayload = { index_version: string; nodes: GraphNode[]; edges: G
 export type BlastFile = { path: string; depth: number; via: string };
 export type BlastResult = { root: { path: string; symbol: string }; files: BlastFile[]; truncated: null | "depth" | "files" };
 export type QueryResult = { retrieval_id: number; served: number; cut: number };
-/** Entity types the extractor emits: person, organisation, system, concept, event, place, document. */
+/** Entity types the extractor emits: person, organisation, system, concept, event, place, document, process, role. */
 export type Entity = { id: number; name: string; type: string; description: string; mentions: number };
 /** A relation between two entities, stated by one section (`symbol_id`, at `path` / `name`). */
 export type Relation = { id: number; src: number; dst: number; description: string; symbol_id: number; path: string; name: string };
 export type Mention = { entity_id: number; symbol_id: number; path: string; name: string };
 export type EntitiesPayload = { entities: Entity[]; relations: Relation[]; mentions: Mention[]; truncated: boolean };
+
+/** How a code symbol came to implement a step: the step's text names it, or it serves a system the step uses. */
+export type CodeVia = "mention" | { system: string };
+export type CodeLink = { symbol_id: number; path: string; name: string; line: number; via: CodeVia };
+/** One ordered step of a process, stated by `section`; `role` is "" when none; `more_code` counts code links cut from `code`. */
+export type Step = {
+  ordinal: number; text: string; role: string; systems: { id: number; name: string }[];
+  section: { symbol_id: number; path: string; name: string; line: number };
+  code: CodeLink[]; more_code: number;
+};
+export type Process = { id: number; name: string; description: string; roles: string[]; steps: Step[] };
+export type ProcessesPayload = { processes: Process[]; truncated: boolean };

@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tree", get(routes::tree))
         .route("/skipped", get(routes::skipped))
         .route("/entities", get(routes::entities))
+        .route("/processes", get(routes::processes))
         .route("/map", get(routes::get_map).put(routes::put_map))
         .route("/graph", get(routes::graph))
         .route("/blast", get(routes::blast))

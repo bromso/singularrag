@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{Engine, MapRequest};
+use crate::engine::{Engine, EntitiesRequest, MapRequest, ENTITIES_LIMIT_DEFAULT};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -22,7 +22,10 @@ pub struct QuestionFile {
     pub question: Vec<Question>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Categories whose questions are also put to the `entities` tool, for the `cited` column.
+pub const CITED_CATEGORIES: [&str; 3] = ["entity", "relation", "process"];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalResult {
     pub id: String,
     pub category: String,
@@ -31,6 +34,11 @@ pub struct EvalResult {
     pub tokens: usize,
     pub hit: Vec<String>,
     pub miss: Vec<String>,
+    /// For `CITED_CATEGORIES`: whether the `entities` tool, given the query, served any
+    /// gold section; for `process`, one that a rendered step of a process hit also cites.
+    /// `None` for the other categories.
+    #[serde(default)]
+    pub cited: Option<bool>,
 }
 
 pub fn load_questions(path: &Path) -> Result<Vec<Question>> {
@@ -63,6 +71,27 @@ pub fn run(engine: &mut Engine, questions: &[Question], budget: usize) -> Result
         let served = served_keys(engine, resp.retrieval_id)?;
         let (hit, miss): (Vec<String>, Vec<String>) =
             q.gold.iter().cloned().partition(|g| served.contains(g));
+        let cited = if CITED_CATEGORIES.contains(&q.category.as_str()) {
+            let r = engine.entities(&EntitiesRequest {
+                query: q.query.clone(),
+                entities: vec![],
+                limit: ENTITIES_LIMIT_DEFAULT,
+            })?;
+            let served = served_keys(engine, r.retrieval_id)?;
+            if q.category == "process" {
+                // A process answer must show its steps: a served gold section that a
+                // rendered step of a process hit cites.
+                Some(
+                    q.gold
+                        .iter()
+                        .any(|g| served.contains(g) && r.step_sections.contains(g)),
+                )
+            } else {
+                Some(q.gold.iter().any(|g| served.contains(g)))
+            }
+        } else {
+            None
+        };
         let recall = if q.gold.is_empty() {
             1.0
         } else {
@@ -75,6 +104,7 @@ pub fn run(engine: &mut Engine, questions: &[Question], budget: usize) -> Result
             tokens: crate::tokens::approx_tokens(&resp.text),
             hit,
             miss,
+            cited,
         });
     }
     Ok(out)
@@ -88,14 +118,20 @@ pub fn mean_recall(results: &[EvalResult]) -> f64 {
 }
 
 pub fn render_report(results: &[EvalResult]) -> String {
-    let mut out = String::from("id    category  recall  tokens  missed\n");
+    let mut out = String::from("id    category   recall  tokens  cited  missed\n");
     for r in results {
+        let cited = match r.cited {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "-",
+        };
         out.push_str(&format!(
-            "{:<5} {:<9} {:>5.2}  {:>6}  {}\n",
+            "{:<5} {:<10} {:>5.2}  {:>6}  {:<5}  {}\n",
             r.id,
             r.category,
             r.recall,
             r.tokens,
+            cited,
             r.miss.join(", ")
         ));
     }
@@ -104,6 +140,22 @@ pub fn render_report(results: &[EvalResult]) -> String {
         mean_recall(results),
         results.len()
     ));
+    // One line per category with cited values, in the order the categories first appear.
+    let mut categories: Vec<&str> = Vec::new();
+    for r in results.iter().filter(|r| r.cited.is_some()) {
+        if !categories.contains(&r.category.as_str()) {
+            categories.push(&r.category);
+        }
+    }
+    for c in categories {
+        let of: Vec<bool> = results
+            .iter()
+            .filter(|r| r.category == c)
+            .filter_map(|r| r.cited)
+            .collect();
+        let yes = of.iter().filter(|c| **c).count();
+        out.push_str(&format!("cited {yes}/{} {c}\n", of.len()));
+    }
     out
 }
 
@@ -149,12 +201,93 @@ gold = ["src/http/middleware.ts::requireSession", "src/http/middleware.ts::attac
         );
         let report = render_report(&results);
         assert!(
-            report.starts_with("id    category  recall  tokens  missed\n"),
+            report.starts_with("id    category   recall  tokens  cited  missed\n"),
             "{report}"
         );
         assert!(report.contains("L1"));
         assert!(report.contains("mean recall"));
+        assert!(
+            results.iter().all(|r| r.cited.is_none()),
+            "locate and blast questions are not put to entities"
+        );
+        assert!(!report.contains("\ncited "), "{report}");
         assert!((mean_recall(&results) - 0.875).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_report_has_a_cited_column_and_a_line_per_cited_category() {
+        let r = |id: &str, category: &str, cited: Option<bool>| EvalResult {
+            id: id.into(),
+            category: category.into(),
+            recall: 1.0,
+            tokens: 10,
+            hit: vec![],
+            miss: vec![],
+            cited,
+        };
+        let report = render_report(&[
+            r("P1", "paraphrase", None),
+            r("S1", "process", Some(true)),
+            r("E1", "entity", Some(false)),
+            r("S2", "process", Some(true)),
+        ]);
+        assert!(
+            report.contains("\nS1    process     1.00      10  yes    \n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("\nE1    entity      1.00      10  no     \n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("\nP1    paraphrase  1.00      10  -      \n"),
+            "{report}"
+        );
+        assert!(
+            report.ends_with("questions\ncited 2/2 process\ncited 0/1 entity\n"),
+            "{report}"
+        );
+        // A JSON report written before the column existed still reads back.
+        let old: EvalResult = serde_json::from_str(
+            r#"{"id":"P1","category":"paraphrase","recall":1.0,"tokens":1,"hit":[],"miss":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.cited, None);
+    }
+
+    /// The prose fixture loaded, with or without its `steps` blocks.
+    fn prose_engine(with_steps: bool) -> (tempfile::TempDir, Engine) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let mut e = Engine::open(dir.path(), "eval").unwrap();
+        e.refresh(std::time::Duration::from_secs(60)).unwrap();
+        let mut map: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/prose/extraction.json")).unwrap();
+        if !with_steps {
+            for v in map.as_object_mut().unwrap().values_mut() {
+                v.as_object_mut().unwrap().remove("steps");
+            }
+        }
+        crate::knowledge::load_extraction_json(e.store(), None, &map.to_string()).unwrap();
+        (dir, e)
+    }
+
+    #[test]
+    fn a_process_question_is_cited_only_when_a_step_cites_a_gold_section() {
+        let q = vec![Question {
+            id: "S1".into(),
+            category: "process".into(),
+            query: "expense process".into(),
+            gold: vec!["docs/handbook.md::Expense process".into()],
+        }];
+        let (_d, mut e) = prose_engine(true);
+        assert_eq!(run(&mut e, &q, 1024).unwrap()[0].cited, Some(true));
+        let (_d, mut e) = prose_engine(false);
+        assert_eq!(
+            run(&mut e, &q, 1024).unwrap()[0].cited,
+            Some(false),
+            "the section is served but no step was rendered"
+        );
     }
 
     #[test]

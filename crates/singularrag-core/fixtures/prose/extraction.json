@@ -79,35 +79,51 @@
   },
   "docs/handbook.md::Onboarding": {
     "entities": [
-      {"name": "Onboarding", "type": "concept", "description": "A new colleague's first days and weeks at Northwind."},
+      {"name": "Onboarding", "type": "process", "description": "A new colleague's first days and weeks at Northwind."},
       {"name": "People team", "type": "organisation", "description": "The team that owns onboarding paperwork and changes the handbook."},
       {"name": "IT desk", "type": "organisation", "description": "Prepares laptops and creates Okta accounts for new colleagues."},
       {"name": "Okta", "type": "system", "description": "The single sign-on system that opens every other tool."},
-      {"name": "Buddy", "type": "concept", "description": "An experienced colleague from a neighbouring team, not the manager, assigned to each newcomer."}
+      {"name": "Single sign-on", "type": "concept", "description": "One sign-in that opens every other tool. At Northwind that is Okta."},
+      {"name": "Buddy", "type": "role", "description": "An experienced colleague from a neighbouring team, not the manager, assigned to each newcomer."},
+      {"name": "Employee", "type": "role", "description": "A Northwind colleague: submits their own expenses and activates their own accounts."}
     ],
     "relations": [
       {"source": "People team", "target": "Onboarding", "description": "sends the contract, payroll forms and the first week's schedule"},
       {"source": "IT desk", "target": "Okta", "description": "creates the new colleague's account and helps activate it on the first morning"},
-      {"source": "Buddy", "target": "Onboarding", "description": "has lunch in the first week and checks in weekly for two months"}
-    ]
+      {"source": "Buddy", "target": "Onboarding", "description": "has lunch in the first week and checks in weekly for two months"},
+      {"source": "Okta", "target": "Single sign-on", "description": "the single sign-on system that opens every other tool"}
+    ],
+    "steps": {"process": "Onboarding", "steps": [
+        {"text": "Your first day starts with the People team, who send the contract, the payroll forms and a schedule for the week.", "role": "", "systems": []},
+        {"text": "Before you arrive the IT desk prepares your laptop and creates your account in Okta, the single sign-on system that opens every other tool.", "role": "", "systems": ["Okta"]},
+        {"text": "You activate Okta on the first morning with someone from the IT desk beside you, and from then on you sign in to mail, chat and the code host through it.", "role": "Employee", "systems": ["Okta"]},
+        {"text": "Your buddy has lunch with you in the first week, answers the questions that feel too small to ask anyone else, and checks in once a week for your first two months.", "role": "Buddy", "systems": []}
+    ]}
   },
   "docs/handbook.md::Expense process": {
     "entities": [
-      {"name": "Expense process", "type": "concept", "description": "How money spent on work is paid back to a colleague."},
+      {"name": "Expense process", "type": "process", "description": "How money spent on work is paid back to a colleague."},
       {"name": "Expensify", "type": "system", "description": "Where expenses are submitted with a receipt photo and a reason."},
-      {"name": "Manager", "type": "person", "description": "Approves or rejects each expense claim."},
-      {"name": "Finance", "type": "organisation", "description": "Reviews approved claims within 5 days and pays them with the next salary."}
+      {"name": "Manager", "type": "role", "description": "Approves or rejects each expense claim."},
+      {"name": "Finance", "type": "role", "description": "Reviews approved claims within 5 days and pays them with the next salary."},
+      {"name": "Employee", "type": "role", "description": "A Northwind colleague: submits their own expenses and activates their own accounts."}
     ],
     "relations": [
       {"source": "Expense process", "target": "Expensify", "description": "claims are submitted in Expensify within a month of paying"},
       {"source": "Manager", "target": "Expense process", "description": "approves or rejects the claim, usually within a couple of days"},
       {"source": "Finance", "target": "Expense process", "description": "reviews approved claims within 5 days"}
-    ]
+    ],
+    "steps": {"process": "Expense process", "steps": [
+        {"text": "Submit each expense in Expensify within a month of paying, with a photo of the receipt and a one-line reason.", "role": "Employee", "systems": ["Expensify"]},
+        {"text": "Your manager approves or rejects the claim, usually within a couple of days.", "role": "Manager", "systems": ["Expensify"]},
+        {"text": "Approved claims then go to Finance, who review them within 5 days and add the amount to your next salary payment.", "role": "Finance", "systems": []},
+        {"text": "Finance may ask you for a missing receipt, which pauses the clock until you reply.", "role": "Finance", "systems": []}
+    ]}
   },
   "docs/handbook.md::Incident process": {
     "entities": [
-      {"name": "Incident process", "type": "concept", "description": "How Northwind responds when a customer-facing system breaks."},
-      {"name": "On-call engineer", "type": "person", "description": "Is paged when a system breaks and leads the response until it is resolved or handed over."},
+      {"name": "Incident process", "type": "process", "description": "How Northwind responds when a customer-facing system breaks."},
+      {"name": "On-call engineer", "type": "role", "description": "Is paged when a system breaks and leads the response until it is resolved or handed over."},
       {"name": "PagerDuty", "type": "system", "description": "Pages the on-call engineer."},
       {"name": "Incident channel", "type": "system", "description": "Where everyone working an incident talks, so the timeline stays in one place."},
       {"name": "Post-mortem", "type": "document", "description": "A blameless write-up of an incident, due within 3 days of resolution."}
@@ -116,12 +132,18 @@
       {"source": "PagerDuty", "target": "On-call engineer", "description": "pages the on-call engineer when a customer-facing system breaks"},
       {"source": "On-call engineer", "target": "Incident channel", "description": "opens a thread and posts what they know"},
       {"source": "On-call engineer", "target": "Post-mortem", "description": "whoever led the response writes it within 3 days"}
-    ]
+    ],
+    "steps": {"process": "Incident process", "steps": [
+        {"text": "When a customer-facing system breaks, the on-call engineer is paged through PagerDuty.", "role": "On-call engineer", "systems": ["PagerDuty"]},
+        {"text": "The on-call engineer acknowledges the page, opens a thread in the incident channel and posts what they know.", "role": "On-call engineer", "systems": ["Incident channel"]},
+        {"text": "The on-call engineer leads until the incident is resolved or hands the lead over to someone else, and says so in the channel.", "role": "On-call engineer", "systems": ["Incident channel"]},
+        {"text": "Within 3 days of resolution, whoever led the response writes a post-mortem.", "role": "", "systems": []}
+    ]}
   },
   "docs/handbook.md::Release process": {
     "entities": [
-      {"name": "Release process", "type": "concept", "description": "How a release goes from branch to production."},
-      {"name": "Release captain", "type": "person", "description": "An engineer chosen in turn who runs a release from branch cut to production."},
+      {"name": "Release process", "type": "process", "description": "How a release goes from branch to production."},
+      {"name": "Release captain", "type": "role", "description": "An engineer chosen in turn who runs a release from branch cut to production."},
       {"name": "Staging", "type": "system", "description": "Where the release branch is deployed and checked before production."},
       {"name": "Changelog", "type": "document", "description": "Lists every change in a release with a link to its pull request."}
     ],
@@ -129,6 +151,12 @@
       {"source": "Release captain", "target": "Release process", "description": "decides when the branch is cut and promotes the build to production"},
       {"source": "Release captain", "target": "Staging", "description": "deploys the release branch to staging and runs the checks"},
       {"source": "Release captain", "target": "Changelog", "description": "writes the changelog once staging looks healthy"}
-    ]
+    ],
+    "steps": {"process": "Release process", "steps": [
+        {"text": "The captain decides when the release branch is cut, deploys it to staging, and runs the checks there.", "role": "Release captain", "systems": ["Staging"]},
+        {"text": "When staging looks healthy, the captain writes the changelog, listing every change that ships with a link to its pull request.", "role": "Release captain", "systems": ["Staging"]},
+        {"text": "The captain then promotes the build to production.", "role": "Release captain", "systems": []},
+        {"text": "If anything goes wrong after the release, the captain rolls back first and asks questions afterwards.", "role": "Release captain", "systems": []}
+    ]}
   }
 }

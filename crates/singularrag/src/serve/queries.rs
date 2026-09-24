@@ -3,6 +3,7 @@
 
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
+use singularrag_core::journeys;
 use singularrag_core::store::Store;
 use singularrag_core::workspace::Workspace;
 use singularrag_core::Result;
@@ -535,12 +536,163 @@ pub fn entities(store: &Store) -> Result<EntitiesDto> {
     })
 }
 
+/// A `{id, name}` pair — the shape the UI wants for a step's systems, distinct from
+/// `EntityDto` (which carries the full row).
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRefDto {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SectionRefDto {
+    pub symbol_id: i64,
+    pub path: String,
+    pub name: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeLinkDto {
+    pub symbol_id: i64,
+    pub path: String,
+    pub name: String,
+    pub line: u32,
+    /// `"mention"` for a section's own code mentions, else `{"system": "<name>"}` for a
+    /// system-name match.
+    pub via: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StepDto {
+    pub ordinal: usize,
+    pub text: String,
+    pub role: String,
+    pub systems: Vec<EntityRefDto>,
+    pub section: SectionRefDto,
+    pub code: Vec<CodeLinkDto>,
+    pub more_code: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessDto {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub roles: Vec<String>,
+    pub steps: Vec<StepDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessesDto {
+    pub processes: Vec<ProcessDto>,
+    pub truncated: bool,
+}
+
+const PROCESS_CAP: i64 = 200;
+const STEP_CAP: usize = 30;
+
+fn code_link_dto(c: journeys::CodeLink) -> CodeLinkDto {
+    let via = match c.via {
+        journeys::Via::Mention => serde_json::json!("mention"),
+        journeys::Via::System(s) => serde_json::json!({ "system": s }),
+    };
+    CodeLinkDto {
+        symbol_id: c.symbol_id,
+        path: c.path,
+        name: c.name,
+        line: c.line,
+        via,
+    }
+}
+
+fn step_dto(s: journeys::StepView) -> StepDto {
+    let systems = s
+        .systems
+        .into_iter()
+        .zip(s.system_ids)
+        .map(|(name, id)| EntityRefDto { id, name })
+        .collect();
+    StepDto {
+        ordinal: s.ordinal,
+        text: s.text,
+        role: s.role,
+        systems,
+        section: SectionRefDto {
+            symbol_id: s.section.symbol_id,
+            path: s.section.path,
+            name: s.section.name,
+            line: s.section.line_start,
+        },
+        code: s.code.into_iter().map(code_link_dto).collect(),
+        more_code: s.more_code,
+    }
+}
+
+/// Every `process` entity (name order), each with its steps, the distinct non-empty
+/// roles its steps use, and each step's derived "implemented by" code links.
+pub fn processes(store: &Store) -> Result<ProcessesDto> {
+    processes_with(store, journeys::load_code_index)
+}
+
+/// `processes` with the code index builder passed in (tests count its calls).
+fn processes_with(
+    store: &Store,
+    build_index: impl FnOnce(&rusqlite::Connection) -> Result<journeys::CodeIndex>,
+) -> Result<ProcessesDto> {
+    let conn = store.conn();
+    // Built on the first process only: an index without processes never scans the code.
+    let mut build_index = Some(build_index);
+    let mut index: Option<journeys::CodeIndex> = None;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description FROM entities WHERE type = 'process' ORDER BY name LIMIT ?1",
+    )?;
+    let rows: Vec<(i64, String, String)> = stmt
+        .query_map([PROCESS_CAP + 1], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let truncated = rows.len() as i64 > PROCESS_CAP;
+    let mut processes = Vec::new();
+    for (id, name, description) in rows.into_iter().take(PROCESS_CAP as usize) {
+        if let Some(build) = build_index.take() {
+            index = Some(build(conn)?);
+        }
+        let p = journeys::process_steps(conn, index.as_ref().expect("built above"), id)?;
+        let mut roles: Vec<String> = p
+            .steps
+            .iter()
+            .map(|s| s.role.clone())
+            .filter(|r| !r.is_empty())
+            .collect();
+        roles.sort();
+        roles.dedup();
+        let steps = p.steps.into_iter().take(STEP_CAP).map(step_dto).collect();
+        processes.push(ProcessDto {
+            id,
+            name,
+            description,
+            roles,
+            steps,
+        });
+    }
+    Ok(ProcessesDto {
+        processes,
+        truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use singularrag_core::engine::{Engine, FindRequest, MapRequest};
     use singularrag_core::fixture::write_ts_mini;
     use singularrag_core::store::Store;
+
+    #[test]
+    fn processes_on_an_index_without_processes_builds_no_code_index() {
+        let (_dir, store) = seeded();
+        let dto = processes_with(&store, |_| panic!("the code index was built")).unwrap();
+        assert!(dto.processes.is_empty() && !dto.truncated);
+    }
 
     fn seeded() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();

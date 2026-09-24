@@ -280,6 +280,99 @@ Three of four paraphrase questions miss without seeds — that is exactly what t
 singularrag eval --questions ~/.singularrag/questions-vault.toml --budget 4096
 ```
 
+## Tier one on journeys
+
+The journeys design (`docs/superpowers/specs/2026-09-24-singularrag-journeys-design.md` §6) adds a fourth category to the prose set: four `process` questions, `S1`–`S4`, on the handbook's four processes, whose answers are steps; sixteen questions in all. The existing twelve ids are unchanged. `eval` now also puts every `entity`, `relation` and `process` question to the `entities` tool and reports whether a gold section was among its served items (the `cited` column, `-` for other categories, and one `cited N/M <category>` line per category). `--extraction <path>` loads a checked-in extraction after indexing and before the questions, so the `entities` run has something to cite without a model.
+
+Recorded 2026-09-24 at the journeys branch, release build, `SINGULARRAG_OLLAMA_URL=http://127.0.0.1:1` (nothing listens), every run `--no-models`. Ollama is not installed on this machine, so seeds-on stays open as before.
+
+### Recipe
+
+The same pinned corpora as "Tier one on knowledge", built with `git archive` into fresh directories:
+
+```
+git archive 5ec066b | tar -x -C <docs-dir>
+git archive 5ec066b | tar -x -C <prose-dir>
+cp crates/singularrag-core/fixtures/prose/voyage.md crates/singularrag-core/fixtures/prose/handbook.md <prose-dir>/docs/
+singularrag --repo <docs-dir> index
+singularrag --repo <prose-dir> index
+singularrag --repo <hono> index
+
+singularrag --repo <hono> eval --questions eval/questions.toml --budget 4096 --no-models
+singularrag --repo <docs-dir> eval --questions eval/questions-docs.toml --budget 4096 --no-models
+singularrag --repo <prose-dir> eval --questions eval/questions-prose.toml --budget <N> --no-models
+singularrag --repo <prose-x-dir> eval --questions eval/questions-prose.toml --budget <N> --no-models \
+  --extraction crates/singularrag-core/fixtures/prose/extraction.json
+```
+
+`<prose-x-dir>` is a second copy of `<prose-dir>`, prepared the same way, so the runs without an extraction stay reproducible from an index that never held one. The `--json` form of each prose run gives the per-category and the twelve-id means.
+
+### hono and docs did not move
+
+hono at 4096: **0.771** (recorded 0.771). Docs at 4096 on the pinned tree: **0.653** (recorded 0.653). Gate met.
+
+Re-run after the final review's fix wave (token-window system matching, the `implements` seed capped at three links per step and at half a note's boost, the `via step` hop in `entities`, the stricter process `cited` rule), same recipe, fresh `git archive` trees: hono **0.771**, docs **0.653**, and every prose table below byte-identical in recall. The pinned corpus has no code the fixture's systems name, so the `implements` changes cannot move it; the only number that moved is `cited` for `process` (4/4 → 2/4, below).
+
+### Prose set, seeds off, no extraction
+
+This is the run comparable with the recorded seeds-off values: no entities in the index, so the only thing new is four more questions.
+
+| budget | mean (16) | mean over the original 12 ids | recorded (12) | paraphrase | entity | relation | process |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | **0.188** | 0.250 | 0.250 | 0.000 | 0.250 | 0.500 | 0.000 |
+| 2048 | **0.677** | 0.653 | 0.653 | 0.250 | 0.708 | 1.000 | 0.750 |
+| 4096 | **0.792** | 0.722 | 0.722 | 0.250 | 0.917 | 1.000 | 1.000 |
+
+The original twelve are byte-for-byte the recorded numbers at every budget; gate met. At 2048 the only process miss is S4 (`docs/handbook.md::Onboarding`: the query names single sign-on, not Okta, and without entities nothing connects the two). At 1024 every process question misses, as every paraphrase question does. With no extraction loaded, `entities` answers nothing, so every `cited` value is `no` (`cited 0/4` for each category).
+
+### Prose set, seeds off, with the checked-in extraction
+
+The same runs with `--extraction`. Loading entities also turns on the name-matched entity seed in `repo_map`, so recall rises as well:
+
+| budget | mean (16) | mean over the original 12 ids | paraphrase | entity | relation | process |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | 0.438 | 0.333 | 0.000 | 0.500 | 0.500 | 0.750 |
+| 2048 | 0.812 | 0.750 | 0.250 | 1.000 | 1.000 | 1.000 |
+| 4096 | 0.812 | 0.750 | 0.250 | 1.000 | 1.000 | 1.000 |
+
+The `cited` lines are the same at every budget (the `entities` run does not depend on the map budget):
+
+```
+cited 4/4 entity
+cited 4/4 relation
+cited 2/4 process
+```
+
+Since the final review a `process` question is cited only when a gold section is served and a rendered step of a process hit cites it (it had been cited by entity name alone, which stayed 4/4 with every `steps` block removed). S1 and S2 name a process, role or step system and get their steps; S3 matches only the `Post-mortem` document entity and S4 only the `Single sign-on` concept, neither of which is a process or a role or system of any step, so the `entities` answer renders no steps for them. The journeys gate ("all four `process` questions cite gold") is not met on the stricter rule; questions and fixture are unchanged. The knowledge design's `entities` gate (at least 8 of the 12 entity and relation questions) is met at 8 of 8 on the checked-in extraction; it stays open for a model's own extraction until Ollama is installed.
+
+At 4096 with the extraction:
+
+```
+id    category   recall  tokens  cited  missed
+P1    paraphrase  0.00    4139  -      docs/voyage.md::The storm
+P2    paraphrase  1.00    4106  -      
+P3    paraphrase  0.00    4136  -      docs/handbook.md::Onboarding
+P4    paraphrase  0.00    4140  -      docs/voyage.md::Kolbeinsey
+E1    entity      1.00    4112  yes    
+E2    entity      1.00    4102  yes    
+E3    entity      1.00    4101  yes    
+E4    entity      1.00    4109  yes    
+R1    relation    1.00    4142  yes    
+R2    relation    1.00    4119  yes    
+R3    relation    1.00    4136  yes    
+R4    relation    1.00    4149  yes    
+S1    process     1.00    4133  yes    
+S2    process     1.00    4136  yes    
+S3    process     1.00    4143  no     
+S4    process     1.00    4142  no     
+mean recall 0.812 over 16 questions
+cited 4/4 entity
+cited 4/4 relation
+cited 2/4 process
+```
+
+S4's gold section is still served through the fixture's `Single sign-on` concept (Okta's relation to it names "the single sign-on system that opens every other tool", as the handbook does), but that concept is no step's system, so no Onboarding step is rendered and S4 is not cited. The three paraphrase misses remain the semantic seed's job.
+
 ## Tier two
 
 Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.

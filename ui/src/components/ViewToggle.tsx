@@ -1,9 +1,9 @@
 import { useRef } from "react";
 
-export type View = "tree" | "map";
+export type View = "tree" | "map" | "journeys";
 export const VIEW_KEY = "singularrag.view";
 export function loadView(): View {
-  try { const v = localStorage.getItem(VIEW_KEY); return v === "map" ? "map" : "tree"; } catch { return "tree"; }
+  try { const v = localStorage.getItem(VIEW_KEY); return v === "map" || v === "journeys" ? v : "tree"; } catch { return "tree"; }
 }
 export function saveView(v: View) { try { localStorage.setItem(VIEW_KEY, v); } catch {} }
 
@@ -41,7 +41,7 @@ function RadioToggle<T extends string>({ label, options, value, onChange }: {
   );
 }
 
-const VIEW_OPTIONS: { value: View; label: string }[] = [{ value: "tree", label: "Tree" }, { value: "map", label: "Map" }];
+const VIEW_OPTIONS: { value: View; label: string }[] = [{ value: "tree", label: "Tree" }, { value: "map", label: "Map" }, { value: "journeys", label: "Journeys" }];
 export function ViewToggle({ value, onChange }: { value: View; onChange: (v: View) => void }) {
   return <RadioToggle label="View" options={VIEW_OPTIONS} value={value} onChange={onChange} />;
 }

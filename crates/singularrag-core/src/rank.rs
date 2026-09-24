@@ -18,6 +18,9 @@ pub const FOCUS_BOOST: f64 = 10.0;
 pub const PIN_BOOST: f64 = 10.0;
 pub const FTS_FILE_BOOST: f64 = 5.0;
 pub const NOTE_BOOST: f64 = 5.0;
+/// A file implementing a matched process's step: half a note, so the process's own
+/// documenting section keeps its place above the code.
+pub const IMPLEMENTS_BOOST: f64 = NOTE_BOOST / 2.0;
 /// Symbols nobody references still get a sliver of their file's rank so they stay orderable.
 pub const UNREFERENCED_FRACTION: f64 = 0.001;
 
@@ -45,6 +48,9 @@ pub struct Reasons {
     pub entities: Vec<String>,
     /// Themes whose nearest relations this section states.
     pub themes: Vec<String>,
+    /// Processes whose steps this code symbol implements.
+    #[serde(default)]
+    pub implements: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,6 +237,8 @@ struct KnowledgeHits {
     entities: HashMap<i64, Vec<String>>,
     /// Sections stating a relation near a theme: `(theme, similarity)`, best per theme.
     themes: HashMap<i64, Vec<(String, f64)>>,
+    /// Code symbols a matched process's systems name, with the system names.
+    implements: HashMap<i64, Vec<String>>,
 }
 
 fn knowledge_hits(store: &Store, seeds: &Seeds) -> Result<KnowledgeHits> {
@@ -253,6 +261,12 @@ fn knowledge_hits(store: &Store, seeds: &Seeds) -> Result<KnowledgeHits> {
                     names.push(name.clone());
                 }
             }
+        }
+    }
+    for (id, name) in &seeds.implements {
+        let names = hits.implements.entry(*id).or_default();
+        if !names.contains(name) {
+            names.push(name.clone());
         }
     }
     if !seeds.theme_vecs.is_empty() {
@@ -352,6 +366,7 @@ pub fn rank_symbols(
     let mut semantic_files: HashMap<i64, f64> = HashMap::new();
     let mut entity_files: HashMap<i64, Vec<String>> = HashMap::new();
     let mut theme_files: HashMap<i64, f64> = HashMap::new();
+    let mut implements_files: HashMap<i64, Vec<String>> = HashMap::new();
     for s in &symbols {
         if let Some(&sim) = kh.semantic.get(&s.id) {
             let best = semantic_files.entry(s.file_id).or_default();
@@ -359,6 +374,14 @@ pub fn rank_symbols(
         }
         if let Some(names) = kh.entities.get(&s.id) {
             let file_names = entity_files.entry(s.file_id).or_default();
+            for n in names {
+                if !file_names.contains(n) {
+                    file_names.push(n.clone());
+                }
+            }
+        }
+        if let Some(names) = kh.implements.get(&s.id) {
+            let file_names = implements_files.entry(s.file_id).or_default();
             for n in names {
                 if !file_names.contains(n) {
                     file_names.push(n.clone());
@@ -401,6 +424,10 @@ pub fn rank_symbols(
         if let Some(names) = entity_files.get(&node.id) {
             personalization[i] += NOTE_BOOST;
             seeds[i].extend(names.iter().map(|n| format!("entity:{n}")));
+        }
+        if let Some(names) = implements_files.get(&node.id) {
+            personalization[i] += IMPLEMENTS_BOOST;
+            seeds[i].extend(names.iter().map(|n| format!("implements:{n}")));
         }
         if let Some(sim) = theme_files.get(&node.id) {
             personalization[i] += FTS_FILE_BOOST * sim;
@@ -450,10 +477,12 @@ pub fn rank_symbols(
     for s in &symbols {
         let fi = g.index_of[&s.file_id];
         *group_size.entry((fi, s.name.clone())).or_default() += 1;
-        // Entity and theme hits weigh like a name hit; a semantic hit weighs its
-        // similarity against the file's normalised body ranks (`hit_shares`).
-        let name_hit =
-            is_fts_hit(s.id) || kh.entities.contains_key(&s.id) || kh.themes.contains_key(&s.id);
+        // Entity, theme and implements hits weigh like a name hit; a semantic hit weighs
+        // its similarity against the file's normalised body ranks (`hit_shares`).
+        let name_hit = is_fts_hit(s.id)
+            || kh.entities.contains_key(&s.id)
+            || kh.themes.contains_key(&s.id)
+            || kh.implements.contains_key(&s.id);
         let body = body_rank(s.id);
         let semantic = kh.semantic.get(&s.id).copied();
         if name_hit || body.is_some() || semantic.is_some() {
@@ -538,6 +567,7 @@ pub fn rank_symbols(
                         .get(&s.id)
                         .map(|t| t.iter().map(|(theme, _)| theme.clone()).collect())
                         .unwrap_or_default(),
+                    implements: kh.implements.get(&s.id).cloned().unwrap_or_default(),
                 },
             }
         })
