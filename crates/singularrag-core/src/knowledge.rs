@@ -1181,7 +1181,12 @@ fn only_unavailable(e: Error) -> Result<()> {
 struct MatchedEntity {
     id: i64,
     name: String,
+    /// Not matched itself: a process a matched role acts in or a matched system is touched by.
+    via_step: bool,
 }
+
+/// Processes one `matching_entities` call adds through the steps of its matches.
+pub const VIA_STEP_MAX: usize = 5;
 
 /// The entities a query and a list of names match, plus the query's vector.
 #[derive(Debug, Default)]
@@ -1206,6 +1211,39 @@ fn query_matchable(norm: &str) -> bool {
     norm.chars().count() >= 3 && !STOPWORDS.contains(&norm)
 }
 
+/// Adds to `out` every process a matched entity acts in (as a step's role) or is touched
+/// by (as a step's system), `via_step`, at most `VIA_STEP_MAX` of them. The `entities`
+/// tool's hop only: `repo_map`'s seeds do not take it.
+fn add_step_hops(conn: &Connection, out: &mut EntityMatches) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT p.id, p.name, p.mentions FROM entities p JOIN steps st ON st.process_id = p.id
+         WHERE st.role_id = ?1
+            OR st.id IN (SELECT step_id FROM step_systems WHERE entity_id = ?1)
+         ORDER BY p.mentions DESC, p.id",
+    )?;
+    let matched: Vec<i64> = out.entities.iter().map(|m| m.id).collect();
+    let mut added = 0;
+    'outer: for id in matched {
+        let rows: Vec<(i64, String)> = stmt
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (pid, name) in rows {
+            if added >= VIA_STEP_MAX {
+                break 'outer;
+            }
+            if !out.entities.iter().any(|m| m.id == pid) {
+                out.entities.push(MatchedEntity {
+                    id: pid,
+                    name,
+                    via_step: true,
+                });
+                added += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The entity matching rule `repo_map`'s seeds and the `entities` tool share, with at
 /// most one model call (the query's embedding). In order: the names in `entities`
 /// (exact `norm_name`, argument order); then entities the query names, as a whole-word
@@ -1226,6 +1264,7 @@ fn matching_entities(
             out.entities.push(MatchedEntity {
                 id,
                 name: name.to_string(),
+                via_step: false,
             });
         }
     };
@@ -1472,6 +1511,8 @@ pub struct EntityHit {
     pub sections: Vec<CitedSection>,
     /// The ordered steps, for a `process` entity.
     pub steps: Option<crate::journeys::ProcessSteps>,
+    /// Reached through a matched role's or system's steps, not matched itself.
+    pub via_step: bool,
 }
 
 pub fn cited_section(conn: &Connection, symbol_id: i64) -> Result<Option<CitedSection>> {
@@ -1494,7 +1535,8 @@ pub fn cited_section(conn: &Connection, symbol_id: i64) -> Result<Option<CitedSe
 }
 
 /// The `entities` tool's answer: up to `limit` entities matched by the rule
-/// `repo_map`'s entity seeds use (`extra` are exact names), each with its relations
+/// `repo_map`'s entity seeds use (`extra` are exact names) plus the processes those reach
+/// through their steps (`add_step_hops`), each with its relations
 /// (at most `ENTITY_RELATIONS_MAX` over all entities; a relation between two matched
 /// entities is shown once, under the first) and its sections, mentions first in
 /// document order, deduped. The only model call is the query's embedding; the bool is
@@ -1506,8 +1548,9 @@ pub fn match_entities(
     extra: &[String],
     limit: usize,
 ) -> Result<(Vec<EntityHit>, bool)> {
-    let matched = matching_entities(store, models, Some(query), extra)?;
+    let mut matched = matching_entities(store, models, Some(query), extra)?;
     let conn = store.conn();
+    add_step_hops(conn, &mut matched)?;
     let mut entity =
         conn.prepare("SELECT name, type, description, mentions FROM entities WHERE id = ?1")?;
     let mut mentioned = conn.prepare(
@@ -1593,6 +1636,7 @@ pub fn match_entities(
             relations,
             sections,
             steps,
+            via_step: m.via_step,
         });
     }
     Ok((hits, matched.models_unavailable))
@@ -1612,7 +1656,11 @@ pub fn render_entities(hits: &[EntityHit]) -> String {
     let mut steps = 0;
     let mut sections: Vec<i64> = Vec::new();
     for h in hits {
-        out.push_str(&format!("{} ({})", h.name, h.r#type));
+        if h.via_step {
+            out.push_str(&format!("{} ({}, via step)", h.name, h.r#type));
+        } else {
+            out.push_str(&format!("{} ({})", h.name, h.r#type));
+        }
         if !h.description.is_empty() {
             out.push_str(&format!(": {}", h.description));
         }
@@ -2368,6 +2416,47 @@ mod tests {
         assert_eq!(norm_name("  Acme   Ltd. "), "acme ltd");
         assert_eq!(norm_name("Jonas!"), "jonas");
         assert_eq!(norm_name("créateSession"), "créatesession");
+    }
+
+    fn loaded_prose() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        let ws = Workspace::single(dir.path()).unwrap();
+        Indexer::new(&store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+        load_extraction_json(
+            &store,
+            None,
+            include_str!("../fixtures/prose/extraction.json"),
+        )
+        .unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn a_role_query_reaches_the_process_it_acts_in_via_its_steps() {
+        let (_d, store) = loaded_prose();
+        let (hits, _) = match_entities(&store, None, "Finance", &[], 10).unwrap();
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, ["Finance", "Expense process"], "{names:?}");
+        let expense = &hits[1];
+        assert!(expense.via_step && !hits[0].via_step);
+        assert!(!expense.steps.as_ref().unwrap().steps.is_empty());
+        let text = render_entities(&hits);
+        assert!(
+            text.contains("Expense process (process, via step)"),
+            "{text}"
+        );
+        // A system reaches the process that touches it the same way.
+        let (hits, _) = match_entities(&store, None, "PagerDuty", &[], 10).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.name == "Incident process" && h.via_step),
+            "{hits:?}"
+        );
     }
 
     #[test]
