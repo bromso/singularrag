@@ -1185,7 +1185,8 @@ struct MatchedEntity {
     via_step: bool,
 }
 
-/// Processes one `matching_entities` call adds through the steps of its matches.
+/// Processes one `match_entities` call adds through the steps of its matches, on top of
+/// `limit` (which caps the direct matches only).
 pub const VIA_STEP_MAX: usize = 5;
 
 /// The entities a query and a list of names match, plus the query's vector.
@@ -1549,6 +1550,9 @@ pub fn match_entities(
     limit: usize,
 ) -> Result<(Vec<EntityHit>, bool)> {
     let mut matched = matching_entities(store, models, Some(query), extra)?;
+    // `limit` caps the direct matches; the hops belong to those matches and come on top
+    // (at most VIA_STEP_MAX), so a hop is never truncated away by name and KNN matches.
+    matched.entities.truncate(limit);
     let conn = store.conn();
     add_step_hops(conn, &mut matched)?;
     let mut entity =
@@ -1566,7 +1570,7 @@ pub fn match_entities(
     // Built once, on the first process hit.
     let mut code_index: Option<crate::journeys::CodeIndex> = None;
     let mut hits = Vec::new();
-    for m in matched.entities.into_iter().take(limit) {
+    for m in matched.entities.into_iter() {
         let Some((name, r#type, description, mentions)) = entity
             .query_row([m.id], |r| {
                 Ok((
@@ -2457,6 +2461,26 @@ mod tests {
                 .any(|h| h.name == "Incident process" && h.via_step),
             "{hits:?}"
         );
+    }
+
+    #[test]
+    fn a_step_hop_survives_the_limit_because_hops_do_not_count_against_it() {
+        let (_d, store) = loaded_prose();
+        // limit 1 keeps only the direct match, and its hop still comes along.
+        let (hits, _) = match_entities(&store, None, "Finance", &[], 1).unwrap();
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, ["Finance", "Expense process"], "{names:?}");
+        assert!(hits[1].via_step);
+        // Explicit names fill the limit ahead of the query match; the hop is still there.
+        let extra = vec!["Manager".to_string()];
+        let (hits, _) = match_entities(&store, None, "Finance", &extra, 2).unwrap();
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Manager", "Finance", "Expense process"],
+            "{names:?}"
+        );
+        assert!(hits.iter().filter(|h| h.via_step).count() == 1);
     }
 
     #[test]
