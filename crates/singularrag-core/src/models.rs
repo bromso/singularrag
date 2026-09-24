@@ -34,6 +34,7 @@ pub const EXTRACT_PROMPT: &str = "You extract a knowledge graph from one section
 Return ONLY a JSON object of the shape {\"entities\": [{\"name\": string, \"type\": string, \"description\": string}], \"relations\": [{\"source\": string, \"target\": string, \"description\": string}]}.\n\
 Types are exactly one of: person, organisation, system, concept, event, place, document, process (a named sequence of steps people follow), role (a job or position that acts in a process).\n\
 Descriptions are one short sentence from the text. Relations connect two entity names from your list.\n\
+If the section describes a process, include one process entity named as the section names it (usually its heading), and its roles.\n\
 Document: {path}\nSection: {heading}\n\nText:\n{text}\n";
 const STRICT_SUFFIX: &str = "\nYour previous answer was not valid JSON. Answer with the JSON object only, no prose, no code fence.";
 
@@ -652,6 +653,7 @@ mod tests {
         assert!(EXTRACT_PROMPT.contains("process (a named sequence of steps people follow)"));
         assert!(EXTRACT_PROMPT.contains("role (a job or position that acts in a process)"));
         assert!(STEPS_PROMPT.starts_with(STEPS_PROMPT_FIRST_LINE));
+        assert!(EXTRACT_PROMPT.contains("If the section describes a process, include one process entity named as the section names it"));
     }
 
     #[test]

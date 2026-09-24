@@ -951,14 +951,11 @@ fn steps_for_row(
         },
     };
     let tx = conn.unchecked_transaction()?;
-    let outcome = match crate::journeys::apply_steps(&tx, symbol_id, hash, &answer)? {
+    let applied = crate::journeys::apply_steps(&tx, symbol_id, hash, &answer)?;
+    let outcome = match applied {
         Some(_) => StepOutcome::Applied,
         None => {
-            tracing::warn!(
-                symbol_id,
-                process = %answer.process,
-                "steps answer names no process entity of the section; discarded"
-            );
+            tracing::warn!(symbol_id, "steps answer names no process; discarded");
             StepOutcome::Discarded
         }
     };
@@ -967,10 +964,44 @@ fn steps_for_row(
         params![symbol_id, hash],
     )?;
     tx.commit()?;
-    if let StepOutcome::Applied = outcome {
+    if let Some(a) = applied {
         t.stepped += 1;
+        if a.created_process {
+            embed_new_process(store, models, a.process_id)?;
+        }
     }
     Ok(outcome)
+}
+
+/// A process entity `apply_steps` created has no vector yet: one embed call, outside any
+/// transaction. A model failure leaves it matchable by name only (a warn, not an error).
+fn embed_new_process(store: &Store, models: &Models, id: i64) -> Result<()> {
+    if vec::dim(store)?.is_none() {
+        return Ok(());
+    }
+    let text: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT name, description FROM entities WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(entity_text(
+                    &r.get::<_, String>(0)?,
+                    &r.get::<_, String>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(text) = text else { return Ok(()) };
+    match models.embed(&[text]) {
+        Ok(v) if !v.is_empty() => vec::insert(store, "entity_vec", id, &v[0]),
+        Ok(_) => Ok(()),
+        Err(Error::ModelUnavailable(m)) => {
+            tracing::warn!(id, error = %m, "process entity created by a steps answer has no vector");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn steps_json(a: &StepsAnswer) -> Result<String> {
@@ -1111,7 +1142,13 @@ pub fn load_extraction_json(store: &Store, models: Option<&Models>, json: &str) 
                 "INSERT OR REPLACE INTO steps_cache(hash, json) VALUES (?1, ?2)",
                 params![hash, steps_json(&steps)?],
             )?;
-            if crate::journeys::apply_steps(conn, symbol_id, &hash, &steps)?.is_none() {
+            let applied = crate::journeys::apply_steps(conn, symbol_id, &hash, &steps)?;
+            if let (Some(a), Some(m)) = (applied, models) {
+                if a.created_process {
+                    embed_new_process(store, m, a.process_id)?;
+                }
+            }
+            if applied.is_none() {
                 tracing::warn!(
                     key = %key,
                     process = %steps.process,
@@ -2845,7 +2882,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unmatched_process_name_discards_the_answer_and_finishes_the_section() {
+    fn an_unmatched_process_name_creates_the_process_with_a_vector_and_applies_the_steps() {
         let (fake, store, models, _d) =
             tick_fixture(&[("Expense process", "Submit each expense in Expensify.")]);
         fake.set_extraction("Expense", process_extraction());
@@ -2855,11 +2892,35 @@ mod tests {
         let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
         assert_eq!(
             (t.extracted, t.stepped, t.failed, t.pending),
-            (1, 0, 0, 0),
+            (1, 1, 0, 0),
             "{t:?}"
         );
         assert!(t.model_error.is_none());
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 0);
+        let (id, ty, mentions): (i64, String, i64) = store
+            .conn()
+            .query_row(
+                "SELECT id, type, mentions FROM entities WHERE norm_name = 'expenses'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((ty.as_str(), mentions), ("process", 1));
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM steps WHERE process_id = {id}")
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM entity_vec WHERE rowid = {id}")
+            ),
+            1
+        );
+        // The section's own mistyped process keeps no steps but stays an entity.
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps st JOIN entities e ON e.id = st.process_id WHERE e.norm_name = 'expense process'"), 0);
         assert_eq!(count(&store, "SELECT COUNT(*) FROM extract_queue"), 0);
         assert_eq!(steps_calls(&fake), 1);
     }
