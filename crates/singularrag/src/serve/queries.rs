@@ -632,8 +632,18 @@ fn step_dto(s: journeys::StepView) -> StepDto {
 /// Every `process` entity (name order), each with its steps, the distinct non-empty
 /// roles its steps use, and each step's derived "implemented by" code links.
 pub fn processes(store: &Store) -> Result<ProcessesDto> {
+    processes_with(store, journeys::load_code_index)
+}
+
+/// `processes` with the code index builder passed in (tests count its calls).
+fn processes_with(
+    store: &Store,
+    build_index: impl FnOnce(&rusqlite::Connection) -> Result<journeys::CodeIndex>,
+) -> Result<ProcessesDto> {
     let conn = store.conn();
-    let index = journeys::load_code_index(conn)?;
+    // Built on the first process only: an index without processes never scans the code.
+    let mut build_index = Some(build_index);
+    let mut index: Option<journeys::CodeIndex> = None;
     let mut stmt = conn.prepare(
         "SELECT id, name, description FROM entities WHERE type = 'process' ORDER BY name LIMIT ?1",
     )?;
@@ -643,7 +653,10 @@ pub fn processes(store: &Store) -> Result<ProcessesDto> {
     let truncated = rows.len() as i64 > PROCESS_CAP;
     let mut processes = Vec::new();
     for (id, name, description) in rows.into_iter().take(PROCESS_CAP as usize) {
-        let p = journeys::process_steps(conn, &index, id)?;
+        if let Some(build) = build_index.take() {
+            index = Some(build(conn)?);
+        }
+        let p = journeys::process_steps(conn, index.as_ref().expect("built above"), id)?;
         let mut roles: Vec<String> = p
             .steps
             .iter()
@@ -673,6 +686,13 @@ mod tests {
     use singularrag_core::engine::{Engine, FindRequest, MapRequest};
     use singularrag_core::fixture::write_ts_mini;
     use singularrag_core::store::Store;
+
+    #[test]
+    fn processes_on_an_index_without_processes_builds_no_code_index() {
+        let (_dir, store) = seeded();
+        let dto = processes_with(&store, |_| panic!("the code index was built")).unwrap();
+        assert!(dto.processes.is_empty() && !dto.truncated);
+    }
 
     fn seeded() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
