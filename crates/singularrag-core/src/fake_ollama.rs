@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 #[derive(Default)]
 struct State {
     extractions: Mutex<Vec<(String, Value)>>,
+    steps: Mutex<Vec<(String, Value)>>,
     calls: Mutex<Vec<String>>,
     fail_generate: AtomicUsize,
     corrupt_embed: AtomicUsize,
@@ -69,6 +70,13 @@ impl FakeOllama {
         let mut ex = lock(&self.state.extractions);
         ex.retain(|(k, _)| k != heading_substring);
         ex.push((heading_substring.to_string(), extraction));
+    }
+
+    /// Steps-prompt generate calls whose `Section:` line contains `heading_substring` answer with `answer`.
+    pub fn set_steps(&self, heading_substring: &str, answer: Value) {
+        let mut st = lock(&self.state.steps);
+        st.retain(|(k, _)| k != heading_substring);
+        st.push((heading_substring.to_string(), answer));
     }
 
     pub fn fail_next_generate(&self, n: usize) {
@@ -146,7 +154,9 @@ fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
     let mut body = vec![0u8; len];
     reader.read_exact(&mut body)?;
     let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    lock(&st.calls).push(path.clone());
+    if !(method == "POST" && path == "/api/generate") {
+        lock(&st.calls).push(path.clone());
+    }
     let resp = match (method.as_str(), path.as_str()) {
         ("GET", "/api/tags") => {
             json!({"models": [{"name": "qwen2.5:7b-instruct"}, {"name": "nomic-embed-text"}]})
@@ -173,20 +183,35 @@ fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
             if delay > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(delay as u64));
             }
+            let prompt = req["prompt"].as_str().unwrap_or("");
+            let is_steps = prompt.starts_with(crate::models::STEPS_PROMPT_FIRST_LINE);
+            lock(&st.calls).push(if is_steps {
+                "/api/generate:steps".into()
+            } else {
+                "/api/generate".into()
+            });
             if take_one(&st.fail_generate) {
                 json!({"response": "not json {"})
             } else {
-                let prompt = req["prompt"].as_str().unwrap_or("");
                 let section = prompt
                     .lines()
                     .find(|l| l.starts_with("Section:"))
                     .unwrap_or("");
-                let found = lock(&st.extractions)
-                    .iter()
-                    .find(|(k, _)| section.contains(k.as_str()))
-                    .map(|(_, v)| v.clone());
-                let answer = found.unwrap_or_else(|| json!({"entities": [], "relations": []}));
-                json!({"response": answer.to_string()})
+                if is_steps {
+                    let found = lock(&st.steps)
+                        .iter()
+                        .find(|(k, _)| section.contains(k.as_str()))
+                        .map(|(_, v)| v.clone());
+                    let answer = found.unwrap_or_else(|| json!({"process": "", "steps": []}));
+                    json!({"response": answer.to_string()})
+                } else {
+                    let found = lock(&st.extractions)
+                        .iter()
+                        .find(|(k, _)| section.contains(k.as_str()))
+                        .map(|(_, v)| v.clone());
+                    let answer = found.unwrap_or_else(|| json!({"entities": [], "relations": []}));
+                    json!({"response": answer.to_string()})
+                }
             }
         }
         _ => json!({"error": "not found"}),
