@@ -371,6 +371,44 @@ fn vector_texts(conn: &Connection, e: &Extraction) -> Result<Vec<String>> {
     Ok(texts)
 }
 
+/// The text a section sends to a model: runs of spaces and tabs become one space, runs of
+/// blank lines one blank line. A section's stored text keeps its child sections and code
+/// fences as blank runs (so offsets survive), which made an H1 a 95k-character "section"
+/// of whitespace split into sixteen model calls. Hashes and search use the stored text.
+pub fn squeeze_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(8_192));
+    let mut blank_lines = 0usize;
+    for line in s.lines() {
+        let mut compact = String::new();
+        let mut in_space = false;
+        for c in line.chars() {
+            if c == ' ' || c == '\t' {
+                if !in_space {
+                    compact.push(' ');
+                }
+                in_space = true;
+            } else {
+                compact.push(c);
+                in_space = false;
+            }
+        }
+        let compact = compact.trim();
+        if compact.is_empty() {
+            blank_lines += 1;
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+            if blank_lines > 0 {
+                out.push('\n');
+            }
+        }
+        blank_lines = 0;
+        out.push_str(compact);
+    }
+    out
+}
+
 fn section_body(conn: &Connection, symbol_id: i64) -> Result<Option<String>> {
     Ok(conn
         .query_row(
@@ -430,8 +468,9 @@ fn clear_meta(store: &Store, key: &str) -> Result<()> {
 }
 
 /// A claim older than this is abandoned (its process died mid-tick) and may be taken over.
-/// A tick's budget plus one model timeout per step stays well under it.
-pub const CLAIM_STALE_MS: i64 = 120_000;
+/// One section can hold its claim for two tick timeouts (the entity prompt and the steps
+/// prompt, `TICK_TIMEOUT` each) plus the embeds, so this is well above four minutes.
+pub const CLAIM_STALE_MS: i64 = 600_000;
 
 /// Queue rows the embed step works: no section vector yet.
 const CLAIM_EMBED: &str =
@@ -608,7 +647,7 @@ fn embed_sections(
     } else {
         let texts: Vec<String> = misses
             .iter()
-            .map(|&i| items[i].body.clone())
+            .map(|&i| squeeze_ws(&items[i].body))
             .chain(extra.iter().cloned())
             .collect();
         let mut answered = models.embed(&texts)?;
@@ -776,7 +815,7 @@ fn extract_step(
             None => match models.extract(&SectionInput {
                 path: &path,
                 heading: &heading,
-                text: &body,
+                text: &squeeze_ws(&body),
             }) {
                 Ok(x) => {
                     // A memo keyed by hash, not section state: kept even when a later
@@ -787,7 +826,9 @@ fn extract_step(
                     )?;
                     x
                 }
-                Err(Error::ModelUnavailable(m)) if m.contains("not JSON") => {
+                Err(Error::ModelUnavailable(m))
+                    if m.contains("not JSON") || m.starts_with("timed out") =>
+                {
                     conn.execute(
                         "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1 AND hash = ?3",
                         params![symbol_id, m, hash],
@@ -833,7 +874,7 @@ fn extract_step(
         let input = SectionInput {
             path: &path,
             heading: &heading,
-            text: &body,
+            text: &squeeze_ws(&body),
         };
         if let StepOutcome::Outage = steps_for_row(store, models, symbol_id, &hash, &input, t)? {
             return Ok(());
@@ -896,7 +937,7 @@ fn steps_stage(
         let input = SectionInput {
             path: &path,
             heading: &heading,
-            text: &body,
+            text: &squeeze_ws(&body),
         };
         if let StepOutcome::Outage = steps_for_row(store, models, symbol_id, &hash, &input, t)? {
             return Ok(false);
@@ -935,7 +976,9 @@ fn steps_for_row(
                 )?;
                 a
             }
-            Err(Error::ModelUnavailable(m)) if m.contains("not JSON") => {
+            Err(Error::ModelUnavailable(m))
+                if m.contains("not JSON") || m.starts_with("timed out") =>
+            {
                 conn.execute(
                     "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1 AND hash = ?3",
                     params![symbol_id, m, hash],
@@ -1749,7 +1792,7 @@ mod tests {
     use crate::config::MapConfig;
     use crate::fake_ollama::FakeOllama;
     use crate::index::Indexer;
-    use crate::models::{Models, ModelsConfig};
+    use crate::models::{Models, ModelsConfig, MAX_PART_CHARS};
     use crate::store::Store;
     use crate::workspace::Workspace;
     use std::time::Duration;
@@ -2116,16 +2159,28 @@ mod tests {
         );
         f.set_generate_delay(Duration::from_millis(800));
         let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
-        assert!(t.model_error.is_some(), "a timeout is an outage: {t:?}");
+        assert!(
+            t.model_error.is_none(),
+            "a timeout is an attempt, not an outage: {t:?}"
+        );
+        assert!(t.failed >= 1, "{t:?}");
+        assert!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue WHERE attempts = 1 AND last_error LIKE 'timed out%'") >= 1
+        );
         // The fake answers one request at a time: a retry would be read once the first
         // delayed answer is written, so wait past that before counting.
-        std::thread::sleep(Duration::from_millis(2000));
+        std::thread::sleep(Duration::from_millis(800 * t.failed as u64 + 700));
         let generate = f
             .calls()
             .iter()
             .filter(|p| p.as_str() == "/api/generate")
             .count();
-        assert_eq!(generate, 1, "no retry on a timeout inside a tick");
+        // One attempt per section the tick reached (a timeout is an attempt, not an outage).
+        assert_eq!(
+            generate, t.failed,
+            "no retry on a timeout inside a tick: {t:?}"
+        );
+        assert!(generate >= 1);
     }
 
     fn claimed(store: &Store) -> i64 {
@@ -2719,6 +2774,80 @@ mod tests {
         let m = models(&fake);
         (fake, store, m, dir)
     }
+    #[test]
+    fn squeeze_ws_collapses_blank_runs_and_keeps_paragraphs() {
+        let padded = format!(
+            "intro line\n\n{}\n\n\n\n  second   para\t here \n{}",
+            " ".repeat(20_000),
+            "\n".repeat(50)
+        );
+        let sq = squeeze_ws(&padded);
+        assert_eq!(sq, "intro line\n\nsecond para here");
+        assert_eq!(squeeze_ws("   "), "");
+    }
+
+    #[test]
+    fn a_section_padded_with_its_childrens_blanks_is_sent_as_one_short_part() {
+        // An H2 with a long H3 child: the H2's stored text keeps the child's span as blanks,
+        // so its raw content is over the part size while its own words are a few dozen.
+        // 10k chars of child text over 130 lines (one long line reads as minified and is skipped).
+        let child = format!("{}\n", "word ".repeat(15)).repeat(130);
+        let body = format!("Own intro sentence.\n\n### Child\n\n{child}");
+        let (fake, store, models, _d) = tick_fixture(&[("Parent", &body)]);
+        let raw: i64 = store.conn().query_row(
+            "SELECT length(t.content) FROM sections_fts t JOIN symbols s ON s.id = t.rowid WHERE s.name = 'Parent'",
+            [], |r| r.get(0)).unwrap();
+        assert!(
+            raw > MAX_PART_CHARS as i64,
+            "raw content {raw} must exceed one part"
+        );
+        let t = tick(&store, &models, Duration::from_secs(60), &|| false).unwrap();
+        assert!(t.model_error.is_none(), "{t:?}");
+        let lens = fake.generate_prompt_lens();
+        // Two sections (Parent, Child): the child's 10k body is two parts, the parent's own
+        // text is one short prompt. Three generate calls, none of them blank-padded.
+        assert_eq!(lens.len(), 3, "{lens:?}");
+        assert!(
+            lens.iter().any(|&l| l < 1_000),
+            "the parent's prompt is short: {lens:?}"
+        );
+        assert!(lens.iter().all(|&l| l < MAX_PART_CHARS + 1_000), "{lens:?}");
+    }
+
+    #[test]
+    fn a_timed_out_section_costs_an_attempt_and_the_tick_moves_on() {
+        let (fake, store, _m, _d) = tick_fixture(&[("Slow", "one"), ("Also slow", "two")]);
+        let m = Models::with_timeout(
+            ModelsConfig {
+                ollama: fake.url(),
+                ..Default::default()
+            },
+            Duration::from_millis(200),
+        );
+        fake.set_generate_delay(Duration::from_millis(500));
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
+        assert!(t.model_error.is_none(), "{t:?}");
+        assert_eq!((t.extracted, t.failed, t.pending), (0, 2, 2), "{t:?}");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM extract_queue WHERE attempts = 1"
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM extract_queue WHERE claimed_at_ms IS NOT NULL"
+            ),
+            0
+        );
+        std::thread::sleep(Duration::from_millis(1500));
+        fake.set_generate_delay(Duration::from_millis(0));
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.pending), (2, 0), "{t:?}");
+    }
+
     fn process_extraction() -> serde_json::Value {
         serde_json::json!({"entities": [
             {"name": "Expense process", "type": "process", "description": "how you get money back"},

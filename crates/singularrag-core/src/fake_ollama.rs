@@ -14,6 +14,7 @@ struct State {
     extractions: Mutex<Vec<(String, Value)>>,
     steps: Mutex<Vec<(String, Value)>>,
     calls: Mutex<Vec<String>>,
+    generate_prompt_lens: Mutex<Vec<usize>>,
     fail_generate: AtomicUsize,
     corrupt_embed: AtomicUsize,
     drop_next: AtomicUsize,
@@ -125,6 +126,10 @@ impl FakeOllama {
             .store(n.saturating_add(1), Ordering::SeqCst);
     }
 
+    /// The character length of every `/api/generate` prompt answered so far, in order.
+    pub fn generate_prompt_lens(&self) -> Vec<usize> {
+        lock(&self.state.generate_prompt_lens).clone()
+    }
     pub fn calls(&self) -> Vec<String> {
         lock(&self.state.calls).clone()
     }
@@ -214,6 +219,7 @@ fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
             } else {
                 "/api/generate".into()
             });
+            lock(&st.generate_prompt_lens).push(prompt.chars().count());
             if take_one(&st.fail_generate) {
                 json!({"response": "not json {"})
             } else {
