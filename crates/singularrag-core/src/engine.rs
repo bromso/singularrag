@@ -590,10 +590,16 @@ impl Engine {
                         ranked.len() - 1
                     }
                 };
+                // What the code implements: the system a name match came from, else the
+                // process whose section mentions it.
+                let what = match &link.via {
+                    crate::journeys::Via::System(name) => name,
+                    crate::journeys::Via::Mention => &h.name,
+                };
                 let reasons = &mut ranked[i].reasons;
-                if !reasons.implements.contains(&h.name) {
-                    reasons.implements.push(h.name.clone());
-                    reasons.seeds.push(format!("implements:{}", h.name));
+                if !reasons.implements.contains(what) {
+                    reasons.implements.push(what.clone());
+                    reasons.seeds.push(format!("implements:{what}"));
                 }
             }
         }
@@ -1888,6 +1894,12 @@ mod tests {
             "export function approveClaim(id: string): boolean {\n  return id.length > 0;\n}\n",
         )
         .unwrap();
+        std::fs::create_dir_all(dir.path().join("src/vendors")).unwrap();
+        std::fs::write(
+            dir.path().join("src/vendors/expensify.ts"),
+            "export function expensifyClient(key: string): string {\n  return key;\n}\n",
+        )
+        .unwrap();
         let mut e = Engine::open(dir.path(), "test-session").unwrap();
         e.refresh(Duration::from_secs(60)).unwrap();
         let map = serde_json::json!({"docs/handbook.md::Expense process": {
@@ -1958,6 +1970,13 @@ mod tests {
         assert!(
             reasons.contains("implements:Expense process")
                 && reasons.contains(r#""implements":["Expense process"]"#),
+            "{reasons}"
+        );
+        // A system-matched link names the system it implements, not the process.
+        let (_, _, _, reasons) = &items[pos("src/vendors/expensify.ts::expensifyClient")];
+        assert!(
+            reasons.contains("implements:Expensify")
+                && reasons.contains(r#""implements":["Expensify"]"#),
             "{reasons}"
         );
     }
