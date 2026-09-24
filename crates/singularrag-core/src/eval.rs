@@ -35,7 +35,8 @@ pub struct EvalResult {
     pub hit: Vec<String>,
     pub miss: Vec<String>,
     /// For `CITED_CATEGORIES`: whether the `entities` tool, given the query, served any
-    /// gold section. `None` for the other categories.
+    /// gold section; for `process`, one that a rendered step of a process hit also cites.
+    /// `None` for the other categories.
     #[serde(default)]
     pub cited: Option<bool>,
 }
@@ -77,7 +78,17 @@ pub fn run(engine: &mut Engine, questions: &[Question], budget: usize) -> Result
                 limit: ENTITIES_LIMIT_DEFAULT,
             })?;
             let served = served_keys(engine, r.retrieval_id)?;
-            Some(q.gold.iter().any(|g| served.contains(g)))
+            if q.category == "process" {
+                // A process answer must show its steps: a served gold section that a
+                // rendered step of a process hit cites.
+                Some(
+                    q.gold
+                        .iter()
+                        .any(|g| served.contains(g) && r.step_sections.contains(g)),
+                )
+            } else {
+                Some(q.gold.iter().any(|g| served.contains(g)))
+            }
         } else {
             None
         };
@@ -242,6 +253,41 @@ gold = ["src/http/middleware.ts::requireSession", "src/http/middleware.ts::attac
         )
         .unwrap();
         assert_eq!(old.cited, None);
+    }
+
+    /// The prose fixture loaded, with or without its `steps` blocks.
+    fn prose_engine(with_steps: bool) -> (tempfile::TempDir, Engine) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let mut e = Engine::open(dir.path(), "eval").unwrap();
+        e.refresh(std::time::Duration::from_secs(60)).unwrap();
+        let mut map: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/prose/extraction.json")).unwrap();
+        if !with_steps {
+            for v in map.as_object_mut().unwrap().values_mut() {
+                v.as_object_mut().unwrap().remove("steps");
+            }
+        }
+        crate::knowledge::load_extraction_json(e.store(), None, &map.to_string()).unwrap();
+        (dir, e)
+    }
+
+    #[test]
+    fn a_process_question_is_cited_only_when_a_step_cites_a_gold_section() {
+        let q = vec![Question {
+            id: "S1".into(),
+            category: "process".into(),
+            query: "expense process".into(),
+            gold: vec!["docs/handbook.md::Expense process".into()],
+        }];
+        let (_d, mut e) = prose_engine(true);
+        assert_eq!(run(&mut e, &q, 1024).unwrap()[0].cited, Some(true));
+        let (_d, mut e) = prose_engine(false);
+        assert_eq!(
+            run(&mut e, &q, 1024).unwrap()[0].cited,
+            Some(false),
+            "the section is served but no step was rendered"
+        );
     }
 
     #[test]

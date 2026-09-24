@@ -537,7 +537,7 @@ fn eval_no_models_runs_the_prose_questions() {
 }
 
 #[test]
-fn eval_with_the_checked_in_extraction_cites_gold_for_every_process_question() {
+fn eval_with_the_checked_in_extraction_cites_a_process_question_only_through_its_steps() {
     let dir = tempfile::tempdir().unwrap();
     singularrag_core::fixture::write_prose(dir.path());
     let extraction = concat!(
@@ -569,7 +569,19 @@ fn eval_with_the_checked_in_extraction_cites_gold_for_every_process_question() {
         stdout.lines().next().unwrap().contains(" cited "),
         "{stdout}"
     );
-    assert!(stdout.lines().any(|l| l == "cited 4/4 process"), "{stdout}");
+    // A process question counts only when a rendered step cites its gold section. S3 and
+    // S4 name no process, role or step system (a post-mortem document, a concept), so the
+    // tool answers them without steps: 2/4 is the measured number (final review, F3).
+    assert!(stdout.lines().any(|l| l == "cited 2/4 process"), "{stdout}");
+    for (id, cited) in [("S1", "yes"), ("S2", "yes"), ("S3", "no"), ("S4", "no")] {
+        assert!(
+            stdout
+                .lines()
+                .any(|l| l.starts_with(&format!("{id:<5} process"))
+                    && l.contains(&format!("  {cited:<5}"))),
+            "{id}: {stdout}"
+        );
+    }
 }
 
 /// Recursively copy `from` into `to`, skipping build output, dependencies, VCS and index

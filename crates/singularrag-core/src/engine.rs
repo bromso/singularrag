@@ -182,6 +182,8 @@ pub struct EntitiesResponse {
     pub text: String,
     /// Entities answered.
     pub entities: usize,
+    /// `path::name` of every section a rendered process step cites, deduped, in order.
+    pub step_sections: Vec<String>,
     pub stale_count: usize,
     pub lock_timeout: bool,
 }
@@ -638,10 +640,22 @@ impl Engine {
             ),
             knowledge::render_entities(&hits)
         );
+        let mut step_sections: Vec<String> = Vec::new();
+        for s in hits
+            .iter()
+            .filter_map(|h| h.steps.as_ref())
+            .flat_map(|p| &p.steps)
+        {
+            let key = format!("{}::{}", s.section.path, s.section.name);
+            if !step_sections.contains(&key) {
+                step_sections.push(key);
+            }
+        }
         Ok(EntitiesResponse {
             retrieval_id,
             text,
             entities: hits.len(),
+            step_sections,
             stale_count: stats.remaining,
             lock_timeout: stats.lock_timeout,
         })
