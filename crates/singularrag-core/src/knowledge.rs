@@ -230,7 +230,8 @@ fn entity_by_norm(conn: &Connection, norm: &str) -> Result<Option<(i64, String, 
         .optional()?)
 }
 
-/// Upserts entities by norm_name (extending a differing description), inserts mentions and
+/// Upserts entities by norm_name (extending a differing description; the stored type is kept
+/// unless the new one is `process`, which wins), inserts mentions and
 /// relations for this section, returns the new entity ids and relation ids that need vectors.
 /// Whatever this section said before is replaced, so applying twice is harmless.
 pub fn apply_extraction(
@@ -263,6 +264,14 @@ pub fn apply_extraction(
     for (n, ent) in merge_entities(e) {
         let id = match entity_by_norm(conn, &n)? {
             Some((id, _, old)) => {
+                // A process type beats any other: a section that names it a process is the
+                // one whose steps attach to it. No other type ever replaces the stored one.
+                if ent.r#type == "process" {
+                    conn.execute(
+                        "UPDATE entities SET type = 'process' WHERE id = ?1 AND type <> 'process'",
+                        [id],
+                    )?;
+                }
                 let d = extend_description(&old, &ent.description);
                 if d != old {
                     conn.execute(
@@ -2617,10 +2626,11 @@ mod tests {
         crate::fixture::write_prose(dir.path());
         let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
         reindex(dir.path(), &store);
-        // The whole prose fixture, so nothing is left pending, with two sections replaced.
-        // "Expense process" sorts first of the handbook keys, so its `process` type wins.
-        let mut map: serde_json::Value =
-            serde_json::from_str(include_str!("../fixtures/prose/extraction.json")).unwrap();
+        // The prose fixture as checked in (it types "Expense process" as `concept`), then two
+        // sections replaced: the process type wins over the stored one, whatever the order.
+        let fixture = include_str!("../fixtures/prose/extraction.json");
+        load_extraction_json(&store, None, fixture).unwrap();
+        let mut map: serde_json::Value = serde_json::from_str(fixture).unwrap();
         let mut expense = process_extraction();
         expense["steps"] = expense_steps();
         map["docs/handbook.md::Expense process"] = expense;
@@ -2638,5 +2648,71 @@ mod tests {
         assert!(crate::journeys::steps_for_process(store.conn(), onboarding)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn an_entity_first_seen_as_another_type_becomes_a_process_and_its_steps_apply() {
+        // "Glossary" comes first in the file, so it is extracted (and stores the entity) first.
+        let (fake, store, models, _d) = tick_fixture(&[
+            ("Glossary", "The expense process is how money comes back."),
+            ("Expense process", "Submit each expense in Expensify."),
+        ]);
+        fake.set_extraction(
+            "Glossary",
+            serde_json::json!({"entities": [
+            {"name": "Expense process", "type": "concept", "description": "a term"}
+        ], "relations": []}),
+        );
+        fake.set_extraction("Expense process", process_extraction());
+        fake.set_steps("Expense", expense_steps());
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.stepped, t.pending), (2, 1, 0), "{t:?}");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM entities WHERE norm_name = 'expense process' AND type = 'process'"
+            ),
+            1
+        );
+        let rows =
+            crate::journeys::steps_for_process(store.conn(), entity_id(&store, "expense process"))
+                .unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn an_embedding_rebuild_clears_steps_and_requeues_at_stage_zero() {
+        let (fake, store, models, _d) = tick_fixture(&[
+            ("Expense process", "Submit each expense in Expensify."),
+            ("Travel process", "Book trips through the travel desk."),
+        ]);
+        fake.set_extraction("Expense", process_extraction());
+        fake.set_steps("Expense", expense_steps());
+        fake.set_extraction(
+            "Travel",
+            serde_json::json!({"entities": [
+            {"name": "Travel process", "type": "process", "description": "how trips are booked"}
+        ], "relations": []}),
+        );
+        // Expense: entities and steps answer; Travel: entities answer, its steps find the server down.
+        fake.set_down_after(3);
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.stepped, t.pending), (2, 1, 1), "{t:?}");
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 2);
+        assert!(count(&store, "SELECT COUNT(*) FROM step_systems") > 0);
+        assert_eq!(count(&store, "SELECT stage FROM extract_queue"), 1);
+        assert!(vec::ensure_tables(&store, 32, &models.config().embed).unwrap());
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM step_systems"), 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM extract_queue"), 2);
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue WHERE stage = 0"),
+            2
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM steps_cache"),
+            1,
+            "the steps cache is keyed by hash and survives"
+        );
     }
 }
