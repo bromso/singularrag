@@ -373,6 +373,42 @@ cited 2/4 process
 
 S4's gold section is still served through the fixture's `Single sign-on` concept (Okta's relation to it names "the single sign-on system that opens every other tool", as the handbook does), but that concept is no step's system, so no Onboarding step is rendered and S4 is not cited. The three paraphrase misses remain the semantic seed's job.
 
+## First real-model run (2026-09-24, branch `hop-v0`)
+
+Ollama 0.34.3 on the same Mac, `nomic-embed-text` and `qwen2.5:7b-instruct` pulled, `singularrag doctor` green. Corpus: the pinned `5ec066b` tree plus the two prose fixture files under `docs/` (the "Tier one on knowledge" prose recipe), indexed fresh, then `singularrag serve --no-open` left running until the queue drained: 243 sections, about two hours at 1.5–1.9 sections a minute (the model is the bottleneck: roughly a thousand output tokens per section at 30 tokens a second, plus a second prompt for every section the first answer typed as a process). Result: 243 section embeddings, 1,183 entities (371 typed `process`), 1,340 relations, 1,339 steps; three sections failed after three attempts each, all with Ollama's `HTTP 500 prediction aborted, token repeat limit reached` (a looping generation on three long plan/spec sections), listed by `doctor`.
+
+What the fake never showed, fixed on this branch before the numbers below could be taken: the steps answer's process name must win over what the entity prompt typed (every steps answer was discarded on the exact-name join); stored section text pads child sections and code fences with blanks, so an H1 was a 95k-character "section" split into sixteen model calls; a 6,000-character part takes about 35 s against a 30 s timeout; a timeout or a model-side 5xx stopped the tick as an outage and retried the same oldest row forever; the tick slept 30 s after every single section. See the knowledge spec §3 and the journeys spec §3 amendments.
+
+Sanity run on the fixture alone first (10 sections, three minutes): all four handbook processes got steps (Onboarding 8, Expense 6, Incident 7, Release 4), zero discards; the model also emits step-less noise processes (`first day`, `process`, the H1 intro).
+
+### Prose set, sixteen questions, real extraction
+
+| | 1024 | 2048 | 4096 |
+|---|---|---|---|
+| seeds on (query embedding + entity seeds) | 0.375 | 0.875 | **1.000** |
+| seeds off (`--no-models`: no query embedding; entity name seeds from the real extraction stay) | 0.438 | 0.812 | 0.812 |
+| cited via `entities`, seeds on | 4/4 entity · 4/4 relation · 4/4 process | same | same |
+| cited via `entities`, seeds off | 4/4 · 4/4 · 2/4 process | same | same |
+
+At 4096 every question is answered and every entity, relation and process question cites its gold section through a rendered step or entity. The knowledge gate (prose ≥ 0.6 with seeds on; `entities` cites gold on ≥ 8 of the 12 entity and relation questions) and the journeys gate (4/4 process questions cite through a rendered step) are met with the real model. Seeds-off "2/4 process" is the same number the checked-in extraction gave: S3 and S4 reach their process only through the query embedding's KNN match. At 1024 seeds-on is 0.06 below seeds-off: the semantic seed's extra candidates crowd a budget that small (P1–P4 miss either way; E1, E4, R1, R4, S2, S4 lose to them). Note that "seeds off" here is not the earlier no-extraction baseline (0.188 / 0.677 / 0.792): entity seeds from the real extraction are active in both rows.
+
+### Docs set, seeds on
+
+`questions-docs.toml` at 4096 on the same workspace (the pinned tree plus the two fixture files, so not byte-identical to the pinned docs corpus): **0.764** with seeds on, against 0.653 seeds-off on the pinned tree. The semantic seed lifts the docs set by 0.11; D11 (`README.md::Claude Code`) is the remaining half miss. hono was not run seeds-on: it has no extraction yet (its documents would need the same background pass).
+
+### Recipe
+
+```
+git archive 5ec066b | tar -x -C <dir>
+cp crates/singularrag-core/fixtures/prose/voyage.md crates/singularrag-core/fixtures/prose/handbook.md <dir>/docs/
+singularrag --repo <dir> index
+singularrag --repo <dir> serve --no-open        # leave it until `singularrag --repo <dir> doctor` says pending: 0 (or only failed rows)
+singularrag --repo <dir> eval --questions eval/questions-prose.toml --budget <N>             # seeds on
+singularrag --repo <dir> eval --questions eval/questions-prose.toml --budget <N> --no-models # seeds off
+```
+
+The vault set (`~/.singularrag/questions-vault.toml`) does not exist yet and was not run.
+
 ## Tier two
 
 Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.
