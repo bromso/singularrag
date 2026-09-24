@@ -35,6 +35,17 @@ test("lists processes, shows the selected one's steps as an ordered list, and th
   expect(within(screen.getByRole("list", { name: "Processes" })).getAllByRole("button")).toHaveLength(1);
 });
 
+// The accessible description, resolved from `aria-describedby` (jest-dom is not wired into the preload).
+const description = (el: HTMLElement) =>
+  (el.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean).map((id) => document.getElementById(id)?.textContent ?? "").join(" ");
+
+test("each Implemented by button describes how the link was derived", () => {
+  render(<JourneysView payload={payload} pending={0} onFocusSection={() => {}} />);
+  const steps = screen.getByRole("list", { name: "Steps of Expense process" });
+  expect(description(within(steps).getByRole("button", { name: "Implemented by src/payroll/expense.ts::approveClaim" }))).toMatch(/mentioned/);
+  expect(description(within(steps).getByRole("button", { name: "Implemented by src/vendors/expensify.ts::postClaim" }))).toMatch(/via Expensify/);
+});
+
 test("the journeys view explains an empty corpus", () => {
   render(<JourneysView payload={{ processes: [], truncated: false }} pending={12} onFocusSection={() => {}} />);
   expect(screen.getByText("No processes extracted yet (12 sections pending).")).toBeTruthy();

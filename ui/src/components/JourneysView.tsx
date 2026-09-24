@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import type { Process, ProcessesPayload, Step } from "../api/types";
 import type { FocusSection } from "./EntityView";
 
@@ -61,6 +61,9 @@ function ProcessSteps({ process, onFocusSection }: { process: Process; onFocusSe
 
 function StepItem({ step, onFocusSection }: { step: Step; onFocusSection: FocusSection }) {
   const sec = step.section;
+  // The accessible name is only the target, so the visible provenance ("mentioned" / "via X")
+  // is the button's description; `useId` keeps the id unique per step, per view instance.
+  const uid = useId();
   return (
     <li>
       <p>{step.text}</p>
@@ -73,8 +76,8 @@ function StepItem({ step, onFocusSection }: { step: Step; onFocusSection: FocusS
           <dt>Implemented by</dt>
           <dd>
             {step.code.map((c) => (
-              <button key={c.symbol_id} type="button" className="mr-2 underline focus-visible:outline-2 focus-visible:outline-ring" aria-label={`Implemented by ${c.path}::${c.name}`} onClick={() => onFocusSection(c.path, c.name, c.symbol_id)}>
-                {c.path}::{c.name} <span className="opacity-70">({typeof c.via === "string" ? "mentioned" : `via ${c.via.system}`})</span>
+              <button key={c.symbol_id} type="button" className="mr-2 underline focus-visible:outline-2 focus-visible:outline-ring" aria-label={`Implemented by ${c.path}::${c.name}`} aria-describedby={`${uid}-via-${c.symbol_id}`} onClick={() => onFocusSection(c.path, c.name, c.symbol_id)}>
+                {c.path}::{c.name} <span id={`${uid}-via-${c.symbol_id}`} className="opacity-70">({typeof c.via === "string" ? "mentioned" : `via ${c.via.system}`})</span>
               </button>
             ))}
             {step.more_code > 0 && <span>+{step.more_code} more</span>}
