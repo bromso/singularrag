@@ -199,8 +199,42 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_5() {
-        assert_eq!(SCHEMA_VERSION, 5);
+    fn schema_version_is_6() {
+        assert_eq!(SCHEMA_VERSION, 6);
+    }
+
+    #[test]
+    fn a_v5_index_is_rebuilt_as_v6_with_the_steps_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.set_meta("schema_version", "5").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(SCHEMA_VERSION, 6);
+        assert_eq!(store.schema_version().unwrap(), 6);
+        let mut stmt = store
+            .conn()
+            .prepare("PRAGMA table_info(extract_queue)")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(cols.contains(&"stage".to_string()), "{cols:?}");
+        for t in ["steps", "step_systems", "steps_cache"] {
+            let n: i64 = store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [t],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "missing table {t}");
+        }
     }
 
     #[test]
@@ -305,6 +339,9 @@ mod tests {
             "section_embeddings",
             "extraction_cache",
             "embedding_cache",
+            "steps",
+            "step_systems",
+            "steps_cache",
         ] {
             let n: i64 = store
                 .conn()

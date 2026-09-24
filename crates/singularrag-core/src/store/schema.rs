@@ -1,6 +1,6 @@
 /// Bumped whenever the DDL below changes. The index is derived data: on a mismatch
 /// `Store::init` drops every table and rebuilds from scratch.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -107,7 +107,9 @@ CREATE TABLE IF NOT EXISTS extract_queue (
   last_error    TEXT,
   queued_at_ms  INTEGER NOT NULL,
   -- set while a tick works the row (knowledge::claim_rows); NULL when free
-  claimed_at_ms INTEGER
+  claimed_at_ms INTEGER,
+  -- 0 = entities pending, 1 = steps pending (journeys)
+  stage INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS section_embeddings (
   symbol_id INTEGER PRIMARY KEY,
@@ -124,4 +126,23 @@ CREATE TABLE IF NOT EXISTS embedding_cache (
   blob  BLOB NOT NULL,
   PRIMARY KEY (hash, model)
 );
+CREATE TABLE IF NOT EXISTS steps (
+  id         INTEGER PRIMARY KEY,
+  process_id INTEGER NOT NULL,
+  ordinal    INTEGER NOT NULL,
+  text       TEXT NOT NULL,
+  role_id    INTEGER,
+  role_text  TEXT NOT NULL DEFAULT '',
+  symbol_id  INTEGER NOT NULL,
+  section_hash TEXT,
+  UNIQUE (process_id, symbol_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS steps_symbol ON steps(symbol_id);
+CREATE INDEX IF NOT EXISTS steps_process ON steps(process_id);
+CREATE TABLE IF NOT EXISTS step_systems (
+  step_id   INTEGER NOT NULL,
+  entity_id INTEGER NOT NULL,
+  PRIMARY KEY (step_id, entity_id)
+);
+CREATE TABLE IF NOT EXISTS steps_cache (hash TEXT PRIMARY KEY, json TEXT NOT NULL);
 "#;

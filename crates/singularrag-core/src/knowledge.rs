@@ -58,6 +58,7 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
 /// entities those mentions pointed at are recounted and dropped when nothing mentions them.
 pub fn delete_for_symbols(conn: &Connection, file_id: i64) -> Result<()> {
     const SYMS: &str = "SELECT id FROM symbols WHERE file_id = ?1";
+    crate::journeys::delete_steps_for_symbols(conn, SYMS, file_id)?;
     let affected: Vec<i64> = {
         let mut stmt = conn.prepare(&format!(
             "SELECT DISTINCT entity_id FROM entity_mentions WHERE symbol_id IN ({SYMS})"
@@ -250,6 +251,7 @@ pub fn apply_extraction(
         "DELETE FROM entity_mentions WHERE symbol_id = ?1",
         [symbol_id],
     )?;
+    crate::journeys::delete_steps_for_symbol(conn, symbol_id)?;
 
     let mut new_entities = Vec::new();
     let mut by_norm: HashMap<String, i64> = HashMap::new();
