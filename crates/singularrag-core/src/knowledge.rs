@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{ExtractedEntity, Extraction, Models, SectionInput, DESCRIPTION_MAX};
+use crate::models::{
+    normalise_steps, ExtractedEntity, Extraction, Models, SectionInput, StepsAnswer,
+    DESCRIPTION_MAX,
+};
 use crate::store::{vec, Store};
 use crate::time::now_ms;
 use crate::{Error, Result};
@@ -38,7 +41,7 @@ pub fn norm_name(s: &str) -> String {
 /// Called by the indexer for every section-kind symbol with a non-blank body, inside its transaction.
 pub fn queue_section(conn: &Connection, symbol_id: i64, body: &str) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO extract_queue(symbol_id, hash, attempts, last_error, queued_at_ms) VALUES (?1, ?2, 0, NULL, ?3)",
+        "INSERT OR REPLACE INTO extract_queue(symbol_id, hash, attempts, last_error, queued_at_ms, stage) VALUES (?1, ?2, 0, NULL, ?3, 0)",
         params![symbol_id, section_hash(body), now_ms()],
     )?;
     Ok(())
@@ -165,6 +168,8 @@ pub struct KnowledgeTick {
     pub embedded: usize,
     /// Sections whose extraction was written this tick (cache hits included).
     pub extracted: usize,
+    /// Process sections whose steps were written this tick (cache hits included).
+    pub stepped: usize,
     /// Extraction attempts that failed on a malformed answer this tick.
     pub failed: usize,
     /// `pending()` after the tick.
@@ -422,9 +427,12 @@ pub const CLAIM_STALE_MS: i64 = 120_000;
 /// Queue rows the embed step works: no section vector yet.
 const CLAIM_EMBED: &str =
     "NOT EXISTS (SELECT 1 FROM section_embeddings e WHERE e.symbol_id = q.symbol_id)";
-/// Queue rows the extract step works: embedded, attempts left.
-const CLAIM_EXTRACT: &str = "EXISTS (SELECT 1 FROM section_embeddings e WHERE e.symbol_id = q.symbol_id) AND q.attempts < 3";
+/// Queue rows the extract step works: entities pending, embedded, attempts left.
+const CLAIM_EXTRACT: &str = "q.stage = 0 AND EXISTS (SELECT 1 FROM section_embeddings e WHERE e.symbol_id = q.symbol_id) AND q.attempts < 3";
 const _: () = assert!(MAX_ATTEMPTS == 3, "CLAIM_EXTRACT spells MAX_ATTEMPTS out");
+/// Queue rows the steps stage works: entities written, steps pending, attempts left.
+pub const CLAIM_STEPS: &str = "q.stage = 1 AND q.attempts < 3";
+const _: () = assert!(MAX_ATTEMPTS == 3, "CLAIM_STEPS spells MAX_ATTEMPTS out");
 
 /// Claims up to `limit` unclaimed (or stale-claimed) queue rows matching `filter`, oldest
 /// first, stamping them `claimed_at_ms = now`. One UPDATE that re-checks the claim
@@ -712,6 +720,10 @@ fn extract_step(
     budget: Duration,
     should_yield: &dyn Fn() -> bool,
 ) -> Result<()> {
+    // Rows an outage or a yield left at the steps stage finish before new rows start.
+    if !steps_stage(store, models, t, start, budget, should_yield)? {
+        return Ok(());
+    }
     let conn = store.conn();
     let at = now_ms();
     let claim = Claim {
@@ -793,27 +805,188 @@ fn extract_step(
                 Err(e) => return Err(e),
             }
         };
-        match write_section(store, symbol_id, &hash, &extraction, &vectors) {
-            Ok(()) => t.extracted += 1,
+        let has_process = match write_section(store, symbol_id, &hash, &extraction, &vectors) {
+            Ok(p) => {
+                t.extracted += 1;
+                p
+            }
             Err(Error::ModelUnavailable(m)) => return record_outage(store, t, m),
             Err(e) => return Err(e),
+        };
+        if !has_process {
+            continue;
+        }
+        // Same claim, same checks as before a row: stopping here leaves the row at the
+        // steps stage for the next tick's `steps_stage`.
+        if start.elapsed() >= budget || should_yield() {
+            return Ok(());
+        }
+        let input = SectionInput {
+            path: &path,
+            heading: &heading,
+            text: &body,
+        };
+        if let StepOutcome::Outage = steps_for_row(store, models, symbol_id, &hash, &input, t)? {
+            return Ok(());
         }
     }
     Ok(())
+}
+
+/// Stage-1 queue rows (entities written, steps pending), claimed like the entity rows and
+/// worked under the same budget and yield checks. `false` when the tick must stop here
+/// (an outage, the budget spent, or a job waiting).
+fn steps_stage(
+    store: &Store,
+    models: &Models,
+    t: &mut KnowledgeTick,
+    start: Instant,
+    budget: Duration,
+    should_yield: &dyn Fn() -> bool,
+) -> Result<bool> {
+    let conn = store.conn();
+    let at = now_ms();
+    let claim = Claim {
+        conn,
+        ids: claim_rows(conn, CLAIM_STEPS, EXTRACT_PER_TICK, at)?,
+        at,
+    };
+    let rows: Vec<(i64, String, String, String)> = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT q.symbol_id, q.hash, s.name, f.path FROM extract_queue q
+             JOIN symbols s ON s.id = q.symbol_id JOIN files f ON f.id = s.file_id
+             WHERE q.symbol_id IN ({}) ORDER BY q.queued_at_ms, q.symbol_id",
+            claim.id_list()
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for (symbol_id, hash, heading, path) in rows {
+        if start.elapsed() >= budget || should_yield() {
+            return Ok(false);
+        }
+        let Some(body) = section_body(conn, symbol_id)? else {
+            conn.execute(
+                "DELETE FROM extract_queue WHERE symbol_id = ?1",
+                [symbol_id],
+            )?;
+            continue;
+        };
+        // Stage 1 is only ever set with the row's hash in place; recompute defensively.
+        let hash = if hash.is_empty() {
+            section_hash(&body)
+        } else {
+            hash
+        };
+        let input = SectionInput {
+            path: &path,
+            heading: &heading,
+            text: &body,
+        };
+        if let StepOutcome::Outage = steps_for_row(store, models, symbol_id, &hash, &input, t)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+enum StepOutcome {
+    Applied,
+    Discarded,
+    Malformed,
+    Outage,
+}
+
+/// The steps of one stage-1 section: from the steps cache or the steps prompt, applied and
+/// the queue row gone in one transaction. A malformed answer costs an attempt and leaves the
+/// row at stage 1; an outage is recorded and the caller stops the tick.
+fn steps_for_row(
+    store: &Store,
+    models: &Models,
+    symbol_id: i64,
+    hash: &str,
+    input: &SectionInput,
+    t: &mut KnowledgeTick,
+) -> Result<StepOutcome> {
+    let conn = store.conn();
+    let answer = match cached_steps(conn, hash)? {
+        Some(a) => a,
+        None => match models.steps(input) {
+            Ok(a) => {
+                // A memo keyed by hash, like the extraction cache.
+                conn.execute(
+                    "INSERT OR REPLACE INTO steps_cache(hash, json) VALUES (?1, ?2)",
+                    params![hash, steps_json(&a)?],
+                )?;
+                a
+            }
+            Err(Error::ModelUnavailable(m)) if m.contains("not JSON") => {
+                conn.execute(
+                    "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1",
+                    params![symbol_id, m],
+                )?;
+                t.failed += 1;
+                return Ok(StepOutcome::Malformed);
+            }
+            Err(Error::ModelUnavailable(m)) => {
+                record_outage(store, t, m)?;
+                return Ok(StepOutcome::Outage);
+            }
+            Err(e) => return Err(e),
+        },
+    };
+    let tx = conn.unchecked_transaction()?;
+    let outcome = match crate::journeys::apply_steps(&tx, symbol_id, hash, &answer)? {
+        Some(_) => StepOutcome::Applied,
+        None => {
+            tracing::warn!(
+                symbol_id,
+                process = %answer.process,
+                "steps answer names no process entity of the section; discarded"
+            );
+            StepOutcome::Discarded
+        }
+    };
+    tx.execute(
+        "DELETE FROM extract_queue WHERE symbol_id = ?1",
+        [symbol_id],
+    )?;
+    tx.commit()?;
+    if let StepOutcome::Applied = outcome {
+        t.stepped += 1;
+    }
+    Ok(outcome)
+}
+
+pub fn steps_json(a: &StepsAnswer) -> Result<String> {
+    serde_json::to_string(a).map_err(|e| Error::Config(e.to_string()))
+}
+
+pub fn cached_steps(conn: &Connection, hash: &str) -> Result<Option<StepsAnswer>> {
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT json FROM steps_cache WHERE hash = ?1",
+            [hash],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
 }
 
 fn extraction_json(x: &Extraction) -> Result<String> {
     serde_json::to_string(x).map_err(|e| Error::Config(e.to_string()))
 }
 
-/// One transaction: the extraction applied, vectors for what is new, the queue row gone. Any error rolls all of it back.
+/// One transaction: the extraction applied (which drops the section's old steps), vectors for
+/// what is new, and the queue row gone, or, when the extraction names a `process`, the row
+/// moved to the steps stage (`Ok(true)`). Any error rolls all of it back.
 fn write_section(
     store: &Store,
     symbol_id: i64,
     hash: &str,
     x: &Extraction,
     vectors: &HashMap<String, Vec<f32>>,
-) -> Result<()> {
+) -> Result<bool> {
     let tx = store.conn().unchecked_transaction()?;
     let (entities, relations) = apply_extraction(&tx, symbol_id, hash, x)?;
     for id in entities {
@@ -853,26 +1026,43 @@ fn write_section(
             vec::insert(store, "relation_vec", id, v)?;
         }
     }
-    tx.execute(
-        "DELETE FROM extract_queue WHERE symbol_id = ?1",
-        [symbol_id],
-    )?;
+    let has_process = x.entities.iter().any(|e| e.r#type == "process");
+    if has_process {
+        tx.execute(
+            "UPDATE extract_queue SET stage = 1, attempts = 0, last_error = NULL WHERE symbol_id = ?1",
+            [symbol_id],
+        )?;
+    } else {
+        tx.execute(
+            "DELETE FROM extract_queue WHERE symbol_id = ?1",
+            [symbol_id],
+        )?;
+    }
     tx.commit()?;
-    Ok(())
+    Ok(has_process)
 }
 
 /// Applies a checked-in `{ "<path>::<heading>": Extraction }` map to the indexed sections it
 /// names, as the tick would have: the extraction (normalised) goes in with the section's hash,
-/// the extraction cache remembers it, and the queue row goes. With `models`, the section and
+/// the extraction cache remembers it, and the queue row goes. A value may carry a `steps`
+/// block (a steps answer), applied and cached the same way; without one a process section
+/// simply has no steps. With `models`, the section and
 /// the new entities and relations are embedded as well; without, they stay unembedded.
 /// Keys naming no section with a body are skipped with a warning. Returns sections applied.
 pub fn load_extraction_json(store: &Store, models: Option<&Models>, json: &str) -> Result<usize> {
-    let map: std::collections::BTreeMap<String, Extraction> =
+    #[derive(serde::Deserialize)]
+    struct FixtureSection {
+        #[serde(flatten)]
+        extraction: Extraction,
+        #[serde(default)]
+        steps: Option<StepsAnswer>,
+    }
+    let map: std::collections::BTreeMap<String, FixtureSection> =
         serde_json::from_str(json).map_err(|e| Error::Config(format!("extraction json: {e}")))?;
     let conn = store.conn();
     let mut applied = 0;
     let mut unknown = Vec::new();
-    for (key, x) in map {
+    for (key, section) in map {
         let found = match key.split_once("::") {
             Some((path, name)) => conn
                 .query_row(
@@ -889,7 +1079,7 @@ pub fn load_extraction_json(store: &Store, models: Option<&Models>, json: &str) 
             unknown.push(key);
             continue;
         };
-        let x = crate::models::normalise_extraction(x);
+        let x = crate::models::normalise_extraction(section.extraction);
         let hash = section_hash(&body);
         let vectors = match models {
             Some(m) => embed_loaded_section(store, m, symbol_id, &hash, &body, &x)?,
@@ -900,6 +1090,25 @@ pub fn load_extraction_json(store: &Store, models: Option<&Models>, json: &str) 
             params![hash, extraction_json(&x)?],
         )?;
         write_section(store, symbol_id, &hash, &x, &vectors)?;
+        if let Some(steps) = section.steps {
+            let steps = normalise_steps(steps);
+            conn.execute(
+                "INSERT OR REPLACE INTO steps_cache(hash, json) VALUES (?1, ?2)",
+                params![hash, steps_json(&steps)?],
+            )?;
+            if crate::journeys::apply_steps(conn, symbol_id, &hash, &steps)?.is_none() {
+                tracing::warn!(
+                    key = %key,
+                    process = %steps.process,
+                    "fixture steps name no process entity of the section; discarded"
+                );
+            }
+        }
+        // A loaded fixture has nothing pending, whether or not the section had steps.
+        conn.execute(
+            "DELETE FROM extract_queue WHERE symbol_id = ?1",
+            [symbol_id],
+        )?;
         applied += 1;
     }
     if !unknown.is_empty() {
@@ -2191,5 +2400,243 @@ mod tests {
             count(&store, "SELECT COUNT(*) FROM relation_vec"),
             count(&store, "SELECT COUNT(*) FROM relations")
         );
+    }
+
+    /// `docs/handbook.md` holding `# Handbook` (blank, never queued) and one `##` section per
+    /// `(heading, body)`, indexed, with a fake model. The tempdir is returned last to keep it alive.
+    fn handbook_doc(sections: &[(&str, &str)]) -> String {
+        let mut doc = String::from("# Handbook\n\n");
+        for (h, b) in sections {
+            doc.push_str(&format!("## {h}\n\n{b}\n\n"));
+        }
+        doc
+    }
+    fn reindex(dir: &std::path::Path, store: &Store) {
+        let ws = Workspace::single(dir).unwrap();
+        Indexer::new(store, &ws, &MapConfig::default())
+            .unwrap()
+            .refresh(None)
+            .unwrap();
+    }
+    fn tick_fixture(sections: &[(&str, &str)]) -> (FakeOllama, Store, Models, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/handbook.md"), handbook_doc(sections)).unwrap();
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        reindex(dir.path(), &store);
+        let fake = FakeOllama::spawn(16);
+        let m = models(&fake);
+        (fake, store, m, dir)
+    }
+    fn process_extraction() -> serde_json::Value {
+        serde_json::json!({"entities": [
+            {"name": "Expense process", "type": "process", "description": "how you get money back"},
+            {"name": "Manager", "type": "role", "description": "approves claims"},
+            {"name": "Expensify", "type": "system", "description": "the expense tool"}
+        ], "relations": []})
+    }
+    fn expense_steps() -> serde_json::Value {
+        serde_json::json!({"process": "Expense process", "steps": [
+            {"text": "Submit each expense in Expensify", "role": "employee", "systems": ["Expensify"]},
+            {"text": "Your manager approves or rejects the claim", "role": "Manager", "systems": []}
+        ]})
+    }
+    fn steps_calls(fake: &FakeOllama) -> usize {
+        fake.calls()
+            .iter()
+            .filter(|c| *c == "/api/generate:steps")
+            .count()
+    }
+    fn entity_id(store: &Store, norm: &str) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT id FROM entities WHERE norm_name = ?1",
+                [norm],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_process_section_gets_a_steps_call_and_a_plain_section_does_not() {
+        let (fake, store, models, _d) = tick_fixture(&[
+            (
+                "Expense process",
+                "Submit each expense in Expensify. Your manager approves.",
+            ),
+            ("Buddy", "Every new colleague is given a buddy."),
+        ]);
+        fake.set_extraction("Expense", process_extraction());
+        fake.set_steps("Expense", expense_steps());
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.stepped, t.pending), (2, 1, 0), "{t:?}");
+        assert_eq!(steps_calls(&fake), 1);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 2);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps_cache"), 1);
+    }
+
+    #[test]
+    fn a_cached_steps_answer_is_applied_without_a_model_call() {
+        let expense = (
+            "Expense process",
+            "Submit each expense in Expensify. Your manager approves.",
+        );
+        let (fake, store, models, dir) =
+            tick_fixture(&[expense, ("Buddy", "Every new colleague is given a buddy.")]);
+        fake.set_extraction("Expense", process_extraction());
+        fake.set_steps("Expense", expense_steps());
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.stepped, t.pending), (1, 0), "{t:?}");
+        // Another section of the file changes: the file is re-indexed and the expense
+        // section is queued again with the same text, so the same hash.
+        std::fs::write(
+            dir.path().join("docs/handbook.md"),
+            handbook_doc(&[
+                expense,
+                ("Buddy", "Every new colleague is given a buddy on day one."),
+            ]),
+        )
+        .unwrap();
+        reindex(dir.path(), &store);
+        assert_eq!(pending(&store).unwrap(), 2);
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.stepped, t.pending), (2, 1, 0), "{t:?}");
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 2);
+        assert_eq!(steps_calls(&fake), 1, "served from the steps cache");
+    }
+
+    #[test]
+    fn an_outage_between_the_prompts_resumes_at_the_steps_stage() {
+        let (fake, store, models, _d) =
+            tick_fixture(&[("Expense process", "Submit each expense in Expensify.")]);
+        fake.set_extraction("Expense", process_extraction());
+        fake.set_steps("Expense", expense_steps());
+        fake.set_down_after(1); // the entity prompt answers; the steps prompt finds the server down
+        let t1 = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t1.extracted, t1.stepped, t1.pending), (1, 0, 1), "{t1:?}");
+        assert!(t1.model_error.is_some());
+        assert_eq!(count(&store, "SELECT stage FROM extract_queue"), 1);
+        assert_eq!(count(&store, "SELECT attempts FROM extract_queue"), 0);
+        fake.set_down(false);
+        let t2 = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t2.extracted, t2.stepped, t2.pending), (0, 1, 0), "{t2:?}");
+        assert!(t2.model_error.is_none());
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .filter(|c| *c == "/api/generate")
+                .count(),
+            1,
+            "the entity prompt is not asked again"
+        );
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 2);
+    }
+
+    #[test]
+    fn an_unmatched_process_name_discards_the_answer_and_finishes_the_section() {
+        let (fake, store, models, _d) =
+            tick_fixture(&[("Expense process", "Submit each expense in Expensify.")]);
+        fake.set_extraction("Expense", process_extraction());
+        let mut answer = expense_steps();
+        answer["process"] = serde_json::json!("Expenses");
+        fake.set_steps("Expense", answer);
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!(
+            (t.extracted, t.stepped, t.failed, t.pending),
+            (1, 0, 0, 0),
+            "{t:?}"
+        );
+        assert!(t.model_error.is_none());
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM extract_queue"), 0);
+        assert_eq!(steps_calls(&fake), 1);
+    }
+
+    #[test]
+    fn a_section_with_two_processes_keeps_steps_only_for_the_named_one() {
+        let (fake, store, models, _d) = tick_fixture(&[(
+            "Expense process",
+            "Submit each expense in Expensify. Travel is booked first.",
+        )]);
+        let mut x = process_extraction();
+        x["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(
+                {"name": "Travel process", "type": "process", "description": "how trips are booked"}
+            ));
+        fake.set_extraction("Expense", x);
+        let mut answer = expense_steps();
+        answer["process"] = serde_json::json!("Travel process");
+        fake.set_steps("Expense", answer);
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.stepped, t.pending), (1, 0), "{t:?}");
+        let expense = entity_id(&store, "expense process");
+        let travel = entity_id(&store, "travel process");
+        assert!(crate::journeys::steps_for_process(store.conn(), expense)
+            .unwrap()
+            .is_empty());
+        let rows = crate::journeys::steps_for_process(store.conn(), travel).unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].text, "Submit each expense in Expensify");
+    }
+
+    #[test]
+    fn malformed_steps_json_counts_an_attempt_and_leaves_the_stage() {
+        let (fake, store, models, _d) =
+            tick_fixture(&[("Expense process", "Submit each expense in Expensify.")]);
+        fake.set_extraction("Expense", process_extraction());
+        fake.set_steps("Expense", expense_steps());
+        // First tick: the entity prompt answers and the row is left at the steps stage.
+        fake.set_down_after(1);
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.pending), (1, 1), "{t:?}");
+        fake.set_down(false);
+        // Second tick: both steps answers (first and strict retry) are malformed.
+        fake.fail_next_generate(2);
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.stepped, t.failed), (0, 0, 1), "{t:?}");
+        assert!(t.model_error.is_none(), "{t:?}");
+        assert_eq!(count(&store, "SELECT attempts FROM extract_queue"), 1);
+        assert_eq!(count(&store, "SELECT stage FROM extract_queue"), 1);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 0);
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM extract_queue WHERE claimed_at_ms IS NOT NULL"
+            ),
+            0,
+            "the failed row is unclaimed"
+        );
+    }
+
+    #[test]
+    fn the_fixture_loader_applies_a_steps_block() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        reindex(dir.path(), &store);
+        // The whole prose fixture, so nothing is left pending, with two sections replaced.
+        // "Expense process" sorts first of the handbook keys, so its `process` type wins.
+        let mut map: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/prose/extraction.json")).unwrap();
+        let mut expense = process_extraction();
+        expense["steps"] = expense_steps();
+        map["docs/handbook.md::Expense process"] = expense;
+        // A process section without a steps block still loads and still leaves nothing pending.
+        map["docs/handbook.md::Onboarding"] = serde_json::json!({"entities": [
+            {"name": "Onboarding flow", "type": "process", "description": "the first weeks"}
+        ], "relations": []});
+        let n = load_extraction_json(&store, None, &map.to_string()).unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 2);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps_cache"), 1);
+        assert_eq!(pending(&store).unwrap(), 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM extract_queue"), 0);
+        let onboarding = entity_id(&store, "onboarding flow");
+        assert!(crate::journeys::steps_for_process(store.conn(), onboarding)
+            .unwrap()
+            .is_empty());
     }
 }
