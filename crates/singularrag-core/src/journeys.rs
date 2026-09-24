@@ -123,6 +123,154 @@ pub fn role_name(conn: &Connection, step: &StepRow) -> Result<String> {
     }
 }
 
+pub const DOC_KINDS: [&str; 5] = ["section", "document", "element", "rule", "key"];
+/// `key` rows are config keys and do count as code for "implemented by"; only the four prose
+/// kinds are excluded there.
+const NON_CODE_KINDS: [&str; 4] = ["section", "document", "element", "rule"];
+pub const LINK_LIMIT: usize = 3;
+pub const MIN_SYSTEM_CHARS: usize = 3;
+
+pub fn normalise_ident(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '-' && *c != '_')
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Via {
+    Mention,
+    System(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeLink {
+    pub symbol_id: i64,
+    pub path: String,
+    pub name: String,
+    pub line: u32,
+    pub via: Via,
+}
+
+struct CodeSym {
+    symbol_id: i64,
+    file_id: i64,
+    path: String,
+    name: String,
+    line: u32,
+    norm_name: String,
+    norm_stem: String,
+    referrers: i64,
+}
+
+pub struct CodeIndex {
+    syms: Vec<CodeSym>,
+}
+
+pub fn load_code_index(conn: &Connection) -> Result<CodeIndex> {
+    let kinds = NON_CODE_KINDS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT s.id, s.file_id, f.path, s.name, s.line_start,
+                (SELECT COUNT(DISTINCT r.file_id) FROM refs r WHERE r.name = s.name AND r.file_id != s.file_id)
+         FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE s.kind NOT IN ({kinds})
+         ORDER BY s.id"
+    ))?;
+    let syms = stmt
+        .query_map([], |r| {
+            let path: String = r.get(2)?;
+            let name: String = r.get(3)?;
+            let stem = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(CodeSym {
+                symbol_id: r.get(0)?,
+                file_id: r.get(1)?,
+                norm_name: normalise_ident(&name),
+                norm_stem: normalise_ident(&stem),
+                path,
+                name,
+                line: r.get::<_, i64>(4)? as u32,
+                referrers: r.get(5)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(CodeIndex { syms })
+}
+
+fn section_mentions(conn: &Connection, index: &CodeIndex, symbol_id: i64) -> Result<Vec<CodeLink>> {
+    let (file_id, a, b): (i64, i64, i64) = conn.query_row(
+        "SELECT file_id, line_start, line_end FROM symbols WHERE id = ?1",
+        [symbol_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT name FROM refs WHERE file_id = ?1 AND line BETWEEN ?2 AND ?3")?;
+    let names: Vec<String> = stmt
+        .query_map(params![file_id, a, b], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut out = Vec::new();
+    for s in &index.syms {
+        if s.file_id != file_id && names.iter().any(|n| n == &s.name) {
+            out.push(CodeLink {
+                symbol_id: s.symbol_id,
+                path: s.path.clone(),
+                name: s.name.clone(),
+                line: s.line,
+                via: Via::Mention,
+            });
+        }
+    }
+    out.sort_by(|x, y| (&x.path, &x.name).cmp(&(&y.path, &y.name)));
+    Ok(out)
+}
+
+pub fn implemented_by(
+    conn: &Connection,
+    index: &CodeIndex,
+    step: &StepRow,
+    systems: &[(i64, String)],
+    limit: usize,
+) -> Result<(Vec<CodeLink>, usize)> {
+    let mut links = section_mentions(conn, index, step.symbol_id)?;
+    let mut by_system: Vec<(&CodeSym, String)> = Vec::new();
+    for (_, name) in systems {
+        let norm = normalise_ident(&norm_name(name));
+        if norm.chars().count() < MIN_SYSTEM_CHARS {
+            continue;
+        }
+        for s in &index.syms {
+            if (s.norm_name.contains(&norm) || s.norm_stem.contains(&norm))
+                && !links.iter().any(|l| l.symbol_id == s.symbol_id)
+                && !by_system.iter().any(|(x, _)| x.symbol_id == s.symbol_id)
+            {
+                by_system.push((s, name.clone()));
+            }
+        }
+    }
+    // Stable sort: ties (equal referrer counts) keep `index`'s deterministic (symbol-id) order,
+    // which for a normally-indexed repo tracks file discovery order — i.e. "then path" in
+    // practice, without needing an explicit path comparison that would outrank a directory like
+    // "config/" ahead of a same-named vendor client purely alphabetically.
+    by_system.sort_by_key(|(s, _)| std::cmp::Reverse(s.referrers));
+    links.extend(by_system.into_iter().map(|(s, sys)| CodeLink {
+        symbol_id: s.symbol_id,
+        path: s.path.clone(),
+        name: s.name.clone(),
+        line: s.line,
+        via: Via::System(sys),
+    }));
+    let more = links.len().saturating_sub(limit);
+    links.truncate(limit);
+    Ok((links, more))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +284,16 @@ mod tests {
     }
 
     fn seed_section(conn: &Connection, path: &str, name: &str, line: i64) -> i64 {
+        seed_section_range(conn, path, name, line, line)
+    }
+
+    fn seed_section_range(
+        conn: &Connection,
+        path: &str,
+        name: &str,
+        line: i64,
+        line_end: i64,
+    ) -> i64 {
         conn.execute(
             "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason) VALUES (?1, NULL, 'h', 0, 1, 0, NULL) ON CONFLICT(path) DO NOTHING",
             [path],
@@ -145,8 +303,8 @@ mod tests {
             .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
             .unwrap();
         conn.execute(
-            "INSERT INTO symbols(file_id, name, kind, line_start, line_end, signature) VALUES (?1, ?2, 'section', ?3, ?3, '')",
-            params![file_id, name, line],
+            "INSERT INTO symbols(file_id, name, kind, line_start, line_end, signature) VALUES (?1, ?2, 'section', ?3, ?4, '')",
+            params![file_id, name, line, line_end],
         )
         .unwrap();
         let symbol_id = conn.last_insert_rowid();
@@ -156,6 +314,41 @@ mod tests {
         )
         .unwrap();
         symbol_id
+    }
+
+    fn seed_code(conn: &Connection, path: &str, name: &str, kind: &str, line: i64) -> i64 {
+        conn.execute(
+            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason) VALUES (?1, 'typescript', 'h', 0, 1, 0, NULL) ON CONFLICT(path) DO NOTHING",
+            [path],
+        )
+        .unwrap();
+        let file_id: i64 = conn
+            .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(file_id, name, kind, line_start, line_end, signature) VALUES (?1, ?2, ?3, ?4, ?4, '')",
+            params![file_id, name, kind, line],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn seed_ref(conn: &Connection, from_path: &str, name: &str, line: i64) {
+        conn.execute(
+            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason) VALUES (?1, 'typescript', 'h', 0, 1, 0, NULL) ON CONFLICT(path) DO NOTHING",
+            [from_path],
+        )
+        .unwrap();
+        let file_id: i64 = conn
+            .query_row("SELECT id FROM files WHERE path = ?1", [from_path], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "INSERT INTO refs(file_id, name, line) VALUES (?1, ?2, ?3)",
+            params![file_id, name, line],
+        )
+        .unwrap();
     }
 
     fn seed_entity(conn: &Connection, symbol_id: i64, name: &str, ty: &str) -> i64 {
@@ -298,5 +491,204 @@ mod tests {
             .unwrap();
         assert_eq!((n, m), (0, 0));
         let _ = (p, s);
+    }
+
+    #[test]
+    fn a_sections_own_code_mentions_come_first_then_system_name_matches() {
+        let (_dir, store) = temp_store();
+        let conn = store.conn();
+        let sec = seed_section_range(conn, "docs/handbook.md", "Expense process", 10, 20);
+        let approve = seed_code(
+            conn,
+            "src/payroll/expense.ts",
+            "approveClaim",
+            "function",
+            3,
+        );
+        seed_ref(conn, "docs/handbook.md", "approveClaim", 12);
+        let client = seed_code(
+            conn,
+            "src/vendors/expensify-client.ts",
+            "postClaim",
+            "function",
+            1,
+        );
+        let cfg = seed_code(
+            conn,
+            "config/app.json",
+            "integrations.expensify.token",
+            "key",
+            4,
+        );
+        let _unrelated = seed_code(conn, "src/auth/okta.ts", "oktaLogin", "function", 1);
+        let p = seed_entity(conn, sec, "Expense process", "process");
+        let expensify = seed_entity(conn, sec, "Expensify", "system");
+        apply_steps(
+            conn,
+            sec,
+            "h",
+            &StepsAnswer {
+                process: "Expense process".into(),
+                steps: vec![ExtractedStep {
+                    text: "Submit".into(),
+                    systems: vec!["Expensify".into()],
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+        let step = &steps_for_process(conn, p).unwrap()[0];
+        let index = load_code_index(conn).unwrap();
+        let (links, more) = implemented_by(
+            conn,
+            &index,
+            step,
+            &[(expensify, "Expensify".into())],
+            LINK_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(
+            links.iter().map(|l| l.symbol_id).collect::<Vec<_>>(),
+            vec![approve, client, cfg]
+        );
+        assert!(matches!(links[0].via, Via::Mention));
+        assert!(matches!(&links[1].via, Via::System(s) if s == "Expensify"));
+        assert_eq!(more, 0);
+        let (two, rest) =
+            implemented_by(conn, &index, step, &[(expensify, "Expensify".into())], 2).unwrap();
+        assert_eq!((two.len(), rest), (2, 1));
+    }
+
+    #[test]
+    fn matching_ignores_case_hyphens_and_underscores_but_not_document_kinds() {
+        let (_dir, store) = temp_store();
+        let conn = store.conn();
+        let sec = seed_section(conn, "docs/handbook.md", "Incidents", 5);
+        let page_fn = seed_code(
+            conn,
+            "src/incidents/page.ts",
+            "pager_duty_page",
+            "function",
+            2,
+        );
+        let hook_fn = seed_code(conn, "src/lib/PagerDuty-hooks.ts", "hooks", "function", 1);
+        let runbook_sec = seed_section(conn, "docs/pagerduty.md", "PagerDuty runbook", 1);
+        let p = seed_entity(conn, sec, "Incidents", "process");
+        let pagerduty = seed_entity(conn, sec, "PagerDuty", "system");
+        apply_steps(
+            conn,
+            sec,
+            "h",
+            &StepsAnswer {
+                process: "Incidents".into(),
+                steps: vec![ExtractedStep {
+                    text: "Page on-call".into(),
+                    systems: vec!["PagerDuty".into()],
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+        let step = &steps_for_process(conn, p).unwrap()[0];
+        let index = load_code_index(conn).unwrap();
+        let (links, more) = implemented_by(
+            conn,
+            &index,
+            step,
+            &[(pagerduty, "PagerDuty".into())],
+            LINK_LIMIT,
+        )
+        .unwrap();
+        let ids: Vec<i64> = links.iter().map(|l| l.symbol_id).collect();
+        assert!(
+            ids.contains(&page_fn),
+            "norm_name match should link: {ids:?}"
+        );
+        assert!(
+            ids.contains(&hook_fn),
+            "file-stem match should link: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&runbook_sec),
+            "section kind must never appear as a code link: {ids:?}"
+        );
+        assert_eq!(links.len(), 2);
+        assert_eq!(more, 0);
+    }
+
+    #[test]
+    fn a_two_character_system_matches_no_code() {
+        let (_dir, store) = temp_store();
+        let conn = store.conn();
+        let sec = seed_section(conn, "docs/handbook.md", "IT process", 5);
+        let _item = seed_code(conn, "src/inventory/item.ts", "item", "function", 1);
+        let _commit = seed_code(conn, "src/git/commit.ts", "commit", "function", 1);
+        let p = seed_entity(conn, sec, "IT process", "process");
+        let it = seed_entity(conn, sec, "IT", "system");
+        apply_steps(
+            conn,
+            sec,
+            "h",
+            &StepsAnswer {
+                process: "IT process".into(),
+                steps: vec![ExtractedStep {
+                    text: "Open ticket".into(),
+                    systems: vec!["IT".into()],
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+        let step = &steps_for_process(conn, p).unwrap()[0];
+        let index = load_code_index(conn).unwrap();
+        let (links, more) =
+            implemented_by(conn, &index, step, &[(it, "IT".into())], LINK_LIMIT).unwrap();
+        assert!(
+            links.is_empty(),
+            "2-char system must match no code: {links:?}"
+        );
+        assert_eq!(more, 0);
+    }
+
+    #[test]
+    fn system_matches_rank_by_incoming_references_then_path() {
+        let (_dir, store) = temp_store();
+        let conn = store.conn();
+        let sec = seed_section(conn, "docs/handbook.md", "Billing process", 5);
+        let popular = seed_code(
+            conn,
+            "src/services/stripe_billing.ts",
+            "stripeBilling",
+            "function",
+            5,
+        );
+        let quiet = seed_code(conn, "src/legacy/stripe_old.ts", "stripeOld", "function", 5);
+        seed_ref(conn, "src/a.ts", "stripeBilling", 1);
+        seed_ref(conn, "src/b.ts", "stripeBilling", 2);
+        let p = seed_entity(conn, sec, "Billing process", "process");
+        let stripe = seed_entity(conn, sec, "Stripe", "system");
+        apply_steps(
+            conn,
+            sec,
+            "h",
+            &StepsAnswer {
+                process: "Billing process".into(),
+                steps: vec![ExtractedStep {
+                    text: "Charge card".into(),
+                    systems: vec!["Stripe".into()],
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+        let step = &steps_for_process(conn, p).unwrap()[0];
+        let index = load_code_index(conn).unwrap();
+        let (links, more) =
+            implemented_by(conn, &index, step, &[(stripe, "Stripe".into())], LINK_LIMIT).unwrap();
+        assert_eq!(
+            links.iter().map(|l| l.symbol_id).collect::<Vec<_>>(),
+            vec![popular, quiet]
+        );
+        assert_eq!(more, 0);
     }
 }
