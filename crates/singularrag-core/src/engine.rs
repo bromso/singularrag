@@ -558,6 +558,45 @@ impl Engine {
                 }
             }
         }
+        // The code a process's steps link to, after every cited section, once per symbol.
+        let sections_end = ranked.len();
+        for h in &hits {
+            let Some(p) = &h.steps else { continue };
+            for link in p.steps.iter().flat_map(|s| &s.code) {
+                let i = match ranked[sections_end..]
+                    .iter()
+                    .position(|s| s.symbol_id == link.symbol_id)
+                {
+                    Some(i) => sections_end + i,
+                    None => {
+                        let (kind, line_end, file_id): (String, u32, i64) =
+                            self.store.conn().query_row(
+                                "SELECT kind, line_end, file_id FROM symbols WHERE id = ?1",
+                                [link.symbol_id],
+                                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                            )?;
+                        ranked.push(ScoredSymbol {
+                            symbol_id: link.symbol_id,
+                            file_id,
+                            path: link.path.clone(),
+                            name: link.name.clone(),
+                            kind,
+                            line_start: link.line,
+                            line_end,
+                            signature: String::new(),
+                            score: 1.0 / (ranked.len() as f64 + 1.0),
+                            reasons: crate::rank::Reasons::default(),
+                        });
+                        ranked.len() - 1
+                    }
+                };
+                let reasons = &mut ranked[i].reasons;
+                if !reasons.implements.contains(&h.name) {
+                    reasons.implements.push(h.name.clone());
+                    reasons.seeds.push(format!("implements:{}", h.name));
+                }
+            }
+        }
         for s in &mut ranked {
             s.reasons.score = s.score;
         }
@@ -1830,5 +1869,96 @@ mod tests {
         .unwrap();
         let err = Engine::open(d.path(), "t").unwrap_err().to_string();
         assert!(err.contains("does not start with a root name"), "{err}");
+    }
+
+    #[test]
+    fn entities_serves_the_linked_code_after_the_cited_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let handbook = std::fs::read_to_string(dir.path().join("docs/handbook.md")).unwrap();
+        let handbook = handbook.replace(
+            "which pauses the clock until you reply.",
+            "which pauses the clock until you reply. The approval runs through `approveClaim`.",
+        );
+        assert!(handbook.contains("`approveClaim`"));
+        std::fs::write(dir.path().join("docs/handbook.md"), handbook).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/payroll")).unwrap();
+        std::fs::write(
+            dir.path().join("src/payroll/expense.ts"),
+            "export function approveClaim(id: string): boolean {\n  return id.length > 0;\n}\n",
+        )
+        .unwrap();
+        let mut e = Engine::open(dir.path(), "test-session").unwrap();
+        e.refresh(Duration::from_secs(60)).unwrap();
+        let map = serde_json::json!({"docs/handbook.md::Expense process": {
+            "entities": [
+                {"name": "Expense process", "type": "process", "description": "how you get money back"},
+                {"name": "Manager", "type": "role", "description": "approves claims"},
+                {"name": "Expensify", "type": "system", "description": "the expense tool"}
+            ],
+            "relations": [],
+            "steps": {"process": "Expense process", "steps": [
+                {"text": "Submit each expense in Expensify", "role": "employee", "systems": ["Expensify"]},
+                {"text": "Your manager approves or rejects the claim", "role": "Manager", "systems": []}
+            ]}
+        }});
+        knowledge::load_extraction_json(e.store(), None, &map.to_string()).unwrap();
+        let r = e
+            .entities(&EntitiesRequest {
+                query: "expense process".into(),
+                entities: vec![],
+                limit: 10,
+            })
+            .unwrap();
+        assert!(
+            r.text
+                .contains(" — code: src/payroll/expense.ts::approveClaim"),
+            "{}",
+            r.text
+        );
+        let mut stmt = e
+            .store()
+            .conn()
+            .prepare(
+                "SELECT ri.path, ri.name, COALESCE(s.kind, ''), ri.reasons_json FROM retrieval_items ri LEFT JOIN symbols s ON s.id = ri.symbol_id WHERE ri.retrieval_id = ?1 AND ri.served ORDER BY ri.rank",
+            )
+            .unwrap();
+        let items: Vec<(String, String, String, String)> = stmt
+            .query_map([r.retrieval_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let pos = |p: &str| {
+            items
+                .iter()
+                .position(|(path, name, _, _)| format!("{path}::{name}") == p)
+                .unwrap_or_else(|| panic!("{p} not served: {items:?}"))
+        };
+        let section = pos("docs/handbook.md::Expense process");
+        let code = pos("src/payroll/expense.ts::approveClaim");
+        assert!(section < code, "{items:?}");
+        assert!(
+            items[..code]
+                .iter()
+                .all(|(_, _, kind, _)| kind == "section"),
+            "code comes after every cited section: {items:?}"
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|(p, n, _, _)| format!("{p}::{n}") == "src/payroll/expense.ts::approveClaim")
+                .count(),
+            1,
+            "deduplicated by symbol"
+        );
+        let (_, _, kind, reasons) = &items[code];
+        assert_eq!(kind, "function");
+        assert!(
+            reasons.contains("implements:Expense process")
+                && reasons.contains(r#""implements":["Expense process"]"#),
+            "{reasons}"
+        );
     }
 }

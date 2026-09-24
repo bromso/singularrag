@@ -45,6 +45,9 @@ pub struct Reasons {
     pub entities: Vec<String>,
     /// Themes whose nearest relations this section states.
     pub themes: Vec<String>,
+    /// Processes whose steps this code symbol implements.
+    #[serde(default)]
+    pub implements: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,6 +541,7 @@ pub fn rank_symbols(
                         .get(&s.id)
                         .map(|t| t.iter().map(|(theme, _)| theme.clone()).collect())
                         .unwrap_or_default(),
+                    implements: Vec::new(),
                 },
             }
         })

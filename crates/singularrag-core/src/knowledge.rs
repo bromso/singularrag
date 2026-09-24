@@ -1418,9 +1418,11 @@ pub struct EntityHit {
     pub mentions: usize,
     pub relations: Vec<RelationHit>,
     pub sections: Vec<CitedSection>,
+    /// The ordered steps, for a `process` entity.
+    pub steps: Option<crate::journeys::ProcessSteps>,
 }
 
-fn cited_section(conn: &Connection, symbol_id: i64) -> Result<Option<CitedSection>> {
+pub fn cited_section(conn: &Connection, symbol_id: i64) -> Result<Option<CitedSection>> {
     Ok(conn
         .query_row(
             "SELECT f.path, s.name, s.line_start, s.line_end FROM symbols s
@@ -1466,6 +1468,8 @@ pub fn match_entities(
          WHERE r.src_entity = ?1 OR r.dst_entity = ?1 ORDER BY r.id",
     )?;
     let mut shown_relations: HashSet<i64> = HashSet::new();
+    // Built once, on the first process hit.
+    let mut code_index: Option<crate::journeys::CodeIndex> = None;
     let mut hits = Vec::new();
     for m in matched.entities.into_iter().take(limit) {
         let Some((name, r#type, description, mentions)) = entity
@@ -1519,6 +1523,15 @@ pub fn match_entities(
                 section,
             });
         }
+        let steps = if r#type == "process" {
+            if code_index.is_none() {
+                code_index = Some(crate::journeys::load_code_index(conn)?);
+            }
+            let index = code_index.as_ref().expect("built above");
+            Some(crate::journeys::process_steps(conn, index, m.id)?)
+        } else {
+            None
+        };
         hits.push(EntityHit {
             id: m.id,
             name,
@@ -1527,6 +1540,7 @@ pub fn match_entities(
             mentions: mentions.max(0) as usize,
             relations,
             sections,
+            steps,
         });
     }
     Ok((hits, matched.models_unavailable))
@@ -1538,10 +1552,12 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 /// The `entities` block: per entity a `name (type): description` line, its sections as
 /// `  ← path::heading (lines a-b)` and its relations as
-/// `  src → dst: description (path::heading, lines a-b)`, then a count footer.
+/// `  src → dst: description (path::heading, lines a-b)`, a process's steps between the
+/// two (see `journeys::render_steps`), then a count footer (steps only when there are any).
 pub fn render_entities(hits: &[EntityHit]) -> String {
     let mut out = String::new();
     let mut relations = 0;
+    let mut steps = 0;
     let mut sections: Vec<i64> = Vec::new();
     for h in hits {
         out.push_str(&format!("{} ({})", h.name, h.r#type));
@@ -1558,6 +1574,10 @@ pub fn render_entities(hits: &[EntityHit]) -> String {
                 sections.push(s.symbol_id);
             }
         }
+        if let Some(p) = &h.steps {
+            crate::journeys::render_steps(p, &mut out);
+            steps += p.steps.len();
+        }
         for r in &h.relations {
             let s = &r.section;
             out.push_str(&format!(
@@ -1567,10 +1587,16 @@ pub fn render_entities(hits: &[EntityHit]) -> String {
         }
         relations += h.relations.len();
     }
+    let steps = if steps > 0 {
+        format!(" · {}", plural(steps, "step", "steps"))
+    } else {
+        String::new()
+    };
     out.push_str(&format!(
-        "# {} · {} · {}\n",
+        "# {} · {}{} · {}\n",
         plural(hits.len(), "entity", "entities"),
         plural(relations, "relation", "relations"),
+        steps,
         plural(sections.len(), "section", "sections")
     ));
     out
@@ -2714,5 +2740,49 @@ mod tests {
             1,
             "the steps cache is keyed by hash and survives"
         );
+    }
+
+    #[test]
+    fn a_process_hit_renders_its_steps_and_the_footer_counts_them() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fixture::write_prose(dir.path());
+        let store = Store::open(&dir.path().join(".singularrag/index.db")).unwrap();
+        reindex(dir.path(), &store);
+        let fixture = include_str!("../fixtures/prose/extraction.json");
+        let mut map: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let mut expense = process_extraction();
+        expense["steps"] = expense_steps();
+        map["docs/handbook.md::Expense process"] = expense;
+        load_extraction_json(&store, None, &map.to_string()).unwrap();
+        let (hits, _) = match_entities(&store, None, "expense process", &[], 10).unwrap();
+        let hit = hits
+            .iter()
+            .find(|h| h.name == "Expense process")
+            .unwrap_or_else(|| panic!("{hits:?}"));
+        assert_eq!(hit.r#type, "process");
+        let steps = hit.steps.as_ref().expect("a process hit carries its steps");
+        assert_eq!(steps.steps.len(), 2);
+        assert_eq!(
+            (steps.steps[0].ordinal, steps.steps[1].ordinal),
+            (1, 2),
+            "renumbered from 1"
+        );
+        assert!(
+            hits.iter()
+                .filter(|h| h.r#type != "process")
+                .all(|h| h.steps.is_none()),
+            "{hits:?}"
+        );
+        let text = render_entities(&hits);
+        assert!(
+            text.contains("\n  1. Submit each expense in Expensify — role: employee — systems: Expensify — docs/handbook.md::Expense process\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n  2. Your manager approves or rejects the claim — role: Manager — docs/handbook.md::Expense process\n"),
+            "{text}"
+        );
+        let footer = text.lines().last().unwrap();
+        assert!(footer.contains(" · 2 steps · "), "{footer}");
     }
 }

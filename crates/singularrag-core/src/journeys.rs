@@ -137,13 +137,13 @@ pub fn normalise_ident(s: &str) -> String {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Via {
     Mention,
     System(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeLink {
     pub symbol_id: i64,
     pub path: String,
@@ -272,6 +272,80 @@ pub fn implemented_by(
     let more = links.len().saturating_sub(limit);
     links.truncate(limit);
     Ok((links, more))
+}
+
+/// One step of a process as the `entities` tool and the journeys read model show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepView {
+    /// 1-based, renumbered across all the process's sections in document order.
+    pub ordinal: usize,
+    pub text: String,
+    /// The role entity's name, else the extracted role text; empty when none.
+    pub role: String,
+    pub systems: Vec<String>,
+    pub section: crate::knowledge::CitedSection,
+    /// At most `LINK_LIMIT` "implemented by" links.
+    pub code: Vec<CodeLink>,
+    /// Links beyond `code` that were cut by `LINK_LIMIT`.
+    pub more_code: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessSteps {
+    pub steps: Vec<StepView>,
+}
+
+/// The process's steps in document order, each with its role, systems, documenting
+/// section and implementing code.
+pub fn process_steps(
+    conn: &Connection,
+    index: &CodeIndex,
+    process_id: i64,
+) -> Result<ProcessSteps> {
+    let mut steps = Vec::new();
+    for (i, row) in steps_for_process(conn, process_id)?.into_iter().enumerate() {
+        let systems = systems_for_step(conn, row.id)?;
+        let (code, more_code) = implemented_by(conn, index, &row, &systems, LINK_LIMIT)?;
+        let section = crate::knowledge::cited_section(conn, row.symbol_id)?.ok_or_else(|| {
+            crate::Error::Config(format!(
+                "step {} cites a missing section {}",
+                row.id, row.symbol_id
+            ))
+        })?;
+        steps.push(StepView {
+            ordinal: i + 1,
+            role: role_name(conn, &row)?,
+            text: row.text,
+            systems: systems.into_iter().map(|(_, n)| n).collect(),
+            section,
+            code,
+            more_code,
+        });
+    }
+    Ok(ProcessSteps { steps })
+}
+
+/// One line per step: `  N. text — role: r — systems: a, b — path::heading` then
+/// ` — code: path::name (+M)` for the first link, `M` counting the rest.
+pub fn render_steps(p: &ProcessSteps, out: &mut String) {
+    for s in &p.steps {
+        out.push_str(&format!("  {}. {}", s.ordinal, s.text));
+        if !s.role.is_empty() {
+            out.push_str(&format!(" — role: {}", s.role));
+        }
+        if !s.systems.is_empty() {
+            out.push_str(&format!(" — systems: {}", s.systems.join(", ")));
+        }
+        out.push_str(&format!(" — {}::{}", s.section.path, s.section.name));
+        if let Some(first) = s.code.first() {
+            let rest = s.code.len() - 1 + s.more_code;
+            out.push_str(&format!(" — code: {}::{}", first.path, first.name));
+            if rest > 0 {
+                out.push_str(&format!(" (+{rest})"));
+            }
+        }
+        out.push('\n');
+    }
 }
 
 #[cfg(test)]
@@ -710,5 +784,57 @@ mod tests {
             "equal referrers tie-break ascending by path: a.ts before b.ts"
         );
         assert_eq!(tie_more, 0);
+    }
+
+    fn sect(path: &str, name: &str, a: u32, b: u32) -> crate::knowledge::CitedSection {
+        crate::knowledge::CitedSection {
+            symbol_id: 1,
+            path: path.into(),
+            name: name.into(),
+            line_start: a,
+            line_end: b,
+        }
+    }
+
+    fn link(path: &str, name: &str, line: u32) -> CodeLink {
+        CodeLink {
+            symbol_id: line as i64,
+            path: path.into(),
+            name: name.into(),
+            line,
+            via: Via::Mention,
+        }
+    }
+
+    #[test]
+    fn render_steps_prints_role_systems_section_and_the_first_code_link_with_a_count() {
+        let p = ProcessSteps {
+            steps: vec![
+                StepView {
+                    ordinal: 1,
+                    text: "Submit in Expensify".into(),
+                    role: "employee".into(),
+                    systems: vec!["Expensify".into()],
+                    section: sect("docs/handbook.md", "Expense process", 10, 20),
+                    code: vec![],
+                    more_code: 0,
+                },
+                StepView {
+                    ordinal: 2,
+                    text: "Finance reviews".into(),
+                    role: "".into(),
+                    systems: vec![],
+                    section: sect("docs/handbook.md", "Expense process", 10, 20),
+                    code: vec![
+                        link("src/payroll/expense.ts", "approveClaim", 3),
+                        link("src/payroll/expense.ts", "review", 9),
+                    ],
+                    more_code: 1,
+                },
+            ],
+        };
+        let mut out = String::new();
+        render_steps(&p, &mut out);
+        assert_eq!(out, "  1. Submit in Expensify — role: employee — systems: Expensify — docs/handbook.md::Expense process\n  2. Finance reviews — docs/handbook.md::Expense process — code: src/payroll/expense.ts::approveClaim (+2)\n");
     }
 }
