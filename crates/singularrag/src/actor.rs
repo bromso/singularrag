@@ -291,11 +291,25 @@ impl Actor {
             .engine()
             .and_then(|e| e.knowledge_tick(&should_yield).map_err(|e| e.to_string()));
         self.knowledge_ticks += 1;
+        // A tick that moved the queue and left more behind, or stopped early because a job
+        // was waiting, re-ticks at once (the job goes first: the loop checks for one before
+        // every immediate tick); one that found nothing to do, hit an outage, or drained the
+        // queue waits out the cadence.
+        let mut at_once = false;
         match &out {
-            Ok(t) => self.set_knowledge_pending(t.pending > 0 || t.model_error.is_some()),
+            Ok(t) => {
+                self.set_knowledge_pending(t.pending > 0 || t.model_error.is_some());
+                let progressed = t.embedded + t.extracted + t.stepped > 0;
+                let yielded = self.queued.load(Ordering::SeqCst) > 0;
+                at_once = t.pending > 0 && t.model_error.is_none() && (progressed || yielded);
+            }
             Err(e) => tracing::warn!("knowledge tick failed: {e}"),
         }
-        self.next_tick_at = Instant::now() + self.knowledge_idle();
+        self.next_tick_at = if at_once {
+            Instant::now()
+        } else {
+            Instant::now() + self.knowledge_idle()
+        };
         out
     }
 
@@ -491,7 +505,18 @@ fn run(config: EngineConfig, rx: mpsc::Receiver<Job>, queued: Arc<AtomicUsize>) 
         if actor.knowledge_pending {
             let wait = actor.next_tick_at.saturating_duration_since(Instant::now());
             if wait.is_zero() {
-                let _ = actor.knowledge_tick_once();
+                // A job that arrived during the last tick goes before the next one.
+                match rx.try_recv() {
+                    Ok(job) => {
+                        if !actor.handle(job) {
+                            return;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => return,
+                    Err(mpsc::TryRecvError::Empty) => {
+                        let _ = actor.knowledge_tick_once();
+                    }
+                }
                 continue;
             }
             match rx.recv_timeout(wait) {
@@ -913,6 +938,42 @@ mod tests {
         );
         let t = tick.await.unwrap().unwrap();
         assert!(t.extracted <= 1 && t.pending > 0, "{t:?}");
+        handle.shutdown();
+        join.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_tick_that_made_progress_reticks_at_once_and_jobs_still_go_first() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_docs_mini(dir.path());
+        let mut many = String::from("# Many\n\n");
+        for i in 0..12 {
+            many.push_str(&format!(
+                "## Section {i}\n\nThe {i}th section has a sentence.\n\n"
+            ));
+        }
+        std::fs::write(dir.path().join("docs/many.md"), many).unwrap();
+        let f = singularrag_core::fake_ollama::FakeOllama::spawn(8);
+        // A two-second cadence and 15+ sections (5 per tick): the first tick waits one
+        // cadence, and only immediate re-ticks after it drain the rest within five seconds
+        // (waiting the cadence between every tick would take eight or more).
+        let (handle, join, _died) = spawn(EngineConfig {
+            knowledge_idle: Some(Duration::from_secs(2)),
+            ..models_config(dir.path(), f.url())
+        });
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let mut drained = false;
+        while std::time::Instant::now() < until {
+            let r = handle.map(MapRequest::default()).await.unwrap();
+            if !r.text.lines().next().unwrap_or("").contains("entities:") {
+                drained = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let stats = handle.stats().await.unwrap();
+        assert!(drained, "the queue did not drain within 5 s: {stats:?}");
+        assert!(stats.knowledge_ticks >= 3, "{stats:?}");
         handle.shutdown();
         join.join().unwrap();
     }

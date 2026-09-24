@@ -55,16 +55,76 @@ pub fn delete_steps_for_symbols(conn: &Connection, symbol_ids_sql: &str, param: 
 /// Replaces this section's steps. `Ok(None)` when no `process` entity of this section
 /// matches `a.process` by `norm_name`; otherwise the prior steps for this section are
 /// dropped and replaced, so applying twice is harmless.
+/// What `apply_steps` wrote: the step count, the process the steps attach to, and whether
+/// that process entity was created here (it then has no vector yet; the caller embeds it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedSteps {
+    pub count: usize,
+    pub process_id: i64,
+    pub created_process: bool,
+}
+
+/// The process a steps answer names, for this section: a `process` entity of the section
+/// with that `norm_name`; else an entity of that name anywhere in the index, retyped
+/// `process` and mentioned by this section; else a new `process` entity mentioned by this
+/// section. The steps prompt read the section as a process, so its name wins over what
+/// the entity prompt typed (a 7B model names "First day" where the steps say "Onboarding").
+fn resolve_process(
+    conn: &Connection,
+    symbol_id: i64,
+    hash: &str,
+    name: &str,
+    norm: &str,
+) -> Result<(i64, bool)> {
+    if let Some(id) = section_entity(conn, symbol_id, "process", norm)? {
+        return Ok((id, false));
+    }
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM entities WHERE norm_name = ?1",
+            [norm],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let (id, created) = match existing {
+        Some(id) => {
+            conn.execute(
+                "UPDATE entities SET type = 'process' WHERE id = ?1 AND type <> 'process'",
+                [id],
+            )?;
+            (id, false)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO entities(name, norm_name, type, description, mentions) VALUES (?1, ?2, 'process', '', 0)",
+                params![name, norm],
+            )?;
+            (conn.last_insert_rowid(), true)
+        }
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO entity_mentions(entity_id, symbol_id, section_hash) VALUES (?1, ?2, ?3)",
+        params![id, symbol_id, hash],
+    )?;
+    conn.execute(
+        "UPDATE entities SET mentions = (SELECT COUNT(*) FROM entity_mentions m WHERE m.entity_id = ?1) WHERE id = ?1",
+        [id],
+    )?;
+    Ok((id, created))
+}
+
 pub fn apply_steps(
     conn: &Connection,
     symbol_id: i64,
     hash: &str,
     a: &StepsAnswer,
-) -> Result<Option<usize>> {
-    let Some(process_id) = section_entity(conn, symbol_id, "process", &norm_name(&a.process))?
-    else {
+) -> Result<Option<AppliedSteps>> {
+    let norm = norm_name(&a.process);
+    if norm.is_empty() {
         return Ok(None);
-    };
+    }
+    let (process_id, created_process) =
+        resolve_process(conn, symbol_id, hash, a.process.trim(), &norm)?;
     delete_steps_for_symbol(conn, symbol_id)?;
     let mut n = 0;
     for (i, s) in a.steps.iter().enumerate() {
@@ -88,7 +148,11 @@ pub fn apply_steps(
         }
         n += 1;
     }
-    Ok(Some(n))
+    Ok(Some(AppliedSteps {
+        count: n,
+        process_id,
+        created_process,
+    }))
 }
 
 pub fn steps_for_process(conn: &Connection, process_id: i64) -> Result<Vec<StepRow>> {
@@ -527,7 +591,10 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(apply_steps(conn, sec, "h", &a).unwrap(), Some(2));
+        assert_eq!(
+            apply_steps(conn, sec, "h", &a).unwrap().map(|x| x.count),
+            Some(2)
+        );
         let rows = steps_for_process(conn, process).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(
@@ -542,25 +609,79 @@ mod tests {
         );
         assert_eq!(role_name(conn, &rows[1]).unwrap(), "Manager");
         // re-applying replaces, never duplicates
-        assert_eq!(apply_steps(conn, sec, "h", &a).unwrap(), Some(2));
+        assert_eq!(
+            apply_steps(conn, sec, "h", &a).unwrap().map(|x| x.count),
+            Some(2)
+        );
         assert_eq!(steps_for_process(conn, process).unwrap().len(), 2);
     }
 
     #[test]
-    fn an_unmatched_process_name_returns_none_and_writes_nothing() {
+    fn an_unmatched_process_name_creates_the_process_the_steps_answer_names() {
         let (_dir, store) = temp_store();
         let conn = store.conn();
         let sec = seed_section(conn, "docs/handbook.md", "Expense process", 10);
-        let process = seed_entity(conn, sec, "Expense process", "process");
+        let mistyped = seed_entity(conn, sec, "First day", "process");
         let a = StepsAnswer {
-            process: "Expenses".into(),
+            process: "Expense process".into(),
             steps: vec![ExtractedStep {
                 text: "x".into(),
                 ..Default::default()
             }],
         };
-        assert_eq!(apply_steps(conn, sec, "h", &a).unwrap(), None);
-        assert!(steps_for_process(conn, process).unwrap().is_empty());
+        // No process entity of the section matches: the answer's name becomes a process
+        // entity mentioned by this section, and the steps attach to it.
+        let applied = apply_steps(conn, sec, "h", &a).unwrap().unwrap();
+        assert!(applied.created_process && applied.count == 1);
+        let (name, ty, mentions): (String, String, i64) = conn
+            .query_row(
+                "SELECT name, type, mentions FROM entities WHERE id = ?1",
+                [applied.process_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (name.as_str(), ty.as_str(), mentions),
+            ("Expense process", "process", 1)
+        );
+        assert_eq!(
+            steps_for_process(conn, applied.process_id).unwrap().len(),
+            1
+        );
+        assert!(
+            steps_for_process(conn, mistyped).unwrap().is_empty(),
+            "the mistyped one keeps no steps"
+        );
+        // An entity of that name stored elsewhere under another type is reused and becomes a process.
+        let other = seed_section(conn, "docs/other.md", "Elsewhere", 1);
+        let existing = seed_entity(conn, other, "Travel process", "concept");
+        let b = StepsAnswer {
+            process: "travel process".into(),
+            steps: vec![ExtractedStep {
+                text: "y".into(),
+                ..Default::default()
+            }],
+        };
+        let applied = apply_steps(conn, sec, "h", &b).unwrap().unwrap();
+        assert_eq!(
+            (applied.process_id, applied.created_process),
+            (existing, false)
+        );
+        let ty: String = conn
+            .query_row("SELECT type FROM entities WHERE id = ?1", [existing], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(ty, "process");
+        // Only an empty process name is discarded.
+        let c = StepsAnswer {
+            process: "  ".into(),
+            steps: vec![ExtractedStep {
+                text: "z".into(),
+                ..Default::default()
+            }],
+        };
+        assert!(apply_steps(conn, sec, "h", &c).unwrap().is_none());
     }
 
     #[test]

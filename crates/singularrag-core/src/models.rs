@@ -28,12 +28,17 @@ pub const ENTITY_TYPES: [&str; 9] = [
 pub const MAX_STEPS: usize = 30;
 pub const STEP_TEXT_MAX: usize = 300;
 pub const ROLE_MAX: usize = 80;
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-request timeout at query time (one query embedding).
+pub const TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-request timeout inside the background tick: a 6,000-character part takes a 7B
+/// model on a laptop about 35 s, so the query-time 30 s would fail every real section.
+pub const TICK_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub const EXTRACT_PROMPT: &str = "You extract a knowledge graph from one section of a document.\n\
 Return ONLY a JSON object of the shape {\"entities\": [{\"name\": string, \"type\": string, \"description\": string}], \"relations\": [{\"source\": string, \"target\": string, \"description\": string}]}.\n\
 Types are exactly one of: person, organisation, system, concept, event, place, document, process (a named sequence of steps people follow), role (a job or position that acts in a process).\n\
 Descriptions are one short sentence from the text. Relations connect two entity names from your list.\n\
+If the section describes a process, include one process entity named as the section names it (usually its heading), and its roles.\n\
 Document: {path}\nSection: {heading}\n\nText:\n{text}\n";
 const STRICT_SUFFIX: &str = "\nYour previous answer was not valid JSON. Answer with the JSON object only, no prose, no code fence.";
 
@@ -129,6 +134,7 @@ pub struct Models {
     /// A timed-out request is sent once more. Off for the background tick, which runs on
     /// the actor thread: a retry would hold a waiting tool call for a second timeout.
     retry_on_timeout: bool,
+    timeout: Duration,
 }
 
 fn unavailable(e: impl std::fmt::Display) -> Error {
@@ -284,16 +290,26 @@ impl Models {
             cfg,
             http,
             retry_on_timeout: true,
+            timeout,
         }
     }
 
-    /// The same client without the retry on a timeout, for the background tick.
+    /// The client for the background tick: no retry on a timeout, and `TICK_TIMEOUT` per
+    /// request unless a shorter timeout was configured explicitly (tests).
     pub fn tick_client(&self) -> Models {
-        Models {
-            cfg: self.cfg.clone(),
-            http: self.http.clone(),
-            retry_on_timeout: false,
-        }
+        let timeout = if self.timeout < TICK_TIMEOUT && self.timeout != TIMEOUT {
+            self.timeout
+        } else {
+            TICK_TIMEOUT
+        };
+        let mut m = Models::with_timeout(self.cfg.clone(), timeout);
+        m.retry_on_timeout = false;
+        m
+    }
+
+    /// The per-request timeout this client uses.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
     pub fn config(&self) -> &ModelsConfig {
         &self.cfg
@@ -332,13 +348,24 @@ impl Models {
                 Err(e) if e.is_connect() || (e.is_timeout() && self.retry_on_timeout) => {
                     last = Some(e)
                 }
+                Err(e) if e.is_timeout() => return Err(self.timed_out(path)),
                 Err(e) => return Err(unavailable(format!("{path}: {e}"))),
             }
         }
-        Err(unavailable(format!(
-            "{path}: {}",
-            last.map(|e| e.to_string()).unwrap_or_default()
-        )))
+        match last {
+            Some(e) if e.is_timeout() => Err(self.timed_out(path)),
+            Some(e) => Err(unavailable(format!("{path}: {e}"))),
+            None => Err(unavailable(format!("{path}: no attempt"))),
+        }
+    }
+
+    /// The message a tick tells apart from an outage: the model answered nothing within
+    /// the timeout, which costs the section an attempt instead of stopping the tick.
+    fn timed_out(&self, path: &str) -> Error {
+        unavailable(format!(
+            "timed out after {}s: {path}",
+            self.timeout.as_secs_f64()
+        ))
     }
 
     pub fn tags(&self) -> Result<Vec<String>> {
@@ -647,11 +674,47 @@ mod tests {
     }
 
     #[test]
+    fn a_tick_client_has_the_tick_timeout_unless_a_shorter_one_was_configured() {
+        let cfg = ModelsConfig::default();
+        assert_eq!(Models::new(cfg.clone()).timeout(), TIMEOUT);
+        assert_eq!(
+            Models::new(cfg.clone()).tick_client().timeout(),
+            TICK_TIMEOUT
+        );
+        let short = Models::with_timeout(cfg, Duration::from_millis(200));
+        assert_eq!(short.tick_client().timeout(), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn a_timeout_is_reported_as_timed_out() {
+        let fake = FakeOllama::spawn(8);
+        fake.set_generate_delay(Duration::from_millis(500));
+        let m = Models::with_timeout(
+            ModelsConfig {
+                ollama: fake.url(),
+                ..ModelsConfig::default()
+            },
+            Duration::from_millis(200),
+        )
+        .tick_client();
+        let input = SectionInput {
+            path: "docs/a.md",
+            heading: "A",
+            text: "Some text.",
+        };
+        match m.extract(&input) {
+            Err(Error::ModelUnavailable(msg)) => assert!(msg.starts_with("timed out"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn the_type_list_has_process_and_role_and_the_prompt_defines_them() {
         assert!(ENTITY_TYPES.contains(&"process") && ENTITY_TYPES.contains(&"role"));
         assert!(EXTRACT_PROMPT.contains("process (a named sequence of steps people follow)"));
         assert!(EXTRACT_PROMPT.contains("role (a job or position that acts in a process)"));
         assert!(STEPS_PROMPT.starts_with(STEPS_PROMPT_FIRST_LINE));
+        assert!(EXTRACT_PROMPT.contains("If the section describes a process, include one process entity named as the section names it"));
     }
 
     #[test]

@@ -371,6 +371,52 @@ fn vector_texts(conn: &Connection, e: &Extraction) -> Result<Vec<String>> {
     Ok(texts)
 }
 
+/// A model failure that belongs to this request, not to the server: a malformed answer, a
+/// timeout, or a 5xx the server returned for this prompt (Ollama's "prediction aborted"
+/// when a generation loops). Each costs the section an attempt; anything else (connection
+/// refused, a missing model) is an outage that stops the tick.
+fn is_per_request_failure(m: &str) -> bool {
+    m.contains("not JSON") || m.starts_with("timed out") || m.contains(": HTTP 5")
+}
+
+/// The text a section sends to a model: runs of spaces and tabs become one space, runs of
+/// blank lines one blank line. A section's stored text keeps its child sections and code
+/// fences as blank runs (so offsets survive), which made an H1 a 95k-character "section"
+/// of whitespace split into sixteen model calls. Hashes and search use the stored text.
+pub fn squeeze_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(8_192));
+    let mut blank_lines = 0usize;
+    for line in s.lines() {
+        let mut compact = String::new();
+        let mut in_space = false;
+        for c in line.chars() {
+            if c == ' ' || c == '\t' {
+                if !in_space {
+                    compact.push(' ');
+                }
+                in_space = true;
+            } else {
+                compact.push(c);
+                in_space = false;
+            }
+        }
+        let compact = compact.trim();
+        if compact.is_empty() {
+            blank_lines += 1;
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+            if blank_lines > 0 {
+                out.push('\n');
+            }
+        }
+        blank_lines = 0;
+        out.push_str(compact);
+    }
+    out
+}
+
 fn section_body(conn: &Connection, symbol_id: i64) -> Result<Option<String>> {
     Ok(conn
         .query_row(
@@ -430,8 +476,9 @@ fn clear_meta(store: &Store, key: &str) -> Result<()> {
 }
 
 /// A claim older than this is abandoned (its process died mid-tick) and may be taken over.
-/// A tick's budget plus one model timeout per step stays well under it.
-pub const CLAIM_STALE_MS: i64 = 120_000;
+/// One section can hold its claim for two tick timeouts (the entity prompt and the steps
+/// prompt, `TICK_TIMEOUT` each) plus the embeds, so this is well above four minutes.
+pub const CLAIM_STALE_MS: i64 = 600_000;
 
 /// Queue rows the embed step works: no section vector yet.
 const CLAIM_EMBED: &str =
@@ -608,7 +655,7 @@ fn embed_sections(
     } else {
         let texts: Vec<String> = misses
             .iter()
-            .map(|&i| items[i].body.clone())
+            .map(|&i| squeeze_ws(&items[i].body))
             .chain(extra.iter().cloned())
             .collect();
         let mut answered = models.embed(&texts)?;
@@ -776,7 +823,7 @@ fn extract_step(
             None => match models.extract(&SectionInput {
                 path: &path,
                 heading: &heading,
-                text: &body,
+                text: &squeeze_ws(&body),
             }) {
                 Ok(x) => {
                     // A memo keyed by hash, not section state: kept even when a later
@@ -787,7 +834,7 @@ fn extract_step(
                     )?;
                     x
                 }
-                Err(Error::ModelUnavailable(m)) if m.contains("not JSON") => {
+                Err(Error::ModelUnavailable(m)) if is_per_request_failure(&m) => {
                     conn.execute(
                         "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1 AND hash = ?3",
                         params![symbol_id, m, hash],
@@ -833,7 +880,7 @@ fn extract_step(
         let input = SectionInput {
             path: &path,
             heading: &heading,
-            text: &body,
+            text: &squeeze_ws(&body),
         };
         if let StepOutcome::Outage = steps_for_row(store, models, symbol_id, &hash, &input, t)? {
             return Ok(());
@@ -896,7 +943,7 @@ fn steps_stage(
         let input = SectionInput {
             path: &path,
             heading: &heading,
-            text: &body,
+            text: &squeeze_ws(&body),
         };
         if let StepOutcome::Outage = steps_for_row(store, models, symbol_id, &hash, &input, t)? {
             return Ok(false);
@@ -935,7 +982,7 @@ fn steps_for_row(
                 )?;
                 a
             }
-            Err(Error::ModelUnavailable(m)) if m.contains("not JSON") => {
+            Err(Error::ModelUnavailable(m)) if is_per_request_failure(&m) => {
                 conn.execute(
                     "UPDATE extract_queue SET attempts = attempts + 1, last_error = ?2 WHERE symbol_id = ?1 AND hash = ?3",
                     params![symbol_id, m, hash],
@@ -951,14 +998,11 @@ fn steps_for_row(
         },
     };
     let tx = conn.unchecked_transaction()?;
-    let outcome = match crate::journeys::apply_steps(&tx, symbol_id, hash, &answer)? {
+    let applied = crate::journeys::apply_steps(&tx, symbol_id, hash, &answer)?;
+    let outcome = match applied {
         Some(_) => StepOutcome::Applied,
         None => {
-            tracing::warn!(
-                symbol_id,
-                process = %answer.process,
-                "steps answer names no process entity of the section; discarded"
-            );
+            tracing::warn!(symbol_id, "steps answer names no process; discarded");
             StepOutcome::Discarded
         }
     };
@@ -967,10 +1011,44 @@ fn steps_for_row(
         params![symbol_id, hash],
     )?;
     tx.commit()?;
-    if let StepOutcome::Applied = outcome {
+    if let Some(a) = applied {
         t.stepped += 1;
+        if a.created_process {
+            embed_new_process(store, models, a.process_id)?;
+        }
     }
     Ok(outcome)
+}
+
+/// A process entity `apply_steps` created has no vector yet: one embed call, outside any
+/// transaction. A model failure leaves it matchable by name only (a warn, not an error).
+fn embed_new_process(store: &Store, models: &Models, id: i64) -> Result<()> {
+    if vec::dim(store)?.is_none() {
+        return Ok(());
+    }
+    let text: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT name, description FROM entities WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(entity_text(
+                    &r.get::<_, String>(0)?,
+                    &r.get::<_, String>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(text) = text else { return Ok(()) };
+    match models.embed(&[text]) {
+        Ok(v) if !v.is_empty() => vec::insert(store, "entity_vec", id, &v[0]),
+        Ok(_) => Ok(()),
+        Err(Error::ModelUnavailable(m)) => {
+            tracing::warn!(id, error = %m, "process entity created by a steps answer has no vector");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn steps_json(a: &StepsAnswer) -> Result<String> {
@@ -1111,7 +1189,13 @@ pub fn load_extraction_json(store: &Store, models: Option<&Models>, json: &str) 
                 "INSERT OR REPLACE INTO steps_cache(hash, json) VALUES (?1, ?2)",
                 params![hash, steps_json(&steps)?],
             )?;
-            if crate::journeys::apply_steps(conn, symbol_id, &hash, &steps)?.is_none() {
+            let applied = crate::journeys::apply_steps(conn, symbol_id, &hash, &steps)?;
+            if let (Some(a), Some(m)) = (applied, models) {
+                if a.created_process {
+                    embed_new_process(store, m, a.process_id)?;
+                }
+            }
+            if applied.is_none() {
                 tracing::warn!(
                     key = %key,
                     process = %steps.process,
@@ -1185,7 +1269,8 @@ struct MatchedEntity {
     via_step: bool,
 }
 
-/// Processes one `matching_entities` call adds through the steps of its matches.
+/// Processes one `match_entities` call adds through the steps of its matches, on top of
+/// `limit` (which caps the direct matches only).
 pub const VIA_STEP_MAX: usize = 5;
 
 /// The entities a query and a list of names match, plus the query's vector.
@@ -1549,6 +1634,9 @@ pub fn match_entities(
     limit: usize,
 ) -> Result<(Vec<EntityHit>, bool)> {
     let mut matched = matching_entities(store, models, Some(query), extra)?;
+    // `limit` caps the direct matches; the hops belong to those matches and come on top
+    // (at most VIA_STEP_MAX), so a hop is never truncated away by name and KNN matches.
+    matched.entities.truncate(limit);
     let conn = store.conn();
     add_step_hops(conn, &mut matched)?;
     let mut entity =
@@ -1566,7 +1654,7 @@ pub fn match_entities(
     // Built once, on the first process hit.
     let mut code_index: Option<crate::journeys::CodeIndex> = None;
     let mut hits = Vec::new();
-    for m in matched.entities.into_iter().take(limit) {
+    for m in matched.entities.into_iter() {
         let Some((name, r#type, description, mentions)) = entity
             .query_row([m.id], |r| {
                 Ok((
@@ -1708,7 +1796,7 @@ mod tests {
     use crate::config::MapConfig;
     use crate::fake_ollama::FakeOllama;
     use crate::index::Indexer;
-    use crate::models::{Models, ModelsConfig};
+    use crate::models::{Models, ModelsConfig, MAX_PART_CHARS};
     use crate::store::Store;
     use crate::workspace::Workspace;
     use std::time::Duration;
@@ -2075,16 +2163,28 @@ mod tests {
         );
         f.set_generate_delay(Duration::from_millis(800));
         let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
-        assert!(t.model_error.is_some(), "a timeout is an outage: {t:?}");
+        assert!(
+            t.model_error.is_none(),
+            "a timeout is an attempt, not an outage: {t:?}"
+        );
+        assert!(t.failed >= 1, "{t:?}");
+        assert!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue WHERE attempts = 1 AND last_error LIKE 'timed out%'") >= 1
+        );
         // The fake answers one request at a time: a retry would be read once the first
         // delayed answer is written, so wait past that before counting.
-        std::thread::sleep(Duration::from_millis(2000));
+        std::thread::sleep(Duration::from_millis(800 * t.failed as u64 + 700));
         let generate = f
             .calls()
             .iter()
             .filter(|p| p.as_str() == "/api/generate")
             .count();
-        assert_eq!(generate, 1, "no retry on a timeout inside a tick");
+        // One attempt per section the tick reached (a timeout is an attempt, not an outage).
+        assert_eq!(
+            generate, t.failed,
+            "no retry on a timeout inside a tick: {t:?}"
+        );
+        assert!(generate >= 1);
     }
 
     fn claimed(store: &Store) -> i64 {
@@ -2460,6 +2560,26 @@ mod tests {
     }
 
     #[test]
+    fn a_step_hop_survives_the_limit_because_hops_do_not_count_against_it() {
+        let (_d, store) = loaded_prose();
+        // limit 1 keeps only the direct match, and its hop still comes along.
+        let (hits, _) = match_entities(&store, None, "Finance", &[], 1).unwrap();
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, ["Finance", "Expense process"], "{names:?}");
+        assert!(hits[1].via_step);
+        // Explicit names fill the limit ahead of the query match; the hop is still there.
+        let extra = vec!["Manager".to_string()];
+        let (hits, _) = match_entities(&store, None, "Finance", &extra, 2).unwrap();
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Manager", "Finance", "Expense process"],
+            "{names:?}"
+        );
+        assert!(hits.iter().filter(|h| h.via_step).count() == 1);
+    }
+
+    #[test]
     fn the_prose_fixture_loads_its_extraction_without_a_model() {
         let dir = tempfile::tempdir().unwrap();
         crate::fixture::write_prose(dir.path());
@@ -2658,6 +2778,95 @@ mod tests {
         let m = models(&fake);
         (fake, store, m, dir)
     }
+    #[test]
+    fn squeeze_ws_collapses_blank_runs_and_keeps_paragraphs() {
+        let padded = format!(
+            "intro line\n\n{}\n\n\n\n  second   para\t here \n{}",
+            " ".repeat(20_000),
+            "\n".repeat(50)
+        );
+        let sq = squeeze_ws(&padded);
+        assert_eq!(sq, "intro line\n\nsecond para here");
+        assert_eq!(squeeze_ws("   "), "");
+    }
+
+    #[test]
+    fn a_section_padded_with_its_childrens_blanks_is_sent_as_one_short_part() {
+        // An H2 with a long H3 child: the H2's stored text keeps the child's span as blanks,
+        // so its raw content is over the part size while its own words are a few dozen.
+        // 10k chars of child text over 130 lines (one long line reads as minified and is skipped).
+        let child = format!("{}\n", "word ".repeat(15)).repeat(130);
+        let body = format!("Own intro sentence.\n\n### Child\n\n{child}");
+        let (fake, store, models, _d) = tick_fixture(&[("Parent", &body)]);
+        let raw: i64 = store.conn().query_row(
+            "SELECT length(t.content) FROM sections_fts t JOIN symbols s ON s.id = t.rowid WHERE s.name = 'Parent'",
+            [], |r| r.get(0)).unwrap();
+        assert!(
+            raw > MAX_PART_CHARS as i64,
+            "raw content {raw} must exceed one part"
+        );
+        let t = tick(&store, &models, Duration::from_secs(60), &|| false).unwrap();
+        assert!(t.model_error.is_none(), "{t:?}");
+        let lens = fake.generate_prompt_lens();
+        // Two sections (Parent, Child): the child's 10k body is two parts, the parent's own
+        // text is one short prompt. Three generate calls, none of them blank-padded.
+        assert_eq!(lens.len(), 3, "{lens:?}");
+        assert!(
+            lens.iter().any(|&l| l < 1_000),
+            "the parent's prompt is short: {lens:?}"
+        );
+        assert!(lens.iter().all(|&l| l < MAX_PART_CHARS + 1_000), "{lens:?}");
+    }
+
+    #[test]
+    fn a_timed_out_section_costs_an_attempt_and_the_tick_moves_on() {
+        let (fake, store, _m, _d) = tick_fixture(&[("Slow", "one"), ("Also slow", "two")]);
+        let m = Models::with_timeout(
+            ModelsConfig {
+                ollama: fake.url(),
+                ..Default::default()
+            },
+            Duration::from_millis(200),
+        );
+        fake.set_generate_delay(Duration::from_millis(500));
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
+        assert!(t.model_error.is_none(), "{t:?}");
+        assert_eq!((t.extracted, t.failed, t.pending), (0, 2, 2), "{t:?}");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM extract_queue WHERE attempts = 1"
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM extract_queue WHERE claimed_at_ms IS NOT NULL"
+            ),
+            0
+        );
+        std::thread::sleep(Duration::from_millis(1500));
+        fake.set_generate_delay(Duration::from_millis(0));
+        let t = tick(&store, &m, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.pending), (2, 0), "{t:?}");
+    }
+
+    #[test]
+    fn a_model_side_500_costs_an_attempt_not_an_outage() {
+        let (fake, store, models, _d) = tick_fixture(&[("Loops", "one"), ("Fine", "two")]);
+        fake.error_next_generate(1);
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert!(t.model_error.is_none(), "{t:?}");
+        assert_eq!((t.extracted, t.failed, t.pending), (1, 1, 1), "{t:?}");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue WHERE attempts = 1 AND last_error LIKE '%HTTP 500%'"),
+            1
+        );
+        let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
+        assert_eq!((t.extracted, t.pending), (1, 0), "{t:?}");
+    }
+
     fn process_extraction() -> serde_json::Value {
         serde_json::json!({"entities": [
             {"name": "Expense process", "type": "process", "description": "how you get money back"},
@@ -2821,7 +3030,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unmatched_process_name_discards_the_answer_and_finishes_the_section() {
+    fn an_unmatched_process_name_creates_the_process_with_a_vector_and_applies_the_steps() {
         let (fake, store, models, _d) =
             tick_fixture(&[("Expense process", "Submit each expense in Expensify.")]);
         fake.set_extraction("Expense", process_extraction());
@@ -2831,11 +3040,35 @@ mod tests {
         let t = tick(&store, &models, Duration::from_secs(20), &|| false).unwrap();
         assert_eq!(
             (t.extracted, t.stepped, t.failed, t.pending),
-            (1, 0, 0, 0),
+            (1, 1, 0, 0),
             "{t:?}"
         );
         assert!(t.model_error.is_none());
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps"), 0);
+        let (id, ty, mentions): (i64, String, i64) = store
+            .conn()
+            .query_row(
+                "SELECT id, type, mentions FROM entities WHERE norm_name = 'expenses'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((ty.as_str(), mentions), ("process", 1));
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM steps WHERE process_id = {id}")
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM entity_vec WHERE rowid = {id}")
+            ),
+            1
+        );
+        // The section's own mistyped process keeps no steps but stays an entity.
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM steps st JOIN entities e ON e.id = st.process_id WHERE e.norm_name = 'expense process'"), 0);
         assert_eq!(count(&store, "SELECT COUNT(*) FROM extract_queue"), 0);
         assert_eq!(steps_calls(&fake), 1);
     }
