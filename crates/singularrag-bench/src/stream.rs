@@ -15,10 +15,26 @@ pub struct Tokens {
     pub cache_read: u64,
 }
 
+/// Price weights relative to one fresh input token, Anthropic's published ratios: a cache
+/// read costs a tenth, a cache write a quarter more, an output token five times.
+pub const PRICE_INPUT: f64 = 1.0;
+pub const PRICE_CACHE_WRITE: f64 = 1.25;
+pub const PRICE_CACHE_READ: f64 = 0.1;
+pub const PRICE_OUTPUT: f64 = 5.0;
+
 impl Tokens {
-    /// The comparison metric: input + output + cache creation + cache read.
+    /// The raw count: input + output + cache creation + cache read.
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_creation + self.cache_read
+    }
+
+    /// The efficiency metric (amended 2026-09-27): tokens weighted by price, so a map the
+    /// agent re-reads from the prompt cache every turn costs what it costs and no more.
+    pub fn cost(&self) -> f64 {
+        self.input as f64 * PRICE_INPUT
+            + self.cache_creation as f64 * PRICE_CACHE_WRITE
+            + self.cache_read as f64 * PRICE_CACHE_READ
+            + self.output as f64 * PRICE_OUTPUT
     }
 }
 
@@ -182,6 +198,18 @@ pub fn parse_stream(text: &str) -> Parsed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cost_weights_cache_reads_at_a_tenth_and_output_at_five() {
+        let t = Tokens {
+            input: 1000,
+            output: 100,
+            cache_creation: 200,
+            cache_read: 5000,
+        };
+        assert_eq!(t.total(), 6300);
+        assert_eq!(t.cost(), 1000.0 + 250.0 + 500.0 + 500.0);
+    }
 
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(

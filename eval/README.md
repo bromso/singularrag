@@ -516,3 +516,17 @@ The −25% bar measured whether the agent stops reading files, and no map tool d
 | round 2, singularrag | +0.08 [+0.02, +0.14] | −2.1 [−3.3, −0.9] | +6.4% | **earns its place** |
 
 Run 1 fails all three tests and round 2 passes all three, which is the check that the rule was not fitted to the last run. Both summaries under `runs/` carry the re-scored verdict with the original one in parentheses.
+
+### Price-weighted cost, 2026-09-27
+
+Run 3's baseline on Opus 5.5 was 25k raw tokens and 3.4 calls, and singularrag's +22k raw tokens were mostly prompt-cache re-reads, which the API bills at a tenth of a fresh input token. The efficiency test's token measurement is now **cost**: `input + 1.25 × cache creation + 0.1 × cache read + 5 × output` (Anthropic's published ratios). Raw tokens stay in the table and under the verdict. Re-scored from the stored records (`singularrag-bench score <run-dir>`; the three summaries under `runs/` are rewritten):
+
+| run | recall | tool calls | cost | raw tokens | verdict |
+|---|---|---|---|---|---|
+| run 1, singularrag | +0.07 [−0.01, +0.14] | −0.9 [−1.7, +0.0] | +13.8% | +19.6% | does not earn its place |
+| round 2, singularrag | +0.08 [+0.02, +0.14] | −2.1 [−3.3, −0.9] | +5.2% | +6.4% | **earns its place** |
+| run 3, singularrag | +0.13 [+0.04, +0.22] | +0.6 [−0.2, +1.3] | +56.7% | +87% | does not earn its place |
+| run 3, singularrag+hook | +0.10 | +0.2 [−0.5, +0.9] | +46.7% | +82% | does not earn its place |
+
+The verdicts do not move, which is the check that the weighting was not fitted to run 3. What the weighting does change is the diagnosis. Per session, weighted, run 3's `alone` costs 11.4k (cache writes 3.1k tokens, cache reads 20.8k, output 1.1k) and `singularrag` 17.8k: cache writes double to 6.3k (the six tool descriptions and the map result are new content, written once per session), cache reads double to 39.2k (re-read every turn, at a tenth), output rises 10%. The +6.4k is 63% cache writes, 29% cache reads, 8% output. Against an 11.4k baseline a 10% bar is 1.1k weighted, about 900 tokens of new content per session: no tool that returns a map can meet it unless the map replaces file reads, and run 3's tool calls rose. On hono locate questions Opus 5.5 answers well alone in three calls; the map buys +0.13 recall for about three cents a question.
+

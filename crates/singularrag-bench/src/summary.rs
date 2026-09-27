@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::RunConfig;
 use crate::score::Record;
 
-/// Spec §12 (amended 2026-09-21): the condition's mean tokens may exceed the baseline's
-/// by at most this share; the other two tests are paired intervals.
+/// Spec §12 (amended 2026-09-21, and 2026-09-27 to price-weighted cost): the condition's
+/// mean cost may exceed the baseline's by at most this share; the other two tests are
+/// paired intervals.
 pub const TOKEN_TOLERANCE: f64 = 0.10;
 /// Two-sided 95% normal interval. The design is 12 questions × 3 repeats = 36 pairs,
 /// enough for the normal approximation; a handful of pairs gives a wide interval and
@@ -29,6 +30,7 @@ pub struct ConditionStats {
     pub mean_recall: f64,
     pub mean_tokens: f64,
     pub median_tokens: f64,
+    pub mean_cost: f64,
     pub mean_tool_calls: f64,
     pub mean_wall_s: f64,
     pub total_cost: f64,
@@ -65,6 +67,7 @@ pub fn stats(name: &str, records: &[Record]) -> ConditionStats {
         mean_recall: mean(records.iter().map(|r| r.recall), n),
         mean_tokens: mean(records.iter().map(|r| r.tokens.total() as f64), n),
         median_tokens: median(records.iter().map(|r| r.tokens.total() as f64).collect()),
+        mean_cost: mean(records.iter().map(|r| r.tokens.cost()), n),
         mean_tool_calls: mean(records.iter().map(|r| r.tool_call_total() as f64), n),
         mean_wall_s: mean(records.iter().map(|r| r.duration_ms as f64 / 1000.0), n),
         total_cost: records.iter().map(|r| r.cost_usd).sum(),
@@ -125,23 +128,21 @@ impl Verdict {
 }
 
 /// Spec §12: correctness when the paired recall interval lies above zero; efficiency
-/// when the paired tool-call interval lies below zero and mean tokens exceed the
-/// baseline's by at most `TOKEN_TOLERANCE`. `Err` names why no verdict is possible.
+/// when the paired tool-call interval lies below zero and mean price-weighted cost
+/// exceeds the baseline's by at most `TOKEN_TOLERANCE` (raw tokens are printed too, for
+/// the record). `Err` names why no verdict is possible.
 pub fn verdict(base: &[Record], cond: &[Record]) -> std::result::Result<Verdict, String> {
     let recall = paired(&pairs(base, cond, |r| r.recall));
     let calls = paired(&pairs(base, cond, |r| r.tool_call_total() as f64));
     let tokens = paired(&pairs(base, cond, |r| r.tokens.total() as f64));
-    let (Some(recall), Some(calls), Some(tokens)) = (recall, calls, tokens) else {
+    let cost = paired(&pairs(base, cond, |r| r.tokens.cost()));
+    let (Some(recall), Some(calls), Some(tokens), Some(cost)) = (recall, calls, tokens, cost)
+    else {
         return Err(format!("fewer than {MIN_PAIRS} paired sessions"));
     };
     let base_tokens = mean(base.iter().map(|r| r.tokens.total() as f64), base.len());
-    let token_pct = |x: f64| {
-        if base_tokens == 0.0 {
-            0.0
-        } else {
-            x / base_tokens * 100.0
-        }
-    };
+    let base_cost = mean(base.iter().map(|r| r.tokens.cost()), base.len());
+    let pct = |x: f64, base: f64| if base == 0.0 { 0.0 } else { x / base * 100.0 };
     let lines = vec![
         format!(
             "recall {:+.2} [{:+.2}, {:+.2}] over {} pairs",
@@ -152,11 +153,18 @@ pub fn verdict(base: &[Record], cond: &[Record]) -> std::result::Result<Verdict,
             calls.mean, calls.lo, calls.hi
         ),
         format!(
+            "cost {:+.0} ({:+.1}%) [{:+.1}%, {:+.1}%]",
+            cost.mean,
+            pct(cost.mean, base_cost),
+            pct(cost.lo, base_cost),
+            pct(cost.hi, base_cost)
+        ),
+        format!(
             "tokens {:+.0} ({:+.1}%) [{:+.1}%, {:+.1}%]",
             tokens.mean,
-            token_pct(tokens.mean),
-            token_pct(tokens.lo),
-            token_pct(tokens.hi)
+            pct(tokens.mean, base_tokens),
+            pct(tokens.lo, base_tokens),
+            pct(tokens.hi, base_tokens)
         ),
     ];
     let correctness = if recall.lo > EPS {
@@ -174,10 +182,10 @@ pub fn verdict(base: &[Record], cond: &[Record]) -> std::result::Result<Verdict,
             calls.mean, calls.lo, calls.hi
         ));
     }
-    if tokens.mean > TOKEN_TOLERANCE * base_tokens + EPS {
+    if cost.mean > TOKEN_TOLERANCE * base_cost + EPS {
         why.push(format!(
-            "tokens {:+.1}%; at most {:+.0}%",
-            token_pct(tokens.mean),
+            "cost {:+.1}%; at most {:+.0}%",
+            pct(cost.mean, base_cost),
             TOKEN_TOLERANCE * 100.0
         ));
     }
@@ -257,7 +265,7 @@ pub fn render(
     );
     let _ = writeln!(
         out,
-        "tokens = input + output + cache creation + cache read\n"
+        "tokens = input + output + cache creation + cache read; cost = input + 1.25 × cache creation + 0.1 × cache read + 5 × output (price-weighted tokens; the efficiency test)\n"
     );
     for (name, reason) in &meta.aborted {
         let _ = writeln!(out, "aborted: {name} ({reason})");
@@ -267,12 +275,15 @@ pub fn render(
     }
 
     let all: Vec<ConditionStats> = conditions.iter().map(|(n, rs)| stats(n, rs)).collect();
-    let _ = writeln!(out, "| condition | sessions | failed | hook denials | mean recall | mean tokens | median tokens | mean tool calls | mean wall s | total cost |");
-    let _ = writeln!(out, "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    let _ = writeln!(out, "| condition | sessions | failed | hook denials | mean recall | mean tokens | median tokens | mean cost | mean tool calls | mean wall s | total cost |");
+    let _ = writeln!(
+        out,
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    );
     for s in &all {
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} | {:.2} | {:.0} | {:.0} | {:.1} | {:.1} | ${:.2} |",
+            "| {} | {} | {} | {} | {:.2} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | ${:.2} |",
             s.name,
             s.sessions,
             s.failed,
@@ -280,6 +291,7 @@ pub fn render(
             s.mean_recall,
             s.mean_tokens,
             s.median_tokens,
+            s.mean_cost,
             s.mean_tool_calls,
             s.mean_wall_s,
             s.total_cost
@@ -555,7 +567,8 @@ mod tests {
         assert!(v.earns(), "{v:?}");
         assert_eq!(v.lines[0], "recall +0.20 [+0.20, +0.20] over 4 pairs");
         assert_eq!(v.lines[1], "tool calls -2.0 [-2.0, -2.0]");
-        assert_eq!(v.lines[2], "tokens +50 (+5.0%) [+5.0%, +5.0%]");
+        assert_eq!(v.lines[2], "cost +50 (+5.0%) [+5.0%, +5.0%]");
+        assert_eq!(v.lines[3], "tokens +50 (+5.0%) [+5.0%, +5.0%]");
 
         // Recall up on average but not beyond noise: +0.5, +0.5, -0.4, +0.2.
         let (b, c) = four(&[
@@ -579,7 +592,7 @@ mod tests {
             (0.7, 1110, 8),
         ]);
         let v = verdict(&b, &c).unwrap();
-        assert_eq!(v.efficiency.unwrap_err(), "tokens +11.0%; at most +10%");
+        assert_eq!(v.efficiency.unwrap_err(), "cost +11.0%; at most +10%");
 
         // Tool calls down on average but not beyond noise: -6, -6, +4, -1.
         let (b, c) = four(&[
@@ -602,10 +615,37 @@ mod tests {
             (0.7, 1200, 9),
         ]);
         let e = verdict(&b, &c).unwrap().efficiency.unwrap_err();
-        assert!(
-            e.contains("tool calls") && e.contains("tokens +20.0%"),
-            "{e}"
-        );
+        assert!(e.contains("tool calls") && e.contains("cost +20.0%"), "{e}");
+    }
+
+    #[test]
+    fn cache_reads_barely_count_against_a_condition_but_fresh_input_does() {
+        // +50% raw tokens, all of them prompt-cache re-reads: cost +5%, which passes.
+        let (b, mut c) = four(&[
+            (0.7, 1000, 8),
+            (0.7, 1000, 8),
+            (0.7, 1000, 8),
+            (0.7, 1000, 8),
+        ]);
+        for r in &mut c {
+            r.tokens.cache_read = 500;
+        }
+        let v = verdict(&b, &c).unwrap();
+        assert!(v.earns(), "{v:?}");
+        assert_eq!(v.lines[2], "cost +50 (+5.0%) [+5.0%, +5.0%]");
+        assert_eq!(v.lines[3], "tokens +500 (+50.0%) [+50.0%, +50.0%]");
+        // The same +500 as fresh input costs +50% and fails.
+        let (b, mut c) = four(&[
+            (0.7, 1000, 8),
+            (0.7, 1000, 8),
+            (0.7, 1000, 8),
+            (0.7, 1000, 8),
+        ]);
+        for r in &mut c {
+            r.tokens.input = 1500;
+        }
+        let v = verdict(&b, &c).unwrap();
+        assert_eq!(v.efficiency.unwrap_err(), "cost +50.0%; at most +10%");
     }
 
     #[test]

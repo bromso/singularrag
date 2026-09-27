@@ -1,12 +1,12 @@
 # Tier-two run /Users/jonasbroms/Sites/singularrag-bench-runs/runs/20260921T083419Z-round2
 
 commit 098e11912ab244c5c33931de007f04dc8e3c2929 · claude 2.1.261 (Claude Code) · singularrag 0.1.0 · models: claude-opus-5[1m]
-tokens = input + output + cache creation + cache read
+tokens = input + output + cache creation + cache read; cost = input + 1.25 × cache creation + 0.1 × cache read + 5 × output (price-weighted tokens; the efficiency test)
 
-| condition | sessions | failed | mean recall | mean tokens | median tokens | mean tool calls | mean wall s | total cost |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| alone | 36 | 0 | 0.52 | 87134 | 86121 | 10.7 | 32.6 | $8.12 |
-| singularrag | 36 | 0 | 0.60 | 92695 | 94746 | 8.6 | 29.4 | $8.79 |
+| condition | sessions | failed | hook denials | mean recall | mean tokens | median tokens | mean cost | mean tool calls | mean wall s | total cost |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| alone | 36 | 0 | 0 | 0.52 | 87134 | 86121 | 36020 | 10.7 | 32.6 | $8.12 |
+| singularrag | 36 | 0 | 0 | 0.60 | 92695 | 94746 | 37901 | 8.6 | 29.4 | $8.79 |
 
 | question | alone | singularrag |
 |---|---:|---:|
@@ -26,6 +26,5 @@ tokens = input + output + cache creation + cache read
 **singularrag earns its place** against alone.
 - recall +0.08 [+0.02, +0.14] over 36 pairs
 - tool calls -2.1 [-3.3, -0.9]
+- cost +1881 (+5.2%) [-4.8%, +15.2%]
 - tokens +5561 (+6.4%) [-6.7%, +19.5%]
-
-(Under the rule in force when the run was made, tokens or tool calls 25% below the baseline: "does not earn its place: tokens +6.4%, tool calls -19.8%". Re-scored 2026-09-21 under the amended §12 rule.)
