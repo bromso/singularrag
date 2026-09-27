@@ -1,0 +1,23 @@
+# Tier-two eval on the documents corpus (spec docs/superpowers/specs/2026-09-20-singularrag-tier2-design.md,
+# re-targeted 2026-09-27; see eval/README.md "Tier two on documents").
+# Corpus: `git clone <this repo> ../../singularrag-pinned && git checkout -b corpus 5ec066b`, copy
+# crates/singularrag-core/fixtures/prose/{voyage,handbook}.md to docs/ and commit; exclude `.singularrag/`
+# in .git/info/exclude; extract with `singularrag serve` until `doctor` reports nothing pending.
+# Run: cargo run -p singularrag-bench -- run --config eval/tier2-docs.toml --conditions alone,singularrag
+repo = "../../singularrag-pinned"
+commit = "0c2ed54eceeea1327a3822cb6c0644ec0da0b2e5"
+questions = "questions-tier2-docs.toml"
+repeats = 3
+max_turns = 25
+max_budget_usd = 0.50
+tools = ["Read", "Grep", "Glob"]
+answer_max = 15
+
+[[condition]]
+name = "alone"
+baseline = true
+
+[[condition]]
+name = "singularrag"
+mcp_config = "conditions/singularrag.json"
+warmup = ["singularrag", "index", "--repo", "<checkout>"]
