@@ -28,7 +28,7 @@ pub fn claude_version() -> Result<String> {
 /// Identical across conditions (spec §4).
 pub fn prompt_for(query: &str, answer_max: usize) -> String {
     format!(
-        "{query}\n\nAnswer by listing the symbols that answer the question, as `path::name`, where `path` is relative to the repository root and `name` is the symbol's declared name. List at most {answer_max}, most important first. Use the tools available to you as you see fit."
+        "{query}\n\nAnswer by listing the symbols that answer the question, as `path::name`, where `path` is relative to the repository root and `name` is the symbol's declared name; for a document section, `name` is its heading text exactly as written. List at most {answer_max}, most important first. Use the tools available to you as you see fit."
     )
 }
 
@@ -165,6 +165,7 @@ mod tests {
     #[test]
     fn prompt_carries_the_query_and_the_answer_contract() {
         let p = prompt_for("where is request routing decided", 15);
+        assert!(p.contains("for a document section, `name` is its heading text exactly as written"));
         assert!(p.starts_with("where is request routing decided\n\n"));
         assert!(p.contains("as `path::name`, where `path` is relative to the repository root"));
         assert!(p.contains("List at most 15, most important first."));

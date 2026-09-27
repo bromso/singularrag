@@ -58,8 +58,15 @@ pub fn normalise(symbols: &[String], answer_max: usize) -> Vec<String> {
         .collect()
 }
 
+/// `Class.method`, `Node/search` and `#dispatch` score as the declared name. A document
+/// section's name is its heading text, which can hold dots and slashes (`8. Freshness`,
+/// `Run config`); a name with whitespace is a heading and is kept whole.
 fn declared_name(sym: &str) -> String {
     let (path, name) = sym.split_once("::").expect("filtered above");
+    let name = name.trim();
+    if name.contains(char::is_whitespace) {
+        return format!("{path}::{name}");
+    }
     let last = name.rsplit(['.', '/']).next().unwrap_or(name);
     format!("{path}::{}", last.trim_start_matches('#'))
 }
@@ -183,6 +190,28 @@ mod tests {
     }
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn a_heading_with_a_dot_is_kept_whole_but_a_qualified_code_name_is_reduced() {
+        let out = normalise(
+            &s(&[
+                "docs/design.md::8. Freshness",
+                "docs/spec.md::3. `singularrag init`",
+                "src/router.ts::Router.match",
+                "src/node.ts::Node/search",
+            ]),
+            10,
+        );
+        assert_eq!(
+            out,
+            s(&[
+                "docs/design.md::8. Freshness",
+                "docs/spec.md::3. `singularrag init`",
+                "src/router.ts::match",
+                "src/node.ts::search",
+            ])
+        );
     }
 
     #[test]
