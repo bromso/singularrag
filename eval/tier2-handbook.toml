@@ -1,0 +1,22 @@
+# Tier-two eval on a large public documentation corpus (eval/README.md "Tier two on the GitLab handbook").
+# Corpus: the `people-group` directory of the GitLab handbook (CC BY-SA 4.0), copied unchanged into a
+# git repo of its own at ../../handbook-corpus (its README names the source commit); `.singularrag/`
+# excluded in .git/info/exclude; extracted with `singularrag serve` until `doctor` reports nothing pending.
+# Run: cargo run -p singularrag-bench -- run --config eval/tier2-handbook.toml --conditions alone,singularrag
+repo = "../../handbook-corpus"
+commit = "7cf88f91987b1bd43c878e2cadfec797ce1ad9c5"
+questions = "questions-tier2-handbook.toml"
+repeats = 3
+max_turns = 25
+max_budget_usd = 0.50
+tools = ["Read", "Grep", "Glob"]
+answer_max = 15
+
+[[condition]]
+name = "alone"
+baseline = true
+
+[[condition]]
+name = "singularrag"
+mcp_config = "conditions/singularrag.json"
+warmup = ["singularrag", "index", "--repo", "<checkout>"]

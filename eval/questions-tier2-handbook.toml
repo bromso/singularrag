@@ -1,0 +1,119 @@
+# Tier-two questions on the GitLab handbook `people-group` directory (corpus repo ../../handbook-corpus,
+# source commit in its README). Fixed on first run. Never edit an existing question; add new ids instead.
+# Gold is `path::name`, `name` a heading exactly as `singularrag find` prints it (h1-h3; h4 text is folded
+# into the h3 above). Four questions each: paraphrase (no distinctive word shared with the gold section),
+# entity (a named role, team or system), relation (how two named things connect), process (ordered steps).
+# Authored 2026-09-28 by reading the pages; sixteen of twenty drafted candidates (the rest were grep-easy
+# or had a competing neighbour section).
+
+[[question]]
+id = "H2"
+category = "paraphrase"
+query = "I want to spend four months working from my sister's flat in Lisbon. Do I have to change anything in the HR system, and will the company pay for my flights?"
+gold = ["people-group/relocation.md::Short-Term Stay Definition"]
+# why: says stays under 6 months need no Workday address update and travel costs are not expensable; query avoids short-term/stay/travel/relocation/address/Workday/expenses, and sister/flat/Lisbon/HR system/flights occur nowhere in the corpus
+
+[[question]]
+id = "H3"
+category = "paraphrase"
+query = "I'd like to earn some extra cash doing design gigs for small businesses in the evenings. Who has to sign off before I start?"
+gold = ["people-group/contracts-probation-periods.md::Approval for Outside Activities"]
+# why: disclose "outside activities" in writing to the manager, cc Team Member Relations, then Director/next-level approval; cash/gigs/evenings/sign off/small business/design occur nowhere in the page
+
+[[question]]
+id = "H4"
+category = "paraphrase"
+query = "After my baby arrives, can I ease back in by doing about half my usual job for a few weeks?"
+gold = ["people-group/time-off-and-absence/leave-types.md::Returning to Work at 50% Capacity"]
+# why: return after parental leave at 50% capacity for two to four weeks, agreed with the manager; baby/ease/half/usual do not appear in the section (only "babies" elsewhere on the page)
+
+[[question]]
+id = "H5"
+category = "paraphrase"
+query = "A stranger replied to my code review saying they know where I live and are coming for me. What should I do?"
+gold = ["people-group/anti-harassment.md::Reporting a Physical Threat"]
+# why: contact local law enforcement, then People Operations via Compass, possible security detail or temporary accommodation; the section says "threat"/"merge request"/"safety", none of which the query uses
+
+[[question]]
+id = "H6"
+category = "entity"
+query = "What does the Team Member Relations team do, both for individual team members and for managers?"
+gold = ["people-group/team-member-relations.md::Team Member Relations Function"]
+# why: defines TMR as the confidential avenue for workplace concerns and guidance to managers on performance and conduct; the name also appears on many other pages (offboarding, probation, anti-harassment)
+
+[[question]]
+id = "H7"
+category = "entity"
+query = "What is the TaNewKi call, who is it for, and how often does it run?"
+gold = ["people-group/general-onboarding/_index.md::TaNewKi Welcome Call"]
+# why: pre-onboarding AMA on Zoom for incoming hires, every two weeks on Thursday at three times; spellings vary (TaNewKi, Ta-New-Ki, TaNEWki) and a separate tanewki-tips page competes
+
+[[question]]
+id = "H8"
+category = "entity"
+query = "What is the Dutch 30% ruling and what conditions do I need to meet to qualify for it?"
+gold = ["people-group/visas.md::30% Ruling in the Netherlands"]
+# why: tax advantage for highly skilled migrants, five years, filed with HRSavvy, five listed conditions; "30%" also hits the transfer section and 50%/percent text elsewhere
+
+[[question]]
+id = "H10"
+category = "entity"
+query = "What makes someone Key Talent at GitLab, and what share of the workforce is it meant to be?"
+gold = ["people-group/talent-assessment.md::Key Talent Criteria"]
+# why: roughly 10% of team members who exceed expectations and show potential for greater scope, with the characteristics list folded into this section; "Key Talent" repeats across six sections of a 900-line page
+
+[[question]]
+id = "H11"
+category = "relation"
+query = "When someone reports harassment, what is the People Business Partner responsible for doing?"
+gold = ["people-group/anti-harassment.md::The Role of People Business Partners"]
+# why: the CPO and PBPs arrange an investigation, explain the policy, write a report and notify authorities; "People Business Partner" appears across most pages, so grep returns many hits
+
+[[question]]
+id = "H12"
+category = "relation"
+query = "Who proposes a team member as Key Talent, and who gives the final approval?"
+gold = ["people-group/talent-assessment.md::Process to Determine Key Talent"]
+# why: direct managers recommend in Workday, leaders calibrate in divisional sessions, the E-Group member gives final approval
+
+[[question]]
+id = "H13"
+category = "relation"
+query = "When a salesperson is promoted, which team sets their new quota and where does it get recorded for commissions?"
+gold = ["people-group/promotions-transfers.md::For Sales Commissions"]
+# why: Sales Commissions raises a monthly issue, Sales Strategy and Analytics assigns quotas within 4 weeks, and the Commissions team loads them into Xactly; "quota" does not appear in the heading
+
+[[question]]
+id = "H14"
+category = "relation"
+query = "If moving to another country raises my location factor by 0.20 or more, whose approval is needed and in what order relative to my manager?"
+gold = ["people-group/relocation.md::Approvals Phase"]
+# why: People Operations reviews the request, then an increase of .20 or more needs VP approval and then E-Group approval before manager approval (text sits in an h4 folded into this h3)
+
+[[question]]
+id = "H16"
+category = "process"
+query = "When a manager decides to let someone go for poor performance, what are the steps and who handles each one: manager, TMR, payroll?"
+gold = ["people-group/offboarding/_index.md::Involuntary Process"]
+# why: ordered steps tagged Manager/TMR/Payroll (TMR review, private Slack channel, severance agreement, calendar invite, access revocation plan); query avoids "involuntary"/"termination"
+
+[[question]]
+id = "H17"
+category = "process"
+query = "I'm outside the US and expecting a child in a few months. What do I need to do, and when, to start my parental leave?"
+gold = ["people-group/time-off-and-absence/leave-types.md::How to Initiate Your Leave"]
+# why: tell the manager 2-3 months ahead, 30-45 days before enter "GitLab Parental Leave" in Workday, Absence Management replies in 48h, proof of birth within 15 days; competes with the other parental leave subsections
+
+[[question]]
+id = "H18"
+category = "process"
+query = "I've been ill for a whole week. What do I have to do now that it has gone past five days?"
+gold = ["people-group/time-off-and-absence/time-off-types.md::For Sick Absences that Exceed 6+ Consecutive Days"]
+# why: 6+ days becomes a leave of absence: Tilt in the USA, otherwise a Compass ticket to Absence Management, "Out Sick" in Workday and a doctor's note; "ill"/"week" do not match the heading wording
+
+[[question]]
+id = "H19"
+category = "process"
+query = "What happens when an interim manager period ends, both when it works out and when it doesn't?"
+gold = ["people-group/promotions-transfers.md::Interim"]
+# why: the h3 holds the beginning and ending steps (h4s folded in): PBP submits a promotion via Change Job if successful, or reverts the title after a feedback session, then an interim bonus request
