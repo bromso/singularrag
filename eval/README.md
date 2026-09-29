@@ -518,6 +518,32 @@ Run 3 said hono's locate questions are ones Opus 5.5 answers well alone in three
 
 What this settles: a tier-one gain does not carry to an agent with 25 turns and grep on a corpus this small. Tier one measures one ranked map at a token budget; an agent that can search does not need the map to find a section whose words it can guess, and it can guess them here. Where the knowledge layer could still pay is a corpus too large or too plain to grep (a notes vault of thousands of sections, questions with no keyword overlap), or a workflow where the agent is not allowed to read files at all. Neither is measured yet: the vault question file does not exist, and the harness takes a git checkout as its corpus.
 
+### Tier two on the GitLab handbook, 2026-09-28 (16 questions × alone/singularrag × 3 repeats = 96 sessions)
+
+The documents run said a 145-file corpus is grep-sized. This run uses a large public documentation corpus of the kind the journeys work targets: the `people-group` directory of the GitLab handbook (CC BY-SA 4.0; 68 pages, 151k words, 1,031 sections; onboarding, offboarding, promotions, relocation, visas, leave, probation, harassment, talent assessment), copied unchanged into a git repo of its own (`../../handbook-corpus`, its README names the source commit; corpus commit `7cf88f9`). Jonas's own vault was considered first and set aside: 13 personal notes, too small and not for a benchmark. Sixteen questions in `questions-tier2-handbook.toml`, four each `paraphrase` (no distinctive word shared with the gold section), `entity`, `relation`, `process`, drafted from the pages and checked with `find`; config `tier2-handbook.toml`. The corpus was extracted by the real model first (`serve` until nothing pending: 983 sections in about three hours, 3,006 entities, 1,052 typed `process`, 3,696 steps, 3,251 relations, none failed). Claude Code 2.1.280, `claude-opus-5-5[1m]`. Summary: `runs/20260928T120015Z-handbook/summary.md`.
+
+**Tier one on the same set** (the retrieval gate, one map at a budget), for the record:
+
+| | 1024 | 2048 | 4096 |
+|---|---|---|---|
+| before extraction, seeds off | 0.000 | – | 0.500 |
+| after extraction, seeds off | 0.062 | 0.250 | 0.688 |
+| after extraction, seeds on | 0.125 | 0.500 | **0.938** |
+| cited via `entities`, seeds on / off | 10/12 vs 3/12 | same | same |
+
+On this corpus the knowledge layer doubles the map's recall at 2048 and adds 0.25 at 4096: the paraphrase questions need the query embedding, the process questions need the steps. This is the tier-one win the layer was built for.
+
+**Tier two:**
+
+| condition | sessions | mean recall | mean cost (weighted) | raw tokens | tool calls | total |
+|---|---:|---:|---:|---:|---:|---:|
+| alone | 48 | 1.00 | 12,826 | 27,401 | 2.9 | $2.96 |
+| singularrag | 48 | 1.00 | 18,690 | 46,377 | 3.2 | $4.39 |
+
+**Verdict: does not earn its place.** Recall +0.00 [+0.00, +0.00]: every one of the 16 questions is 1.00 in every session of both conditions. Tool calls +0.3 [+0.0, +0.6]; cost +45.7%. Alone, the agent averages 1.8 Greps and 1.1 Reads in 4.9 turns: it greps a synonym or two, opens the page, and finds the section. With singularrag it calls `repo_map` in nearly every session (0.94), greps less (1.1) and reads the same (1.1); `entities` was never called. The map replaces greps, not reads, and the six tool descriptions plus the map result double the cache writes (4.9k → 8.1k).
+
+What this settles, with three corpora and five runs behind it: on Opus 5.5 with grep and a few turns, a ranked map does not raise recall on questions a person would ask of a codebase or a document set, however hard those questions are for a single ranked map. Tier one and tier two measure different things. Tier one is what a retrieval layer can do in one shot at a budget, and the knowledge layer wins it clearly here (0.688 → 0.938). Tier two is whether an agent that can search needs that shot, and on corpora up to a thousand sections it does not: two greps and a read are cheaper than a map. The agent-facing side of singularrag is therefore not where its value is measured; the human-facing side (the map, the knowledge graph, Journeys, the provenance loop) and any workflow where the agent may not read files are.
+
 ### The rule, amended 2026-09-21
 
 The −25% bar measured whether the agent stops reading files, and no map tool did that, Serena included. What the tool is for is recall the agent lacks, at no material context cost. Three repeats are also noisy: per-session tokens ranged 27k to 150k, so point thresholds pass or fail on luck. The rule is now paired over question × repeat (condition minus baseline, two-sided 95% intervals): correctness when the recall interval lies above 0; efficiency when the tool-call interval lies below 0 and mean tokens exceed the baseline's by at most 10%. `singularrag-bench score` prints the three measurements under every verdict.
