@@ -23,6 +23,8 @@ pub enum Language {
     Yaml,
     Toml,
     Text,
+    Prisma,
+    Sql,
 }
 
 impl Language {
@@ -40,6 +42,8 @@ impl Language {
             "yaml" | "yml" => Some(Language::Yaml),
             "toml" => Some(Language::Toml),
             "txt" => Some(Language::Text),
+            "prisma" => Some(Language::Prisma),
+            "sql" => Some(Language::Sql),
             _ => None,
         }
     }
@@ -57,6 +61,8 @@ impl Language {
             Language::Yaml => "yaml",
             Language::Toml => "toml",
             Language::Text => "text",
+            Language::Prisma => "prisma",
+            Language::Sql => "sql",
         }
     }
 
@@ -71,6 +77,12 @@ impl Language {
                 | Language::Toml
                 | Language::Text
         )
+    }
+
+    /// Database schemas (schema spec §2): Prisma schemas and SQL DDL, parsed by hand in
+    /// `schema.rs` into tables and columns.
+    pub fn is_schema(self) -> bool {
+        matches!(self, Language::Prisma | Language::Sql)
     }
 }
 
@@ -259,6 +271,9 @@ pub fn extract_tags(lang: Language, source: &str) -> Result<Vec<Tag>> {
     if lang.is_document() {
         return Ok(crate::doc::extract(lang, source, "")?.tags);
     }
+    if lang.is_schema() {
+        return Ok(crate::schema::extract(lang, source)?.tags);
+    }
     CONFIGS.with(|configs| {
         let mut configs = configs.borrow_mut();
         let config = match configs.entry(lang) {
@@ -330,6 +345,20 @@ export class SessionStore {
         assert_eq!(Language::from_path("x.htm"), Some(Language::Html));
         assert_eq!(Language::from_path("notes.txt"), Some(Language::Text));
         assert!(Language::Markdown.is_document() && !Language::Rust.is_document());
+    }
+
+    #[test]
+    fn schema_files_are_a_third_category() {
+        assert_eq!(
+            Language::from_path("prisma/schema.prisma"),
+            Some(Language::Prisma)
+        );
+        assert_eq!(Language::from_path("db/dump.sql"), Some(Language::Sql));
+        assert!(Language::Prisma.is_schema() && Language::Sql.is_schema());
+        assert!(!Language::Prisma.is_document() && !Language::Sql.is_document());
+        assert!(!Language::TypeScript.is_schema() && !Language::Markdown.is_schema());
+        assert_eq!(Language::Prisma.as_str(), "prisma");
+        assert_eq!(Language::Sql.as_str(), "sql");
     }
 
     #[test]
