@@ -84,31 +84,31 @@ pub fn grade_process(w: &Walk, dto: &ProcessesDto) -> (bool, Vec<String>, Option
         );
     }
     let reached: Vec<String> = citing.iter().map(|p| p.name.clone()).collect();
-    if let Some(role) = &w.role {
-        if !citing
-            .iter()
-            .any(|p| p.steps.iter().any(|s| eq_ci(&s.role, role)))
-        {
-            return (
-                false,
-                reached,
-                Some(format!("step with role {role} not found")),
-            );
-        }
+    // Role and step text must hold in the same citing process (spec §2).
+    let role_ok = |p: &ProcessDto| {
+        w.role
+            .as_ref()
+            .is_none_or(|role| p.steps.iter().any(|s| eq_ci(&s.role, role)))
+    };
+    let text_ok = |p: &ProcessDto| {
+        w.step_text
+            .as_ref()
+            .is_none_or(|text| p.steps.iter().any(|s| contains_ci(&s.text, text)))
+    };
+    if citing.iter().any(|p| role_ok(p) && text_ok(p)) {
+        return (true, reached, None);
     }
-    if let Some(text) = &w.step_text {
-        if !citing
-            .iter()
-            .any(|p| p.steps.iter().any(|s| contains_ci(&s.text, text)))
-        {
-            return (
-                false,
-                reached,
-                Some(format!("step text \"{text}\" not found")),
-            );
+    // Some citing process has the role (or none was asked for), so the text is what failed.
+    let reason = match &w.role {
+        Some(role) if !citing.iter().any(|p| role_ok(p)) => {
+            format!("step with role {role} not found")
         }
-    }
-    (true, reached, None)
+        _ => format!(
+            "step text \"{}\" not found",
+            w.step_text.as_deref().unwrap_or_default()
+        ),
+    };
+    (false, reached, Some(reason))
 }
 
 /// An entity-start connection walk: every entity whose normalised name matches `w.from`
@@ -130,6 +130,8 @@ pub fn grade_connection_entity(w: &Walk, dto: &EntitiesDto) -> (bool, Vec<String
 
     let mut visited: HashSet<i64> = starts.iter().copied().collect();
     let mut frontier: Vec<i64> = starts;
+    // Every key reached grades the walk; `reached` is only the first 50, for the report.
+    let mut all: HashSet<String> = HashSet::new();
     let mut reached: Vec<String> = Vec::new();
     for _ in 0..w.hops() {
         if frontier.is_empty() {
@@ -138,9 +140,11 @@ pub fn grade_connection_entity(w: &Walk, dto: &EntitiesDto) -> (bool, Vec<String
         let mut next_frontier: Vec<i64> = Vec::new();
         for eid in &frontier {
             for m in dto.mentions.iter().filter(|m| m.entity_id == *eid) {
+                let key = format!("{}::{}", m.path, m.name);
                 if reached.len() < 50 {
-                    reached.push(format!("{}::{}", m.path, m.name));
+                    reached.push(key.clone());
                 }
+                all.insert(key);
             }
             for rel in &dto.relations {
                 let other = if rel.src == *eid {
@@ -160,7 +164,7 @@ pub fn grade_connection_entity(w: &Walk, dto: &EntitiesDto) -> (bool, Vec<String
         frontier = next_frontier;
     }
 
-    let pass = w.gold.iter().any(|g| reached.contains(g));
+    let pass = w.gold.iter().any(|g| all.contains(g));
     if pass {
         (true, reached, None)
     } else {
@@ -382,12 +386,15 @@ fn run_change(
 ) -> Result<(bool, Vec<String>, Option<String>)> {
     let refuse = |why: String| Ok((false, vec![], Some(why)));
     let root = engine.workspace().dir.clone();
-    let walk_dir = opts
-        .walk_dir
-        .canonicalize()
-        .unwrap_or_else(|_| opts.walk_dir.clone());
-    if walk_dir.starts_with(&root) {
-        return refuse("walk file lives inside the corpus: refused".into());
+    // Fail closed: a walk directory that cannot be resolved may be inside the corpus.
+    let inside = "walk file lives inside the corpus: refused";
+    let walk_dir = match opts.walk_dir.canonicalize() {
+        Ok(d) => d,
+        Err(_) => return refuse(inside.into()),
+    };
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+    if walk_dir.starts_with(&root) || walk_dir.starts_with(&canon_root) {
+        return refuse(inside.into());
     }
     if !is_git_toplevel(&root) {
         return refuse("corpus is not a git toplevel: refused".into());
@@ -695,6 +702,18 @@ mod tests {
     }
 
     #[test]
+    fn an_entity_start_passes_on_a_gold_beyond_the_reached_display_cap() {
+        let keys: Vec<String> = (1..=60).map(|i| format!("docs/m{i}.md::S")).collect();
+        let mentions: Vec<(i64, &str)> = keys.iter().map(|k| (1, k.as_str())).collect();
+        let d = edto(&[(1, "Okta", "system")], &[], &mentions);
+        let mut w = walk(WalkKind::Connection, &["docs/m60.md::S"]);
+        w.from = Some("Okta".into());
+        let (pass, reached, reason) = grade_connection_entity(&w, &d);
+        assert!(pass, "{reason:?}");
+        assert!(reached.len() <= 50, "{}", reached.len());
+    }
+
+    #[test]
     fn an_unknown_entity_start_fails_with_not_found() {
         let d = edto(
             &[(1, "Okta", "system")],
@@ -809,6 +828,37 @@ mod tests {
         assert_eq!(
             grade_process(&w, &d).2.as_deref(),
             Some("no process cites docs/handbook.md::Incident process")
+        );
+    }
+
+    #[test]
+    fn role_and_step_text_must_hold_in_the_same_citing_process() {
+        let d = dto(vec![
+            (
+                "Expense A",
+                vec![(
+                    "Submit the claim",
+                    "Finance",
+                    "docs/handbook.md::Expense process",
+                )],
+            ),
+            (
+                "Expense B",
+                vec![(
+                    "Reviewed within 5 days",
+                    "you",
+                    "docs/handbook.md::Expense process",
+                )],
+            ),
+        ]);
+        let mut w = walk(WalkKind::Process, &["docs/handbook.md::Expense process"]);
+        w.role = Some("Finance".into());
+        w.step_text = Some("within 5 days".into());
+        let (pass, _, reason) = grade_process(&w, &d);
+        assert!(!pass);
+        assert_eq!(
+            reason.as_deref(),
+            Some("step text \"within 5 days\" not found")
         );
     }
 
@@ -1089,6 +1139,25 @@ mod tests {
         assert_eq!(
             run_change(&mut engine, &w, &opts).unwrap().2.as_deref(),
             Some("walk file lives inside the corpus: refused")
+        );
+    }
+
+    #[test]
+    fn a_walk_dir_that_does_not_canonicalise_is_refused_before_any_write() {
+        let dir = repo(&[("src/session.ts", SESSION_TS)]);
+        let mut engine = Engine::open(dir.path(), "walk-test").unwrap();
+        let opts = WalkOptions {
+            budget: None,
+            walk_dir: PathBuf::new(),
+        };
+        let w = change_walk(&["src/session.ts::createSession"]);
+        assert_eq!(
+            run_change(&mut engine, &w, &opts).unwrap().2.as_deref(),
+            Some("walk file lives inside the corpus: refused")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/session.ts")).unwrap(),
+            SESSION_TS
         );
     }
 

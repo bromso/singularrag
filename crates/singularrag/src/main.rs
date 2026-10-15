@@ -300,6 +300,9 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("loaded {n} sections from {}", p.display());
             }
             let file = singularrag_core::walks::load_walks(&questions)?;
+            // Canonical first: a bare `walks.toml` has an empty parent, which the
+            // inside-the-corpus guard cannot place.
+            let questions = std::fs::canonicalize(&questions)?;
             let opts = walk::WalkOptions {
                 budget,
                 walk_dir: questions

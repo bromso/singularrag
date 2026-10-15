@@ -789,6 +789,76 @@ fn walk_runs_all_four_kinds_on_the_fixtures_without_a_model() {
 }
 
 #[test]
+fn walk_refuses_a_change_walk_from_a_bare_relative_questions_inside_the_corpus() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "export function createSession() {\n  return 1;\n}\n";
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/session.ts"), src).unwrap();
+    std::fs::write(
+        dir.path().join("W.patch"),
+        "--- a/src/session.ts\n+++ b/src/session.ts\n@@ -1,3 +1,3 @@\n export function createSession() {\n-  return 1;\n+  return 2;\n }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("walks.toml"),
+        "[[walk]]\nid = \"C1\"\nkind = \"change\"\npatch = \"W.patch\"\ngold = [\"src/session.ts::createSession\"]\n",
+    )
+    .unwrap();
+    // commit everything (and ignore the index dir) so the checkout is clean
+    std::fs::write(dir.path().join(".gitignore"), ".singularrag/\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(&args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let out = Command::cargo_bin("singularrag")
+        .unwrap()
+        .env("SINGULARRAG_OLLAMA_URL", "http://127.0.0.1:9")
+        .current_dir(dir.path())
+        .args(["walk", "--questions", "walks.toml", "--no-models"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("walk file lives inside the corpus: refused"),
+        "{stdout}"
+    );
+    assert!(stdout.ends_with("walks 0/1\n"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/session.ts")).unwrap(),
+        src
+    );
+    let st = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .unwrap();
+    assert!(
+        st.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&st.stdout)
+    );
+}
+
+#[test]
 fn walk_names_the_reason_when_gold_is_wrong() {
     // a scratch walk file in the tempdir's parent with one locate walk whose gold is
     // docs/handbook.md::Nowhere -> "gold not served at 4096" and "walks 0/1"
