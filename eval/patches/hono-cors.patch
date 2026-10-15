@@ -1,0 +1,13 @@
+diff --git a/src/middleware/cors/index.ts b/src/middleware/cors/index.ts
+index d02ae92e..83900aa5 100644
+--- a/src/middleware/cors/index.ts
++++ b/src/middleware/cors/index.ts
+@@ -108,7 +108,7 @@ export const cors = (options?: CORSOptions): MiddlewareHandler => {
+     }
+ 
+     if (opts.credentials) {
+-      set('Access-Control-Allow-Credentials', 'true')
++      set('Access-Control-Allow-Credentials', 'true') // only sent when credentials is set
+     }
+ 
+     if (exposeHeadersStr) {

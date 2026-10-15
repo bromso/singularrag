@@ -1,0 +1,37 @@
+# The harness's own walk file: the prose fixture (`fixture::write_prose`) plus the code and docs
+# mini fixture (`fixture::write_docs_mini`), the checked-in prose extraction loaded with
+# --extraction, no model. One walk per kind (two for connection: an entity and a symbol start).
+budget = 4096
+
+[[walk]]
+id = "C1"
+kind = "locate"
+query = "how do I get reimbursed after paying for something myself on the job"
+gold = ["docs/handbook.md::Expense process"]
+
+[[walk]]
+id = "C2"
+kind = "process"
+query = "what happens after my manager approves an expense claim"
+role = "Finance"
+step_text = "within 5 days"
+gold = ["docs/handbook.md::Expense process"]
+
+[[walk]]
+id = "C3"
+kind = "connection"
+from = "Okta"
+gold = ["docs/handbook.md::Onboarding"]
+
+[[walk]]
+id = "C4"
+kind = "connection"
+from = "src/auth/session.ts::createSession"
+hops = 1
+gold = ["src/http/middleware.ts::requireSession"]
+
+[[walk]]
+id = "C5"
+kind = "change"
+patch = "patches/ci-session.patch"
+gold = ["src/auth/session.ts::createSession"]

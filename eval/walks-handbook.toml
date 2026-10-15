@@ -1,0 +1,99 @@
+# Walks over the GitLab handbook `people-group` directory (CC BY-SA 4.0): the corpus checkout
+# `../handbook-corpus` (relative to the repository root of the main checkout; from a worktree
+# use an absolute path) at 7cf88f9, extracted with the real models (3,006 entities, 1,052
+# processes), its `.singularrag/` excluded. Run from the repository root:
+#   singularrag --repo ../handbook-corpus walk --questions eval/walks-handbook.toml --budget 4096
+# No change walks: the corpus is prose, and a section edit would leave its extraction pending.
+
+# locate: everyday words, not the heading's words
+
+[[walk]]
+id = "H1"
+kind = "locate"
+query = "will I still get my salary if a court summons me for several weeks"
+gold = ["people-group/time-off-and-absence/time-off-types.md::Pay while on Jury Duty"]
+
+[[walk]]
+id = "H2"
+kind = "locate"
+query = "I sell for the company and I am leaving: when is the money from my last deals paid out"
+gold = ["people-group/offboarding/faq.md::When will I receive (if applicable) commission payment(s)?"]
+
+[[walk]]
+id = "H3"
+kind = "locate"
+query = "how long can I keep working while travelling around different countries before it counts as moving"
+gold = [
+  "people-group/relocation.md::Digital Nomads",
+  "people-group/relocation.md::Short-Term Stay Definition",
+]
+
+[[walk]]
+id = "H4"
+kind = "locate"
+query = "what is the colleague paired with a newcomer for their first weeks expected to do"
+gold = ["people-group/general-onboarding/onboarding-buddies.md::Buddy Responsibilities"]
+
+# process: a role and a step phrase the page states (any process whose steps cite the gold)
+
+[[walk]]
+id = "H5"
+kind = "process"
+query = "who signs off when I want to move to another country and keep my job"
+role = "People Operations"
+step_text = "Relocation Tracker"
+gold = ["people-group/relocation.md::Approvals Phase"]
+
+[[walk]]
+id = "H6"
+kind = "process"
+query = "what if the ticket for someone who is leaving never got opened on its own"
+role = "People Operations member"
+step_text = "/pops run offboarding"
+gold = ["people-group/offboarding/offboarding_standards.md::Creating the Offboarding Issue"]
+
+[[walk]]
+id = "H7"
+kind = "process"
+query = "how does a fixed-term contract in the Netherlands get extended"
+role = "You"
+step_text = "Docusign"
+gold = ["people-group/contracts-probation-periods.md::Contract Renewals"]
+
+[[walk]]
+id = "H8"
+kind = "process"
+query = "I am having a baby: how do I tell the company I am going on leave"
+role = "You"
+step_text = "Tilt"
+gold = ["people-group/time-off-and-absence/leave-types.md::How to Initiate Your Leave"]
+
+# connection: from an entity the extraction holds
+
+[[walk]]
+id = "H9"
+kind = "connection"
+from = "DocuSign"
+gold = ["people-group/contracts-probation-periods.md::Contract Renewals"]
+
+[[walk]]
+id = "H10"
+kind = "connection"
+from = "Absence Management Team"
+hops = 1
+gold = ["people-group/time-off-and-absence/leave-types.md::How to Initiate Your Leave"]
+
+[[walk]]
+id = "H11"
+kind = "connection"
+from = "1Password"
+hops = 1
+gold = ["people-group/offboarding/faq.md::1Password"]
+
+[[walk]]
+id = "H12"
+kind = "connection"
+from = "Compass"
+# The page's "Considerations for Short-Term Travel" is an h4, indexed inside this h3; the
+# extraction puts the Compass mention on the enclosing h2 `Relocation / Address Change`.
+gold = ["people-group/relocation.md::Short-Term Stay Definition"]

@@ -1,0 +1,13 @@
+diff --git a/src/http-exception.ts b/src/http-exception.ts
+index 8fe9c2bb..64251055 100644
+--- a/src/http-exception.ts
++++ b/src/http-exception.ts
+@@ -72,7 +72,7 @@ export class HTTPException extends Error {
+       return newResponse
+     }
+     return new Response(this.message, {
+-      status: this.status,
++      status: this.status, // no res given: a plain-text body
+     })
+   }
+ }

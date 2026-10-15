@@ -1,0 +1,13 @@
+diff --git a/crates/singularrag-core/src/map.rs b/crates/singularrag-core/src/map.rs
+index fe6b749..5a03b2f 100644
+--- a/crates/singularrag-core/src/map.rs
++++ b/crates/singularrag-core/src/map.rs
+@@ -131,7 +131,7 @@ pub fn freshness_header(index_version: &str, git_head: Option<&str>, stale: usiz
+         _ => "none".to_string(),
+     };
+     let fresh = if stale == 0 {
+-        "fresh".to_string()
++        "fresh".to_string() // nothing changed since the index
+     } else {
+         format!("STALE: {stale} files changed since index")
+     };

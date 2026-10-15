@@ -1,0 +1,13 @@
+diff --git a/src/compose.ts b/src/compose.ts
+index b1d4508f..a281717f 100644
+--- a/src/compose.ts
++++ b/src/compose.ts
+@@ -31,7 +31,7 @@ export const compose = <E extends Env = Env>(
+      */
+     async function dispatch(i: number): Promise<Context> {
+       if (i <= index) {
+-        throw new Error('next() called multiple times')
++        throw new Error('next() called more than once')
+       }
+       index = i
+ 

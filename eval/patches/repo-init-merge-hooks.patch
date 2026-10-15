@@ -1,0 +1,13 @@
+diff --git a/crates/singularrag/src/init.rs b/crates/singularrag/src/init.rs
+index 19e666e..45d6f66 100644
+--- a/crates/singularrag/src/init.rs
++++ b/crates/singularrag/src/init.rs
+@@ -56,7 +56,7 @@ pub fn merge_hooks(mut existing: Value, bin: &Path) -> Value {
+         *pre = json!([]);
+     }
+     let arr = pre.as_array_mut().unwrap();
+-    for (matcher, event) in [("Read", "read"), ("mcp__singularrag__repo_map", "map")] {
++    for (matcher, event) in [("Read", "read"), ("mcp__singularrag__repo_map", "map")] { // a second init adds nothing
+         if !has_ours(arr, matcher) {
+             arr.push(hook_entry(matcher, format!("{bin} hook {event}")));
+         }

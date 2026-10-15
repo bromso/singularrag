@@ -1,0 +1,96 @@
+# Walks over this repository's tree at the documents pin plus the two prose fixture files:
+# the corpus checkout `../singularrag-pinned` (relative to the repository root of the main
+# checkout; from a worktree use an absolute path) at 0c2ed54 (real-model extraction, its
+# `.singularrag/` excluded). Run from the repository root:
+#   singularrag --repo ../singularrag-pinned walk --questions eval/walks-repo.toml --budget 4096
+# Change walks apply `patches/repo-*.patch` to that checkout and revert it; they refuse a
+# dirty checkout. Code-only change walks: a section edit re-indexes the file and leaves its
+# extraction pending until a serve or mcp process drains the queue (see the README).
+
+# locate: everyday words, not the heading's words
+
+[[walk]]
+id = "R1"
+kind = "locate"
+query = "what does the tool tell me when files changed since it last looked and catching up takes too long"
+gold = ["docs/superpowers/specs/2026-09-19-singularrag-design.md::8. Freshness"]
+
+[[walk]]
+id = "R2"
+kind = "locate"
+query = "where did the ship stop to mend its torn sail after the gale"
+gold = ["docs/voyage.md::Kolbeinsey"]
+
+[[walk]]
+id = "R3"
+kind = "locate"
+query = "when I run setup, how does it add itself to my coding assistant's config file without wiping what is already there"
+gold = ["crates/singularrag/src/init.rs::merge_hooks"]
+
+# process: a role and a step phrase the page states
+
+[[walk]]
+id = "R4"
+kind = "process"
+query = "what happens after my manager approves an expense claim"
+role = "Finance"
+step_text = "5 days"
+gold = ["docs/handbook.md::Expense process"]
+
+[[walk]]
+id = "R5"
+kind = "process"
+query = "who gets woken up when a customer-facing system breaks, and how"
+role = "on-call engineer"
+step_text = "PagerDuty"
+gold = ["docs/handbook.md::Incident process"]
+
+[[walk]]
+id = "R6"
+kind = "process"
+query = "what does serve do when a file changes on disk"
+role = "Watcher"
+step_text = "300 ms"
+gold = ["docs/superpowers/specs/2026-09-20-singularrag-serve-design.md::2. Process model"]
+
+# connection: from an entity the extraction holds, or from a code symbol
+
+[[walk]]
+id = "R7"
+kind = "connection"
+from = "Kolbeinsey"
+gold = ["docs/voyage.md::Departure"]
+
+[[walk]]
+id = "R8"
+kind = "connection"
+from = "Okta"
+hops = 1
+gold = ["docs/handbook.md::Onboarding"]
+
+[[walk]]
+id = "R9"
+kind = "connection"
+from = "crates/singularrag-core/src/map.rs::clamp_budget"
+hops = 1
+gold = ["crates/singularrag/src/serve/routes.rs::query"]
+
+# change: a one-line edit inside a function; gold = the symbol the edit sits in
+
+[[walk]]
+id = "R10"
+kind = "change"
+patch = "patches/repo-hook-run.patch"
+gold = ["crates/singularrag/src/hook.rs::run"]
+
+[[walk]]
+id = "R11"
+kind = "change"
+patch = "patches/repo-init-merge-hooks.patch"
+gold = ["crates/singularrag/src/init.rs::merge_hooks"]
+
+[[walk]]
+id = "R12"
+kind = "change"
+patch = "patches/repo-map-freshness-header.patch"
+gold = ["crates/singularrag-core/src/map.rs::freshness_header"]
