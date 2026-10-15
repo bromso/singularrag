@@ -675,3 +675,32 @@ fn entities_answers_from_what_is_extracted_and_never_extracts() {
         f.calls()
     );
 }
+
+#[test]
+fn walk_runs_a_locate_walk_and_prints_the_footer() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_prose(dir.path());
+    let walks = tempfile::tempdir().unwrap();
+    let file = walks.path().join("walks.toml");
+    std::fs::write(
+        &file,
+        "budget = 2048\n\n[[walk]]\nid = \"W1\"\nkind = \"locate\"\nquery = \"voyage\"\ngold = [\"docs/voyage.md::Voyage\"]\n",
+    )
+    .unwrap();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .args([
+            "walk",
+            "--questions",
+            file.to_str().unwrap(),
+            "--no-models",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::starts_with("id    kind        pass  reached / reason\n")
+                .and(predicate::str::is_match(r"\nwalks [01]/1 locate\nwalks [01]/1\n$").unwrap()),
+        );
+}

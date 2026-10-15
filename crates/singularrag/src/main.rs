@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -15,6 +15,7 @@ mod hook;
 mod init;
 mod mcp;
 mod serve;
+mod walk;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -71,6 +72,21 @@ enum Cmd {
         no_models: bool,
         /// A checked-in extraction (`{ "<path>::<heading>": … }`) to load before the questions,
         /// so the `entities` run can cite without a model
+        #[arg(long, value_name = "PATH")]
+        extraction: Option<PathBuf>,
+    },
+    /// Walk the UI's own data paths for a file of questions a person would bring (spec walks §3)
+    Walk {
+        #[arg(long)]
+        questions: PathBuf,
+        #[arg(long, default_value_t = DEFAULT_BUDGET)]
+        budget: usize,
+        #[arg(long)]
+        json: bool,
+        /// Run without the knowledge layer's models: no query embeddings, no semantic seeds
+        #[arg(long)]
+        no_models: bool,
+        /// A checked-in extraction to load before the walks, so they run without a model
         #[arg(long, value_name = "PATH")]
         extraction: Option<PathBuf>,
     },
@@ -161,7 +177,12 @@ fn main() -> anyhow::Result<()> {
     if let Cmd::Serve { port, no_open } = cli.cmd {
         return serve::run(root, port, !no_open);
     }
-    let mut engine = Engine::open(&root, &format!("cli-{}", std::process::id()))?;
+    // `walk` records its retrievals under the literal key `walk`, so the rail labels them.
+    let session = match cli.cmd {
+        Cmd::Walk { .. } => "walk".to_string(),
+        _ => format!("cli-{}", std::process::id()),
+    };
+    let mut engine = Engine::open(&root, &session)?;
     match cli.cmd {
         Cmd::Index => {
             let s = engine.refresh(Duration::from_secs(600))?;
@@ -257,6 +278,38 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else {
                 print!("{}", singularrag_core::eval::render_report(&results));
+            }
+        }
+        Cmd::Walk {
+            questions,
+            budget,
+            json,
+            no_models,
+            extraction,
+        } => {
+            if no_models {
+                engine.set_models_enabled(false);
+            }
+            // Index up front: a file of only `process` walks never calls `repo_map`, which
+            // is what refreshes otherwise.
+            engine.refresh(Duration::from_secs(600))?;
+            if let Some(p) = extraction {
+                let n = engine.load_extraction_json(&std::fs::read_to_string(&p)?)?;
+                eprintln!("loaded {n} sections from {}", p.display());
+            }
+            let file = singularrag_core::walks::load_walks(&questions)?;
+            let opts = walk::WalkOptions {
+                budget,
+                walk_dir: questions
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+            };
+            let results = walk::run_walks(&mut engine, &file, &opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                print!("{}", walk::render_report(&results));
             }
         }
         Cmd::Doctor => print!("{}", doctor(&engine)?),
