@@ -151,10 +151,23 @@ impl Drop for FakeOllama {
     }
 }
 
+/// Replace an atomic's value by `f(current)` when `f` says so; `Ok(previous)` on success,
+/// `Err(current)` when `f` declined. A compare-exchange loop, so it reads the same on every
+/// toolchain (`fetch_update` is deprecated on newer stable in favour of `try_update`).
+fn update(n: &AtomicUsize, f: impl Fn(usize) -> Option<usize>) -> Result<usize, usize> {
+    let mut cur = n.load(Ordering::SeqCst);
+    loop {
+        let Some(next) = f(cur) else { return Err(cur) };
+        match n.compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(prev) => return Ok(prev),
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
 /// Decrement a "next n" counter; true when it was above zero.
 fn take_one(n: &AtomicUsize) -> bool {
-    n.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-        .is_ok()
+    update(n, |n| n.checked_sub(1)).is_ok()
 }
 
 fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
@@ -209,11 +222,7 @@ fn handle(st: &State, dim: usize, stream: TcpStream) -> std::io::Result<()> {
             if st.generate_down_after.load(Ordering::SeqCst) == 1 {
                 return Ok(());
             }
-            let _ = st
-                .generate_down_after
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                    (n > 1).then(|| n - 1)
-                });
+            let _ = update(&st.generate_down_after, |n| (n > 1).then(|| n - 1));
             let delay = st.generate_delay_ms.load(Ordering::SeqCst);
             if delay > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(delay as u64));
