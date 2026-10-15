@@ -14,7 +14,7 @@ const entitiesFixture = {
     { id: 1, name: "Ada Lovelace", type: "person", description: "Wrote the first program.", mentions: 3 },
     { id: 2, name: "Analytical Engine", type: "system", description: "A mechanical computer.", mentions: 1 },
   ],
-  relations: [{ id: 1, src: 1, dst: 2, description: "programmed", symbol_id: 10, path: "docs/guide.md", name: "Intro" }],
+  relations: [{ id: 1, src: 1, dst: 2, description: "programmed", symbol_id: 10, path: "docs/guide.md", name: "Intro", src_name: "Ada Lovelace", dst_name: "Analytical Engine" }],
   mentions: [{ entity_id: 1, symbol_id: 10, path: "docs/guide.md", name: "Intro" }, { entity_id: 2, symbol_id: 99, path: "docs/other.md", name: "Elsewhere" }],
   truncated: false,
 };
@@ -819,7 +819,7 @@ describe("App", () => {
     ];
     entitiesOverride = {
       entities: [{ id: 1, name: "Ada", type: "person", description: "", mentions: 1 }, { id: 2, name: "Engine", type: "system", description: "", mentions: 1 }],
-      relations: [{ id: 1, src: 1, dst: 2, description: "maintains", symbol_id: 21, path: "notes/n.md", name: "N" }],
+      relations: [{ id: 1, src: 1, dst: 2, description: "maintains", symbol_id: 21, path: "notes/n.md", name: "N", src_name: "Ada", dst_name: "Engine" }],
       mentions: [{ entity_id: 1, symbol_id: 21, path: "notes/n.md", name: "N" }, { entity_id: 2, symbol_id: 20, path: "app/src/a.ts", name: "a" }],
       truncated: false,
     };

@@ -143,6 +143,10 @@ pub struct EntityRelationDto {
     pub symbol_id: i64,
     pub path: String,
     pub name: String,
+    /// The two ends' entity names, so a far end outside the overlay still reads by name
+    /// (empty if an end's row is missing; the relation is kept either way).
+    pub src_name: String,
+    pub dst_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -483,6 +487,8 @@ fn relation_row(r: &rusqlite::Row) -> rusqlite::Result<EntityRelationDto> {
         symbol_id: r.get(4)?,
         path: r.get(5)?,
         name: r.get(6)?,
+        src_name: r.get(7)?,
+        dst_name: r.get(8)?,
     })
 }
 
@@ -496,10 +502,13 @@ fn mention_row(r: &rusqlite::Row) -> rusqlite::Result<EntityMentionDto> {
 }
 
 const RELATION_SELECT: &str =
-    "SELECT r.id, r.src_entity, r.dst_entity, r.description, r.symbol_id, f.path, s.name
+    "SELECT r.id, r.src_entity, r.dst_entity, r.description, r.symbol_id, f.path, s.name,
+            COALESCE(es.name, ''), COALESCE(ed.name, '')
        FROM relations r
        JOIN symbols s ON s.id = r.symbol_id
-       JOIN files f ON f.id = s.file_id";
+       JOIN files f ON f.id = s.file_id
+       LEFT JOIN entities es ON es.id = r.src_entity
+       LEFT JOIN entities ed ON ed.id = r.dst_entity";
 
 const MENTION_SELECT: &str = "SELECT m.entity_id, m.symbol_id, f.path, s.name
        FROM entity_mentions m

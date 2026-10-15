@@ -29,7 +29,7 @@ beforeEach(() => { Fake.instances = []; localStorage.clear(); });
 
 const entities: EntitiesPayload = {
   entities: [{ id: 1, name: "Ada", type: "person", description: "Wrote it.", mentions: 4 }, { id: 2, name: "Engine", type: "system", description: "", mentions: 1 }],
-  relations: [{ id: 3, src: 1, dst: 2, description: "maintains", symbol_id: 1, path: "src/a.ts", name: "x" }],
+  relations: [{ id: 3, src: 1, dst: 2, description: "maintains", symbol_id: 1, path: "src/a.ts", name: "x", src_name: "Ada", dst_name: "Engine" }],
   mentions: [{ entity_id: 1, symbol_id: 1, path: "src/a.ts", name: "x" }],
   truncated: false,
 };

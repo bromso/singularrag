@@ -29,7 +29,7 @@ describe("buildGraph with entities", () => {
       { id: 1, name: "Ada", type: "person", description: "Wrote the notes.", mentions: 4 },
       { id: 2, name: "Engine", type: "system", description: "The engine.", mentions: 1 },
     ],
-    relations: [{ id: 9, src: 1, dst: 2, description: "maintains", symbol_id: 5, path: "docs/a.md", name: "Intro" }],
+    relations: [{ id: 9, src: 1, dst: 2, description: "maintains", symbol_id: 5, path: "docs/a.md", name: "Intro", src_name: "Ada", dst_name: "Engine" }],
     mentions: [
       { entity_id: 1, symbol_id: 5, path: "docs/a.md", name: "Intro" },
       { entity_id: 1, symbol_id: 6, path: "docs/gone.md", name: "Old" },
@@ -65,7 +65,7 @@ describe("filterEntitiesToRoot", () => {
       { id: 1, name: "Ada", type: "person", description: "", mentions: 1 },
       { id: 2, name: "Engine", type: "system", description: "", mentions: 1 },
     ],
-    relations: [{ id: 5, src: 1, dst: 2, description: "maintains", symbol_id: 7, path: "a/doc.md", name: "Intro" }],
+    relations: [{ id: 5, src: 1, dst: 2, description: "maintains", symbol_id: 7, path: "a/doc.md", name: "Intro", src_name: "Ada", dst_name: "Engine" }],
     mentions: [
       { entity_id: 1, symbol_id: 7, path: "a/doc.md", name: "Intro" },
       { entity_id: 2, symbol_id: 8, path: "b/doc.md", name: "Other" },

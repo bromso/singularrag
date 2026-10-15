@@ -23,6 +23,8 @@ export function JourneysView({ changeSeq, pending, onFocusSection }: { changeSeq
   // one role chosen. Only grows; a role no longer used stays selectable and finds nothing.
   const [roles, setRoles] = useState<string[]>([]);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [filterPending, setFilterPending] = useState(false);
   // Orders fetches by when they started: a superseded fetch applies nothing.
   const gen = useRef(0);
   const shown = useRef(0);
@@ -33,7 +35,10 @@ export function JourneysView({ changeSeq, pending, onFocusSection }: { changeSeq
     const my = ++gen.current;
     const filter = `${q}\u0000${role}`;
     // A new filter starts from the first page; a change event keeps as many as were shown.
-    const keep = lastFilter.current === filter ? shown.current : 0;
+    const same = lastFilter.current === filter;
+    const keep = same ? shown.current : 0;
+    // The old count must not read as the new filter's: say Loading… until it answers.
+    if (!same && lastFilter.current !== null) setFilterPending(true);
     lastFilter.current = filter;
     setLoadingMore(false);
     (async () => {
@@ -47,8 +52,16 @@ export function JourneysView({ changeSeq, pending, onFocusSection }: { changeSeq
         if (p.processes.length === 0) break;
       } while (got.length < Math.min(keep, total));
       setLoaded({ processes: got, total });
+      setFailed(false);
+      setFilterPending(false);
       if (!role) setRoles((prev) => mergeRoles(prev, got));
-    })().catch(() => {});
+    })().catch(() => {
+      // A 500 or a lock timeout is not an empty corpus, and the old list is not this filter's.
+      if (my !== gen.current) return;
+      setLoaded(null);
+      setFailed(true);
+      setFilterPending(false);
+    });
   }, [q, role, changeSeq]);
 
   const showMore = async () => {
@@ -69,7 +82,7 @@ export function JourneysView({ changeSeq, pending, onFocusSection }: { changeSeq
 
   const processes = loaded?.processes ?? [];
   const current = processes.find((p) => p.id === selected) ?? processes[0] ?? null;
-  if (!loaded || (loaded.total === 0 && !q && !role && !text)) {
+  if (!failed && (!loaded || (loaded.total === 0 && !q && !role && !text))) {
     return (
       <section aria-label="Journeys" className="p-4">
         <label className="block text-sm">Role <select aria-label="Role" disabled className="ml-2 rounded border bg-background px-2 py-1"><option value="">All roles</option></select></label>
@@ -78,6 +91,12 @@ export function JourneysView({ changeSeq, pending, onFocusSection }: { changeSeq
     );
   }
   const options = role && !roles.includes(role) ? [...roles, role].sort() : roles;
+  const total = loaded?.total ?? 0;
+  const statusText = filterPending
+    ? "Loading…"
+    : failed
+      ? "Could not load processes."
+      : `Showing ${processes.length} of ${total} ${total === 1 ? "process" : "processes"}`;
   return (
     <section aria-label="Journeys" className="grid h-full min-h-0 grid-cols-[minmax(12rem,1fr)_3fr] gap-4 p-4">
       <div className="min-h-0 overflow-auto">
@@ -90,8 +109,8 @@ export function JourneysView({ changeSeq, pending, onFocusSection }: { changeSeq
             {options.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
         </label>
-        <p role="status" className="mt-2 text-xs">{`Showing ${processes.length} of ${loaded.total} processes`}</p>
-        {processes.length === 0 ? <p className="mt-3 text-sm">No processes match.</p> : (
+        <p role="status" className="mt-2 text-xs">{statusText}</p>
+        {failed ? <p className="mt-3 text-sm">Could not load processes.</p> : processes.length === 0 ? <p className="mt-3 text-sm">No processes match.</p> : (
           <ul aria-label="Processes" className="mt-3 space-y-1">
             {processes.map((p) => (
               <li key={p.id}>
@@ -104,13 +123,13 @@ export function JourneysView({ changeSeq, pending, onFocusSection }: { changeSeq
             ))}
           </ul>
         )}
-        {processes.length < loaded.total && (
+        {!failed && processes.length < total && (
           <button type="button" disabled={loadingMore} onClick={() => { void showMore(); }}
             className="mt-2 rounded border px-2 py-1 text-sm focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60">Show more</button>
         )}
       </div>
       <div className="min-h-0 overflow-auto">
-        {current && <ProcessSteps process={current} onFocusSection={onFocusSection} />}
+        {!failed && current && <ProcessSteps process={current} onFocusSection={onFocusSection} />}
       </div>
     </section>
   );

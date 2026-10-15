@@ -683,6 +683,8 @@ mod tests {
                 symbol_id: 0,
                 path: "p.md".into(),
                 name: "s".into(),
+                src_name: String::new(),
+                dst_name: String::new(),
             })
             .collect();
         entities
@@ -839,6 +841,35 @@ mod tests {
         // "Aurelia" has prefix matches ("Aurelia voyage", "Aurelia report"): only the exact one starts.
         assert_eq!(entity_starts(e.store(), "Aurelia").unwrap().len(), 1);
         assert!(entity_starts(e.store(), "Okt").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_name_extracted_as_two_types_is_one_start_reaching_both_sections() {
+        // `entities.norm_name` is unique: a second section typing `Finance` as an
+        // organisation joins the role entity the handbook made, so the search finds one
+        // start, and it reaches the sections of both.
+        let (_d, e) = prose_engine();
+        let extra = serde_json::json!({"docs/voyage.md::Departure": {
+            "entities": [{"name": "Finance", "type": "organisation", "description": "paid for the voyage"}],
+            "relations": []
+        }});
+        singularrag_core::knowledge::load_extraction_json(e.store(), None, &extra.to_string())
+            .unwrap();
+        let starts = entity_starts(e.store(), "Finance").unwrap();
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        let store = e.store();
+        for gold in [
+            "docs/voyage.md::Departure",
+            "docs/handbook.md::Expense process",
+        ] {
+            let mut w = walk(WalkKind::Connection, &[gold]);
+            w.from = Some("Finance".into());
+            w.hops = Some(1);
+            let (pass, reached, reason) =
+                grade_connection_entity(&w, &starts, &|id| queries::entity_detail(store, id))
+                    .unwrap();
+            assert!(pass, "{gold}: {reason:?} {reached:?}");
+        }
     }
 
     #[test]

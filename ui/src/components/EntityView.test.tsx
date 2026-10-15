@@ -13,7 +13,11 @@ const onboarding: Entity = { id: 3, name: "Onboarding", type: "process", descrip
 const overlay: EntitiesPayload = { entities: [okta, desk], relations: [], mentions: [], truncated: true };
 const oktaDetail: EntityDetail = {
   entity: okta,
-  relations: [{ id: 5, src: 2, dst: 1, description: "administers", symbol_id: 20, path: "docs/it.md", name: "Desk" }],
+  relations: [
+    { id: 5, src: 2, dst: 1, description: "administers", symbol_id: 20, path: "docs/it.md", name: "Desk", src_name: "IT desk", dst_name: "Okta" },
+    // The far end is past the overlay's cap: only the relation's own name says who it is.
+    { id: 6, src: 1, dst: 77, description: "provisions", symbol_id: 21, path: "docs/handbook.md", name: "Onboarding", src_name: "Okta", dst_name: "Slack" },
+  ],
   mentions: [{ entity_id: 1, symbol_id: 20, path: "docs/it.md", name: "Desk" }, { entity_id: 1, symbol_id: 21, path: "docs/handbook.md", name: "Onboarding" }],
   steps: null,
 };
@@ -24,15 +28,18 @@ const onboardingDetail: EntityDetail = {
 const details: Record<number, EntityDetail> = { 1: oktaDetail, 3: onboardingDetail };
 let urls: string[] = [];
 let failDetail = false;
+let failSearch = false;
 
 beforeEach(() => {
   urls = [];
   failDetail = false;
+  failSearch = false;
   setToken("t");
   globalThis.fetch = mock(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://x");
     urls.push(url.pathname + url.search);
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "Content-Type": "application/json" } });
+    if (url.pathname === "/api/entities/search" && failSearch) return new Response(JSON.stringify({ error: "boom" }), { status: 500 });
     if (url.pathname === "/api/entities/search") {
       const q = (url.searchParams.get("q") ?? "").toLowerCase();
       return json({ entities: [okta, desk, onboarding].filter((e) => e.name.toLowerCase().startsWith(q)) });
@@ -51,7 +58,7 @@ test("the entity view fetches the detail and renders its mentions and relations"
   expect(within(mentions).getAllByRole("listitem")).toHaveLength(2);
   expect(urls).toContain("/api/entities/1");
   const relations = screen.getByRole("list", { name: "Relations" });
-  expect(relations.textContent).toBe("IT desk → Okta: administers");
+  expect(within(relations).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["IT desk → Okta: administers", "Okta → Slack: provisions"]);
   expect((await axe.run(container)).violations).toEqual([]);
 });
 
@@ -84,4 +91,13 @@ test("the entity list shows the overlay's top entities, and Find an entity lists
   expect((await axe.run(container)).violations).toEqual([]);
   await user.clear(screen.getByRole("searchbox", { name: "Find an entity" }));
   await waitFor(() => expect(within(screen.getByRole("list", { name: "Entities" })).getAllByRole("button")).toHaveLength(2));
+});
+
+test("a failed entity search says so instead of claiming no match", async () => {
+  failSearch = true;
+  const user = userEvent.setup();
+  render(<EntityList entities={overlay} onFocusEntity={() => {}} />);
+  await user.type(screen.getByRole("searchbox", { name: "Find an entity" }), "okt");
+  expect(await screen.findByText("Could not search entities.")).toBeTruthy();
+  expect(screen.queryByText("No entities match.")).toBeNull();
 });

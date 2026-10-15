@@ -34,7 +34,7 @@ export function EntityView({ entity, entities, onFocusSection }: { entity: Entit
   const loading = !current || (!current.detail && !current.failed);
   const mentions = detail ? detail.mentions : entities ? mentionsOf(entities, entity.id) : [];
   const relations = detail ? detail.relations : entities ? relationsOf(entities, entity.id) : [];
-  // Relation ends are named from the overlay plus this entity itself; an end outside both reads `entity <id>`.
+  // Relations name their own ends; the overlay plus this entity is the fallback for older rows.
   const names: EntitiesPayload = { entities: [entity, ...(entities?.entities ?? [])], relations: [], mentions: [], truncated: false };
   const steps = detail?.steps ?? null;
   return (
@@ -87,14 +87,14 @@ export function EntityList({ entities, onFocusEntity }: { entities: EntitiesPayl
   const top = entities ? topEntities(entities, 10) : [];
   const [text, setText] = useState("");
   const q = useDebounced(text.trim(), 200);
-  const [found, setFound] = useState<{ q: string; entities: Entity[] } | null>(null);
+  const [found, setFound] = useState<{ q: string; entities: Entity[]; failed?: boolean } | null>(null);
   const gen = useRef(0);
   useEffect(() => {
     const my = ++gen.current;
     if (!q) { setFound(null); return; }
     api.entitySearch(q).then(
       (r) => { if (my === gen.current) setFound({ q, entities: r.entities }); },
-      () => { if (my === gen.current) setFound({ q, entities: [] }); },
+      () => { if (my === gen.current) setFound({ q, entities: [], failed: true }); },
     );
   }, [q]);
   if (top.length === 0 && !text) return null;
@@ -106,7 +106,7 @@ export function EntityList({ entities, onFocusEntity }: { entities: EntitiesPayl
       <label className="mt-1 block text-sm">Find an entity
         <input type="search" className="mt-1 block w-full rounded border bg-background px-2 py-1" value={text} onChange={(e) => setText(e.target.value)} />
       </label>
-      {searching ? <p className="mt-1 text-sm text-muted-foreground">Loading…</p> : shown.length === 0 ? <p className="mt-1 text-sm text-muted-foreground">No entities match.</p> : (
+      {searching ? <p className="mt-1 text-sm text-muted-foreground">Loading…</p> : q && found?.failed ? <p className="mt-1 text-sm text-muted-foreground">Could not search entities.</p> : shown.length === 0 ? <p className="mt-1 text-sm text-muted-foreground">No entities match.</p> : (
         <ul aria-labelledby="entity-list-heading" className="mt-1 flex flex-col items-start gap-1">
           {shown.map((e) => (
             <li key={e.id}>

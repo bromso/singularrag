@@ -20,15 +20,23 @@ const payload: ProcessesPayload = { processes: [
 // The server, as the view sees it: filters `payload` (or `all`) by `q` and `role`, pages it.
 let all: Process[] = payload.processes;
 let requests: URLSearchParams[] = [];
+// When set, every processes request answers 500.
+let failing = false;
+// When set, a request with a `q` waits on it, so a test can look while a filter change is pending.
+let qGate: Promise<void> | null = null;
 beforeEach(() => {
   all = payload.processes;
   requests = [];
+  failing = false;
+  qGate = null;
   setToken("t");
   globalThis.fetch = mock(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://x");
     if (url.pathname !== "/api/processes") return new Response("not found", { status: 404 });
     const p = url.searchParams;
     requests.push(p);
+    if (failing) return new Response(JSON.stringify({ error: "lock timeout" }), { status: 500 });
+    if (qGate && p.get("q")) await qGate;
     const q = (p.get("q") ?? "").toLowerCase();
     const role = p.get("role");
     const offset = Number(p.get("offset") ?? 0), limit = Number(p.get("limit") ?? 50);
@@ -110,7 +118,7 @@ test("Find a process narrows the list through the fetch, debounced", async () =>
   expect(processButtons()[0].textContent).toContain("Release process");
   // One request for the settled text, not one per keystroke.
   expect(requests.filter((r) => r.get("q") !== null).map((r) => r.get("q"))).toEqual(["release"]);
-  expect(screen.getByRole("status").textContent).toBe("Showing 1 of 1 processes");
+  expect(screen.getByRole("status").textContent).toBe("Showing 1 of 1 process");
 });
 
 test("Show more appends the next page while fewer than the total are shown", async () => {
@@ -142,4 +150,37 @@ test("a bumped changeSeq refetches, keeping as many processes as were shown", as
   await act(async () => { rerender(view({ changeSeq: 1 })); });
   await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Showing 71 of 71 processes"));
   expect(requests.length).toBeGreaterThan(before);
+});
+
+test("a failed load says so instead of claiming nothing was extracted", async () => {
+  failing = true;
+  render(view({ pending: 12 }));
+  expect(await screen.findByText("Could not load processes.", { selector: "p:not([role])" })).toBeTruthy();
+  expect(screen.queryByText(/No processes extracted yet/)).toBeNull();
+  expect(screen.getByRole("status").textContent).toBe("Could not load processes.");
+  // The search field stays usable.
+  expect((screen.getByRole("searchbox", { name: "Find a process" }) as HTMLInputElement).disabled).toBe(false);
+});
+
+test("a failed refetch after a filter change does not keep the old list under the new filter", async () => {
+  const user = userEvent.setup();
+  render(view());
+  await waitFor(() => expect(processButtons()).toHaveLength(2));
+  failing = true;
+  await user.type(screen.getByRole("searchbox", { name: "Find a process" }), "rel");
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Could not load processes."));
+  expect(screen.queryByRole("list", { name: "Processes" })).toBeNull();
+});
+
+test("while a filter change is pending the status reads Loading…, not the old count", async () => {
+  let open!: () => void;
+  qGate = new Promise<void>((r) => { open = r; });
+  const user = userEvent.setup();
+  render(view());
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Showing 2 of 2 processes"));
+  await user.type(screen.getByRole("searchbox", { name: "Find a process" }), "rel");
+  await waitFor(() => expect(requests.some((r) => r.get("q") === "rel")).toBe(true));
+  expect(screen.getByRole("status").textContent).toBe("Loading…");
+  await act(async () => { open(); });
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Showing 1 of 1 process"));
 });

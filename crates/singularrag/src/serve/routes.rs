@@ -502,6 +502,18 @@ mod tests {
         let rels = d["relations"].as_array().unwrap();
         assert_eq!(rels.len(), 3, "{d}");
         assert!(rels.iter().all(|r| r["src"] == id || r["dst"] == id));
+        // Each relation names both of its ends, so a far end outside the overlay reads by name.
+        let finance = rels
+            .iter()
+            .find(|r| {
+                r["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("reviews approved claims")
+            })
+            .expect("Finance → Expense process");
+        assert_eq!(finance["src_name"], "Finance", "{finance}");
+        assert_eq!(finance["dst_name"], "Expense process", "{finance}");
         let mentions = d["mentions"].as_array().unwrap();
         assert!(!mentions.is_empty(), "{d}");
         assert!(mentions.iter().all(|m| m["entity_id"] == id));

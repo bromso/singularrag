@@ -20,10 +20,11 @@ export function entitiesInSymbol(p: EntitiesPayload, symbolId: number): Entity[]
 }
 export const relationsInSymbol = (p: EntitiesPayload, symbolId: number): Relation[] => p.relations.filter((r) => r.symbol_id === symbolId);
 
-/** `src → dst: description`. A truncated payload may lack an endpoint: it reads as `entity <id>`. */
+/** `src → dst: description`. The relation's own end names win; without them an end is looked
+ *  up in the payload, and an end in neither reads as `entity <id>`. */
 export function relationText(p: EntitiesPayload, r: Relation): string {
-  const name = (id: number) => p.entities.find((e) => e.id === id)?.name ?? `entity ${id}`;
-  return `${name(r.src)} → ${name(r.dst)}: ${r.description}`;
+  const name = (id: number, own?: string) => own || (p.entities.find((e) => e.id === id)?.name ?? `entity ${id}`);
+  return `${name(r.src, r.src_name)} → ${name(r.dst, r.dst_name)}: ${r.description}`;
 }
 
 /** Symbol kinds that are prose, where extraction runs: only these list entities in the panel. */

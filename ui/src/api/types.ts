@@ -39,7 +39,8 @@ export type QueryResult = { retrieval_id: number; served: number; cut: number };
 /** Entity types the extractor emits: person, organisation, system, concept, event, place, document, process, role. */
 export type Entity = { id: number; name: string; type: string; description: string; mentions: number };
 /** A relation between two entities, stated by one section (`symbol_id`, at `path` / `name`). */
-export type Relation = { id: number; src: number; dst: number; description: string; symbol_id: number; path: string; name: string };
+/** `src_name` / `dst_name` name both ends, so a far end past the overlay's cap still reads by name. */
+export type Relation = { id: number; src: number; dst: number; description: string; symbol_id: number; path: string; name: string; src_name: string; dst_name: string };
 export type Mention = { entity_id: number; symbol_id: number; path: string; name: string };
 /** The overlay: the top 500 entities by mentions, and the relations and mentions among them only.
  *  `truncated` is set when more entities exist; those are reached through search and detail. */
