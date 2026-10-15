@@ -6,12 +6,14 @@
 //! that flag only withholds freshly-extracted entities, not the names already indexed.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use rusqlite::params;
 use serde::Serialize;
 use singularrag_core::blast::{blast_radius, Blast, MAX_DEPTH, MAX_FILES};
+use singularrag_core::changed::{changed, Changed};
 use singularrag_core::config::MapConfig;
 use singularrag_core::engine::{Engine, MapRequest};
 use singularrag_core::knowledge::norm_name;
@@ -34,7 +36,6 @@ pub struct WalkOptions {
     /// An explicit `--budget`; `None` when the flag was absent.
     pub budget: Option<usize>,
     /// The walk file's directory: `change` patches are relative to it.
-    #[allow(dead_code)] // read by the change walks (Task 4)
     pub walk_dir: PathBuf,
 }
 
@@ -221,6 +222,164 @@ fn served_keys(engine: &Engine, retrieval_id: i64) -> Result<Vec<String>> {
     Ok(keys)
 }
 
+/// A change walk passes when the changed list holds every gold key (unlike locate's "any":
+/// a change walk asks "does the list contain all of these").
+pub fn grade_change(gold: &[String], c: &Changed) -> (bool, Vec<String>, Option<String>) {
+    let reached: Vec<String> = c
+        .symbols
+        .iter()
+        .map(|s| format!("{}::{}", s.path, s.name))
+        .collect();
+    match gold.iter().find(|g| !reached.contains(g)) {
+        Some(missing) => (
+            false,
+            reached,
+            Some(format!("{missing} not in the changed list")),
+        ),
+        None => (true, reached, None),
+    }
+}
+
+/// Every file a patch touches (`--- a/<path>` and `+++ b/<path>`), once each, in order;
+/// `/dev/null` (the old side of a new file, the new side of a deleted one) is skipped.
+pub fn patch_paths(patch: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in patch.lines() {
+        let Some(p) = line
+            .strip_prefix("+++ b/")
+            .or_else(|| line.strip_prefix("--- a/"))
+        else {
+            continue;
+        };
+        let p = p.trim_end();
+        if p != "/dev/null" && !out.iter().any(|o| o == p) {
+            out.push(p.to_string());
+        }
+    }
+    out
+}
+
+/// `git -C root <args>`: `Ok(stdout)`, or `Err(first stderr line)` when git fails.
+fn git_run(root: &Path, args: &[&str]) -> Result<std::result::Result<String, String>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|e| anyhow!("running git: {e}"))?;
+    if out.status.success() {
+        Ok(Ok(String::from_utf8_lossy(&out.stdout).into_owned()))
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        Ok(Err(err.lines().next().unwrap_or("").trim().to_string()))
+    }
+}
+
+fn git(root: &Path, args: &[&str]) -> Result<String> {
+    git_run(root, args)?.map_err(|e| anyhow!("git {}: {e}", args.join(" ")))
+}
+
+/// Clean means no tracked edit and no untracked file, ignoring our own index directory
+/// (`.singularrag/`, which opening the engine creates inside the corpus root).
+fn is_clean(root: &Path) -> Result<bool> {
+    Ok(git(
+        root,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).singularrag",
+        ],
+    )?
+    .trim()
+    .is_empty())
+}
+
+/// `git apply --check`, then `git apply`; a failed check is `patch does not apply: <why>`.
+fn apply_patch(root: &Path, patch: &Path) -> Result<()> {
+    let p = patch.to_string_lossy();
+    if let Err(why) = git_run(root, &["apply", "--check", &p])? {
+        return Err(anyhow!("patch does not apply: {why}"));
+    }
+    git(root, &["apply", &p]).map(|_| ())
+}
+
+/// Tracked edits go back with `checkout`; a file the patch added has nothing to check out,
+/// so that error is ignored and `clean` removes it. One `checkout` per path: git refuses
+/// the whole call when any one pathspec matches nothing, which would leave every edit.
+fn revert(root: &Path, paths: &[String]) -> Result<()> {
+    for p in paths {
+        let _ = git(root, &["checkout", "--", p]);
+    }
+    let mut args: Vec<&str> = vec!["clean", "-fd", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    git(root, &args).map(|_| ())
+}
+
+/// Reverts the patched paths when dropped, so an error between apply and grade (a failed
+/// refresh, a failed `changed`) still leaves the checkout as it was.
+struct Revert {
+    root: PathBuf,
+    paths: Vec<String>,
+}
+
+impl Drop for Revert {
+    fn drop(&mut self) {
+        if let Err(e) = revert(&self.root, &self.paths) {
+            eprintln!(
+                "walk: reverting {} in {} failed: {e}",
+                self.paths.join(", "),
+                self.root.display()
+            );
+        }
+    }
+}
+
+/// A change walk: refuse unless the walk file lives outside the corpus and the checkout is
+/// clean; apply the walk's patch, index, read the changed list, grade, and revert.
+fn run_change(
+    engine: &mut Engine,
+    w: &Walk,
+    opts: &WalkOptions,
+) -> Result<(bool, Vec<String>, Option<String>)> {
+    let refuse = |why: String| Ok((false, vec![], Some(why)));
+    let root = engine.workspace().dir.clone();
+    let walk_dir = opts
+        .walk_dir
+        .canonicalize()
+        .unwrap_or_else(|_| opts.walk_dir.clone());
+    if walk_dir.starts_with(&root) {
+        return refuse("walk file lives inside the corpus: refused".into());
+    }
+    match is_clean(&root) {
+        Ok(true) => {}
+        Ok(false) => return refuse("checkout is dirty: refused".into()),
+        Err(e) => return refuse(format!("{e}: refused")),
+    }
+    let rel = w.patch.as_deref().unwrap_or_default();
+    let patch_file = match walk_dir.join(rel).canonicalize() {
+        Ok(p) => p,
+        Err(e) => return refuse(format!("patch {rel}: {e}")),
+    };
+    let paths = patch_paths(&std::fs::read_to_string(&patch_file)?);
+    if let Err(e) = apply_patch(&root, &patch_file) {
+        return refuse(e.to_string());
+    }
+    let guard = Revert {
+        root: root.clone(),
+        paths,
+    };
+    engine.refresh(Duration::from_secs(600))?;
+    let config = MapConfig::load(&root)?;
+    let c = changed(engine.store(), &config, engine.workspace(), None)?;
+    drop(guard);
+    // Re-index the reverted tree, so later walks in the file see the corpus as it is.
+    engine.refresh(Duration::from_secs(600))?;
+    Ok(grade_change(&w.gold, &c))
+}
+
 pub fn run_walks(
     engine: &mut Engine,
     file: &WalkFile,
@@ -267,7 +426,7 @@ pub fn run_walks(
                     grade_connection_entity(w, entities.as_ref().expect("loaded above"))
                 }
             }
-            WalkKind::Change => (false, vec![], Some("not implemented".to_string())),
+            WalkKind::Change => run_change(engine, w, opts)?,
         };
         results.push(WalkResult {
             id: w.id.clone(),
@@ -647,5 +806,158 @@ mod tests {
             out.ends_with("walks 1/1 locate\nwalks 0/1 process\nwalks 1/2\n"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn patch_paths_lists_touched_files_once_including_new_ones() {
+        let p = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+z\n";
+        assert_eq!(patch_paths(p), vec!["src/a.ts", "src/new.ts"]);
+    }
+
+    #[test]
+    fn grade_change_needs_every_gold_in_the_list() {
+        use singularrag_core::changed::{Changed, ChangedSymbol};
+        let sym = |p: &str, n: &str| ChangedSymbol {
+            symbol_id: 1,
+            path: p.into(),
+            name: n.into(),
+            kind: "function".into(),
+            signature: String::new(),
+            line_start: 1,
+            line_end: 2,
+            referenced_by: vec![],
+        };
+        let c = Changed {
+            base: "HEAD".into(),
+            symbols: vec![sym("src/a.ts", "a"), sym("src/b.ts", "b")],
+            files_without_symbols: vec![],
+            truncated: false,
+        };
+        assert!(grade_change(&["src/a.ts::a".into()], &c).0);
+        let (pass, _, reason) = grade_change(&["src/a.ts::a".into(), "src/c.ts::c".into()], &c);
+        assert!(!pass);
+        assert_eq!(
+            reason.as_deref(),
+            Some("src/c.ts::c not in the changed list")
+        );
+    }
+
+    /// A temp git repo with `files` committed.
+    fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (p, body) in files {
+            let f = root.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, body).unwrap();
+        }
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "one",
+            ],
+        ] {
+            git(root, &args).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn a_patch_adding_a_new_file_is_reverted_with_clean() {
+        let dir = repo(&[("a.txt", "x\n")]);
+        let root = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        let patch = outside.path().join("p.patch");
+        std::fs::write(&patch, "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+z\n").unwrap();
+        assert!(is_clean(root).unwrap());
+        apply_patch(root, &patch).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "y\n");
+        assert!(root.join("new.txt").exists());
+        revert(root, &["a.txt".into(), "new.txt".into()]).unwrap();
+        assert!(is_clean(root).unwrap());
+        assert!(!root.join("new.txt").exists());
+    }
+
+    const SESSION_TS: &str = "export function createSession() {\n  return 1;\n}\n";
+    const SESSION_PATCH: &str = "--- a/src/session.ts\n+++ b/src/session.ts\n@@ -1,3 +1,3 @@\n export function createSession() {\n-  return 1;\n+  return 2;\n }\n";
+
+    fn change_walk(gold: &[&str]) -> Walk {
+        let mut w = walk(WalkKind::Change, gold);
+        w.patch = Some("W.patch".into());
+        w
+    }
+
+    #[test]
+    fn a_dirty_checkout_is_refused_before_any_write() {
+        let dir = repo(&[("src/session.ts", SESSION_TS)]);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("W.patch"), SESSION_PATCH).unwrap();
+        let edited = "export function createSession() {\n  return 9;\n}\n";
+        std::fs::write(dir.path().join("src/session.ts"), edited).unwrap();
+        let mut engine = Engine::open(dir.path(), "walk-test").unwrap();
+        let opts = WalkOptions {
+            budget: None,
+            walk_dir: outside.path().to_path_buf(),
+        };
+        let w = change_walk(&["src/session.ts::createSession"]);
+        let (pass, reached, reason) = run_change(&mut engine, &w, &opts).unwrap();
+        assert!(!pass && reached.is_empty());
+        assert_eq!(reason.as_deref(), Some("checkout is dirty: refused"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/session.ts")).unwrap(),
+            edited,
+            "the uncommitted edit is untouched"
+        );
+    }
+
+    #[test]
+    fn a_walk_file_inside_the_corpus_is_refused() {
+        let dir = repo(&[("src/session.ts", SESSION_TS)]);
+        std::fs::create_dir_all(dir.path().join("walks")).unwrap();
+        let mut engine = Engine::open(dir.path(), "walk-test").unwrap();
+        let opts = WalkOptions {
+            budget: None,
+            walk_dir: dir.path().join("walks"),
+        };
+        let w = change_walk(&["src/session.ts::createSession"]);
+        assert_eq!(
+            run_change(&mut engine, &w, &opts).unwrap().2.as_deref(),
+            Some("walk file lives inside the corpus: refused")
+        );
+    }
+
+    #[test]
+    fn a_change_walk_applies_grades_and_leaves_the_checkout_clean() {
+        let dir = repo(&[("src/session.ts", SESSION_TS)]);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("W.patch"), SESSION_PATCH).unwrap();
+        let mut engine = Engine::open(dir.path(), "walk-test").unwrap();
+        engine.refresh(std::time::Duration::from_secs(600)).unwrap();
+        let opts = WalkOptions {
+            budget: None,
+            walk_dir: outside.path().to_path_buf(),
+        };
+        let w = change_walk(&["src/session.ts::createSession"]);
+        let (pass, reached, reason) = run_change(&mut engine, &w, &opts).unwrap();
+        assert!(pass, "{reached:?} {reason:?}");
+        assert_eq!(reached, vec!["src/session.ts::createSession"]);
+        assert!(is_clean(dir.path()).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/session.ts")).unwrap(),
+            SESSION_TS
+        );
+        // A patch that does not apply names git's reason and writes nothing.
+        std::fs::write(outside.path().join("W.patch"), "--- a/src/session.ts\n+++ b/src/session.ts\n@@ -1,3 +1,3 @@\n export function createSession() {\n-  return 7;\n+  return 8;\n }\n").unwrap();
+        let reason = run_change(&mut engine, &w, &opts).unwrap().2.unwrap();
+        assert!(reason.starts_with("patch does not apply: "), "{reason}");
+        assert!(is_clean(dir.path()).unwrap());
     }
 }
