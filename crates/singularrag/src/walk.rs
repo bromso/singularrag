@@ -601,7 +601,9 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
-            truncated: false,
+            total: 0,
+            offset: 0,
+            limit: 50,
         }
     }
 

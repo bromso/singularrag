@@ -450,83 +450,90 @@ pub fn graph(store: &Store, config: &singularrag_core::config::MapConfig) -> Res
     })
 }
 
-/// Caps for the knowledge overlay (task brief): entities ordered by `mentions` desc then
-/// `name`, relations and mentions ordered by id so paging (if ever added) is stable. Each
-/// cap is checked by asking for one row past the limit; three queries total, no N+1.
+/// The knowledge overlay: the top `ENTITY_CAP` entities by `mentions` desc (then `name`,
+/// `id`), and the relations and mentions *among those entities only* — a relation when
+/// both ends are in the set, a mention when its entity is. `truncated` is set only when
+/// more than `ENTITY_CAP` entities exist; anything past the cap is reached through
+/// `entities_search` and `entity_detail`, which have no cap of their own.
 const ENTITY_CAP: i64 = 500;
-const REL_MENTION_CAP: i64 = 2000;
 
 pub fn entities(store: &Store) -> Result<EntitiesDto> {
-    let conn = store.conn();
-    let mut truncated = false;
+    entities_capped(store, ENTITY_CAP)
+}
 
+const TOP_ENTITIES: &str =
+    "WITH top AS (SELECT id FROM entities ORDER BY mentions DESC, name, id LIMIT ?1)";
+
+fn entity_row(r: &rusqlite::Row) -> rusqlite::Result<EntityDto> {
+    Ok(EntityDto {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        r#type: r.get(2)?,
+        description: r.get(3)?,
+        mentions: r.get(4)?,
+    })
+}
+
+fn relation_row(r: &rusqlite::Row) -> rusqlite::Result<EntityRelationDto> {
+    Ok(EntityRelationDto {
+        id: r.get(0)?,
+        src: r.get(1)?,
+        dst: r.get(2)?,
+        description: r.get(3)?,
+        symbol_id: r.get(4)?,
+        path: r.get(5)?,
+        name: r.get(6)?,
+    })
+}
+
+fn mention_row(r: &rusqlite::Row) -> rusqlite::Result<EntityMentionDto> {
+    Ok(EntityMentionDto {
+        entity_id: r.get(0)?,
+        symbol_id: r.get(1)?,
+        path: r.get(2)?,
+        name: r.get(3)?,
+    })
+}
+
+const RELATION_SELECT: &str =
+    "SELECT r.id, r.src_entity, r.dst_entity, r.description, r.symbol_id, f.path, s.name
+       FROM relations r
+       JOIN symbols s ON s.id = r.symbol_id
+       JOIN files f ON f.id = s.file_id";
+
+const MENTION_SELECT: &str = "SELECT m.entity_id, m.symbol_id, f.path, s.name
+       FROM entity_mentions m
+       JOIN symbols s ON s.id = m.symbol_id
+       JOIN files f ON f.id = s.file_id";
+
+fn entities_capped(store: &Store, cap: i64) -> Result<EntitiesDto> {
+    let conn = store.conn();
     let mut stmt = conn.prepare(
-        "SELECT id, name, type, description, mentions FROM entities ORDER BY mentions DESC, name LIMIT ?1",
+        "SELECT id, name, type, description, mentions FROM entities ORDER BY mentions DESC, name, id LIMIT ?1",
     )?;
     let mut entities: Vec<EntityDto> = stmt
-        .query_map([ENTITY_CAP + 1], |r| {
-            Ok(EntityDto {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                r#type: r.get(2)?,
-                description: r.get(3)?,
-                mentions: r.get(4)?,
-            })
-        })?
+        .query_map([cap + 1], entity_row)?
         .collect::<std::result::Result<_, _>>()?;
-    if entities.len() as i64 > ENTITY_CAP {
-        entities.truncate(ENTITY_CAP as usize);
-        truncated = true;
-    }
+    let truncated = entities.len() as i64 > cap;
+    entities.truncate(cap as usize);
 
-    let mut stmt = conn.prepare(
-        "SELECT r.id, r.src_entity, r.dst_entity, r.description, r.symbol_id, f.path, s.name
-           FROM relations r
-           JOIN symbols s ON s.id = r.symbol_id
-           JOIN files f ON f.id = s.file_id
-          ORDER BY r.id
-          LIMIT ?1",
-    )?;
-    let mut relations: Vec<EntityRelationDto> = stmt
-        .query_map([REL_MENTION_CAP + 1], |r| {
-            Ok(EntityRelationDto {
-                id: r.get(0)?,
-                src: r.get(1)?,
-                dst: r.get(2)?,
-                description: r.get(3)?,
-                symbol_id: r.get(4)?,
-                path: r.get(5)?,
-                name: r.get(6)?,
-            })
-        })?
+    let mut stmt = conn.prepare(&format!(
+        "{TOP_ENTITIES} {RELATION_SELECT}
+          WHERE r.src_entity IN top AND r.dst_entity IN top
+          ORDER BY r.id"
+    ))?;
+    let relations: Vec<EntityRelationDto> = stmt
+        .query_map([cap], relation_row)?
         .collect::<std::result::Result<_, _>>()?;
-    if relations.len() as i64 > REL_MENTION_CAP {
-        relations.truncate(REL_MENTION_CAP as usize);
-        truncated = true;
-    }
 
-    let mut stmt = conn.prepare(
-        "SELECT m.entity_id, m.symbol_id, f.path, s.name
-           FROM entity_mentions m
-           JOIN symbols s ON s.id = m.symbol_id
-           JOIN files f ON f.id = s.file_id
-          ORDER BY m.entity_id, m.symbol_id
-          LIMIT ?1",
-    )?;
-    let mut mentions: Vec<EntityMentionDto> = stmt
-        .query_map([REL_MENTION_CAP + 1], |r| {
-            Ok(EntityMentionDto {
-                entity_id: r.get(0)?,
-                symbol_id: r.get(1)?,
-                path: r.get(2)?,
-                name: r.get(3)?,
-            })
-        })?
+    let mut stmt = conn.prepare(&format!(
+        "{TOP_ENTITIES} {MENTION_SELECT}
+          WHERE m.entity_id IN top
+          ORDER BY m.entity_id, m.symbol_id"
+    ))?;
+    let mentions: Vec<EntityMentionDto> = stmt
+        .query_map([cap], mention_row)?
         .collect::<std::result::Result<_, _>>()?;
-    if mentions.len() as i64 > REL_MENTION_CAP {
-        mentions.truncate(REL_MENTION_CAP as usize);
-        truncated = true;
-    }
 
     Ok(EntitiesDto {
         entities,
@@ -534,6 +541,95 @@ pub fn entities(store: &Store) -> Result<EntitiesDto> {
         mentions,
         truncated,
     })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntitySearchDto {
+    pub entities: Vec<EntityDto>,
+}
+
+const SEARCH_LIMIT: i64 = 20;
+
+/// `%`, `_` and the escape character itself, made literal for `LIKE … ESCAPE '\'`.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Up to 20 entities by name: the exact `norm_name` match first, then `norm_name` prefix
+/// matches by `mentions` desc (then `name`). A `q` that normalises to nothing finds none.
+pub fn entities_search(store: &Store, q: &str) -> Result<Vec<EntityDto>> {
+    let nq = singularrag_core::knowledge::norm_name(q);
+    if nq.is_empty() {
+        return Ok(vec![]);
+    }
+    let prefix = format!("{}%", like_escape(&nq));
+    let mut stmt = store.conn().prepare(
+        "SELECT id, name, type, description, mentions FROM entities
+          WHERE norm_name = ?1 OR norm_name LIKE ?2 ESCAPE '\\'
+          ORDER BY (norm_name = ?1) DESC, mentions DESC, name, id
+          LIMIT ?3",
+    )?;
+    let rows = stmt
+        .query_map(params![nq, prefix, SEARCH_LIMIT], entity_row)?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(rows)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityDetailDto {
+    pub entity: EntityDto,
+    pub relations: Vec<EntityRelationDto>,
+    pub mentions: Vec<EntityMentionDto>,
+    /// A `process` entity's steps, as `processes` renders them; `None` for any other type.
+    pub steps: Option<Vec<StepDto>>,
+}
+
+/// One entity with every relation it is either end of and every mention, uncapped; a
+/// process also carries its steps (which builds the code index, as `processes` does).
+pub fn entity_detail(store: &Store, id: i64) -> Result<Option<EntityDetailDto>> {
+    let conn = store.conn();
+    let Some(entity) = conn
+        .query_row(
+            "SELECT id, name, type, description, mentions FROM entities WHERE id = ?1",
+            [id],
+            entity_row,
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let mut stmt = conn.prepare(&format!(
+        "{RELATION_SELECT} WHERE r.src_entity = ?1 OR r.dst_entity = ?1 ORDER BY r.id"
+    ))?;
+    let relations = stmt
+        .query_map([id], relation_row)?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut stmt = conn.prepare(&format!(
+        "{MENTION_SELECT} WHERE m.entity_id = ?1 ORDER BY m.symbol_id"
+    ))?;
+    let mentions = stmt
+        .query_map([id], mention_row)?
+        .collect::<std::result::Result<_, _>>()?;
+    let steps = if entity.r#type == "process" {
+        let index = journeys::load_code_index(conn)?;
+        let p = journeys::process_steps(conn, &index, id)?;
+        Some(p.steps.into_iter().take(STEP_CAP).map(step_dto).collect())
+    } else {
+        None
+    };
+    Ok(Some(EntityDetailDto {
+        entity,
+        relations,
+        mentions,
+        steps,
+    }))
 }
 
 /// A `{id, name}` pair — the shape the UI wants for a step's systems, distinct from
@@ -586,10 +682,24 @@ pub struct ProcessDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcessesDto {
     pub processes: Vec<ProcessDto>,
-    pub truncated: bool,
+    /// The number of processes after the `q` and `role` filters, across every page.
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
 }
 
-const PROCESS_CAP: i64 = 200;
+/// A page of the processes query. `q` is a case-insensitive substring of the name, `role`
+/// an exact match against a process's roles; `limit` is clamped to `1..=PROCESS_PAGE_MAX`.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessQuery {
+    pub q: Option<String>,
+    pub role: Option<String>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+pub const PROCESS_PAGE_DEFAULT: usize = 50;
+pub const PROCESS_PAGE_MAX: usize = 200;
 const STEP_CAP: usize = 30;
 
 fn code_link_dto(c: journeys::CodeLink) -> CodeLinkDto {
@@ -629,30 +739,60 @@ fn step_dto(s: journeys::StepView) -> StepDto {
     }
 }
 
-/// Every `process` entity (name order), each with its steps, the distinct non-empty
-/// roles its steps use, and each step's derived "implemented by" code links.
+/// The first page of every `process` entity (name order), for callers that want it.
 pub fn processes(store: &Store) -> Result<ProcessesDto> {
-    processes_with(store, journeys::load_code_index)
+    processes_page(
+        store,
+        &ProcessQuery {
+            q: None,
+            role: None,
+            offset: 0,
+            limit: PROCESS_PAGE_DEFAULT,
+        },
+    )
 }
 
-/// `processes` with the code index builder passed in (tests count its calls).
+/// One page of `process` entities in name order, each with its steps, the distinct
+/// non-empty roles its steps use, and each step's derived "implemented by" code links.
+///
+/// Without `role`, only the rows (id, name, description) of every `q`-matching process are
+/// loaded; steps and roles are built for the page alone. With `role`, roles live in the
+/// steps, so steps are built for *every* `q`-matching process before filtering and paging:
+/// that request costs one `process_steps` per matching process, not per page.
+pub fn processes_page(store: &Store, query: &ProcessQuery) -> Result<ProcessesDto> {
+    processes_with(store, query, journeys::load_code_index)
+}
+
+/// `processes_page` with the code index builder passed in (tests count its calls).
 fn processes_with(
     store: &Store,
+    query: &ProcessQuery,
     build_index: impl FnOnce(&rusqlite::Connection) -> Result<journeys::CodeIndex>,
 ) -> Result<ProcessesDto> {
     let conn = store.conn();
+    let limit = query.limit.clamp(1, PROCESS_PAGE_MAX);
+    let offset = query.offset;
+    let q = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(like_escape);
+    let role = query.role.as_deref().filter(|r| !r.is_empty());
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description FROM entities
+          WHERE type = 'process'
+            AND (?1 IS NULL OR LOWER(name) LIKE '%' || LOWER(?1) || '%' ESCAPE '\\')
+          ORDER BY name, id",
+    )?;
+    let rows: Vec<(i64, String, String)> = stmt
+        .query_map([q], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+
     // Built on the first process only: an index without processes never scans the code.
     let mut build_index = Some(build_index);
     let mut index: Option<journeys::CodeIndex> = None;
-    let mut stmt = conn.prepare(
-        "SELECT id, name, description FROM entities WHERE type = 'process' ORDER BY name LIMIT ?1",
-    )?;
-    let rows: Vec<(i64, String, String)> = stmt
-        .query_map([PROCESS_CAP + 1], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<std::result::Result<_, _>>()?;
-    let truncated = rows.len() as i64 > PROCESS_CAP;
-    let mut processes = Vec::new();
-    for (id, name, description) in rows.into_iter().take(PROCESS_CAP as usize) {
+    let mut build = |id: i64, name: String, description: String| -> Result<ProcessDto> {
         if let Some(build) = build_index.take() {
             index = Some(build(conn)?);
         }
@@ -666,17 +806,46 @@ fn processes_with(
         roles.sort();
         roles.dedup();
         let steps = p.steps.into_iter().take(STEP_CAP).map(step_dto).collect();
-        processes.push(ProcessDto {
+        Ok(ProcessDto {
             id,
             name,
             description,
             roles,
             steps,
-        });
-    }
+        })
+    };
+
+    let (total, processes) = match role {
+        None => {
+            let total = rows.len();
+            let page = rows
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|(id, name, description)| build(id, name, description))
+                .collect::<Result<Vec<_>>>()?;
+            (total, page)
+        }
+        Some(role) => {
+            let mut matching = Vec::new();
+            for (id, name, description) in rows {
+                let p = build(id, name, description)?;
+                if p.roles.iter().any(|r| r == role) {
+                    matching.push(p);
+                }
+            }
+            let total = matching.len();
+            (
+                total,
+                matching.into_iter().skip(offset).take(limit).collect(),
+            )
+        }
+    };
     Ok(ProcessesDto {
         processes,
-        truncated,
+        total,
+        offset,
+        limit,
     })
 }
 
@@ -686,12 +855,56 @@ mod tests {
     use singularrag_core::engine::{Engine, FindRequest, MapRequest};
     use singularrag_core::fixture::write_ts_mini;
     use singularrag_core::store::Store;
+    use std::collections::HashSet;
 
     #[test]
     fn processes_on_an_index_without_processes_builds_no_code_index() {
         let (_dir, store) = seeded();
-        let dto = processes_with(&store, |_| panic!("the code index was built")).unwrap();
-        assert!(dto.processes.is_empty() && !dto.truncated);
+        let dto = processes_with(&store, &ProcessQuery::default(), |_| {
+            panic!("the code index was built")
+        })
+        .unwrap();
+        assert!(dto.processes.is_empty() && dto.total == 0);
+    }
+
+    #[test]
+    fn the_overlay_keeps_only_relations_and_mentions_among_the_returned_entities() {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_prose(dir.path());
+        let mut e = Engine::open(dir.path(), "t").unwrap();
+        e.refresh(std::time::Duration::from_secs(120)).unwrap();
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../singularrag-core/fixtures/prose/extraction.json"
+        ))
+        .unwrap();
+        singularrag_core::knowledge::load_extraction_json(e.store(), None, &json).unwrap();
+        let all = entities(e.store()).unwrap();
+        assert!(!all.truncated);
+        let d = entities_capped(e.store(), 3).unwrap();
+        assert!(d.truncated);
+        assert_eq!(d.entities.len(), 3);
+        let ids: HashSet<i64> = d.entities.iter().map(|x| x.id).collect();
+        assert_eq!(
+            d.entities.iter().map(|x| x.id).collect::<Vec<_>>(),
+            all.entities[..3].iter().map(|x| x.id).collect::<Vec<_>>()
+        );
+        assert!(!d.relations.is_empty() && !d.mentions.is_empty());
+        assert!(d
+            .relations
+            .iter()
+            .all(|r| ids.contains(&r.src) && ids.contains(&r.dst)));
+        assert!(d.mentions.iter().all(|m| ids.contains(&m.entity_id)));
+        let among = all
+            .relations
+            .iter()
+            .filter(|r| ids.contains(&r.src) && ids.contains(&r.dst))
+            .count();
+        assert_eq!(
+            d.relations.len(),
+            among,
+            "every relation among the set is kept"
+        );
     }
 
     fn seeded() -> (tempfile::TempDir, Store) {
