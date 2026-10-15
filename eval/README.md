@@ -411,6 +411,8 @@ The vault set (`~/.singularrag/questions-vault.toml`) does not exist yet and was
 
 ## Tier two
 
+*Retired as a release gate 2026-10-12 (walks design): five runs on three corpora, the last on the GitLab handbook with both conditions at 1.00, showed that an agent with grep does not need the map; the runs below stay as the record, the harness stays for anyone measuring an agent, and no release is judged by it. The gate is tier one plus the walks.*
+
 Fixtures under `crates/singularrag-bench/tests/fixtures/` are recorded streams with identifiers removed.
 
 Smoke run 2026-09-20 (one question, one repeat, two conditions; the run directory was outside the repo):

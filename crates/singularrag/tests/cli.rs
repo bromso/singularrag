@@ -417,6 +417,15 @@ fn readme_lists_six_tools_and_the_models_setup() {
 }
 
 #[test]
+fn readme_says_who_the_product_is_for() {
+    let readme =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
+    for needle in ["for a person understanding a corpus", "`singularrag walk`"] {
+        assert!(readme.contains(needle), "README lacks `{needle}`");
+    }
+}
+
+#[test]
 fn the_docs_question_file_loads_and_names_sections_that_exist() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),

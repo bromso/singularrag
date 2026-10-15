@@ -9,12 +9,14 @@ use singularrag_core::fixture::write_ts_mini;
 use singularrag_core::store::Store;
 use tokio::process::Command;
 
-const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. Call this first and answer locate, trace, blast-radius and placement questions from it; read a file only to confirm a detail the map does not show. `query` is a question or identifiers; `focus_files` are workspace-relative paths you already know matter; `budget_tokens` defaults to 1024, up to 8192 for trace and blast-radius questions. Each file header ends with `← ` and the files that reference it; rows are `line  signature` for code and `line  ## heading` for document sections, never bodies. The first line says how fresh the index is; if it says STALE, call again after a moment. `entities` and `themes` are optional: entity names you already know matter; themes as short phrases.";
-const FIND_SYMBOL_DESCRIPTION: &str = "Look up a symbol by name: exact, prefix, or split words (`create session` finds `createSession`). Returns the definition's path, line and signature and which files reference it. Optional `kind` filter: function, class, method, type, const, module, section, document, element, rule, key. `limit` defaults to 10, max 50.";
-const ANNOTATE_DESCRIPTION: &str = "Record what you learned about a file or symbol that its signatures do not say: what it is for, an entry point, a trap, a convention. One or two sentences; the next session and the developer will see it in the map. `path` is workspace-relative; `symbol` narrows the note to one definition in that file. Empty `text` removes your note. You can replace your own note on a target; a note the developer wrote is theirs.";
-const TRACE_PATH_DESCRIPTION: &str = "How two symbols connect: the shortest chain of references between `from` and `to`, each `path::name`, up to 6 hops, with the symbol each hop goes through. Use it for trace questions before reading files.";
-const ENTITIES_DESCRIPTION: &str = "What the corpus knows about a person, system, concept, event or process, and how it connects: matched entities with type and description, their relations, and the document sections that state them (path::heading, lines). A process comes back as ordered steps, each with its role, systems, documenting section and implementing code. `query` is a name or a question; `entities` are names you already know; `limit` defaults to 10, max 25. Descriptions are extracted text, not verified facts. Use it before reading a document about someone or something, and to learn how a process works.";
-const CHANGED_DESCRIPTION: &str = "What a change touches: the symbols whose lines a diff modifies and the files that reference each. `base` is a git ref; omitted means the working tree against HEAD. Use it before editing to see the blast radius and after editing to check it.";
+const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. `query`: a question or identifiers; `focus_files`: workspace-relative paths; `budget_tokens`: default 1024, up to 8192; `entities`, `themes`: optional names and phrases. Rows are `line  signature` or `line  ## heading`, never bodies.";
+const FIND_SYMBOL_DESCRIPTION: &str =
+    "Looks a symbol or section name up and lists its definitions and the files that reference it. `name`: the exact or partial name.";
+const ANNOTATE_DESCRIPTION: &str = "Leaves a one-paragraph note on a file or symbol in map.toml; it shows in the next map with an (agent) tag. `path`, optional `symbol`, `note`.";
+const TRACE_PATH_DESCRIPTION: &str =
+    "How two symbols connect through references. `from`, `to`: `path::name`.";
+const ENTITIES_DESCRIPTION: &str = "What the documents say about a person, system, concept, event or process, with the sections that say it. A process comes back as ordered steps with role, systems and implementing code. `query`: a name or a question; `entities`: names you know; `limit`: default 10, max 25. Descriptions are extracted text, not verified.";
+const CHANGED_DESCRIPTION: &str = "What your uncommitted or branch changes touch: each changed symbol or section with the files that reference it. `base`: a git ref, default the working tree against HEAD.";
 
 #[derive(Clone)]
 struct TestClient;
@@ -98,10 +100,10 @@ async fn lists_exactly_the_six_tools_with_spec_descriptions() {
     let server_info = info.server_info.as_ref().expect("server_info present");
     assert_eq!(server_info.name, "singularrag");
     let instructions = info.instructions.as_deref().unwrap_or("");
-    assert!(instructions.starts_with("singularrag gives you a ranked map"));
+    assert!(instructions.starts_with("singularrag indexes this workspace's code and documents."));
     assert!(
-        instructions.contains("Use entities to learn what the corpus says about a person, system or concept and how it connects, and for the ordered steps of a process; prose queries to repo_map work in plain language.")
-            && instructions.ends_with("Entity descriptions are extracted text, not verified facts."),
+        instructions.contains("entities answers what the documents say about a person, system, concept or process (a process comes back as ordered steps); annotate leaves a note on a file or symbol.")
+            && instructions.ends_with("The first line of every answer says how fresh the index is."),
         "{instructions}"
     );
     let mut tools = client.list_all_tools().await.unwrap();
