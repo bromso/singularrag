@@ -463,14 +463,14 @@ Change walks apply their patch to the corpus checkout, read the changed list and
 
 hono's index holds no entities and no section embeddings, so a query embedding has nothing to seed and seeds on and off agree there.
 
-Failing walks at 4096, seeds on (reason verbatim, then the cause as far as it was traced):
+Failing walks at 4096, seeds on, at the baseline (reason verbatim, then the cause as far as it was traced):
 
 - R1 locate: `gold not served at 4096` (not traced).
 - R3 locate: `gold not served at 4096` (not traced).
-- R6 process: `no process cites docs/superpowers/specs/2026-09-20-singularrag-serve-design.md::2. Process model` (the citing process, `singularrag serve process`, exists with the Watcher role and the 300 ms step, but it is 335th by name and the processes route lists the first 200).
-- H8 process: `no process cites people-group/time-off-and-absence/leave-types.md::How to Initiate Your Leave` (the citing process, `Initiating Parental Leave`, is 431st by name; same 200 cap).
-- H11 connection: `people-group/offboarding/faq.md::1Password not within 1 hops of 1Password` (the extraction holds the mention; the entities route returns the first 2,000 of 4,728 mentions in entity-id order, which stops at entity 888, and 1Password is entity 911).
-- H12 connection: `people-group/relocation.md::Short-Term Stay Definition not within 2 hops of Compass` (the page's h4 "Considerations for Short-Term Travel", where it says to contact the People Team via Compass, is indexed inside this h3; the extraction puts the Compass mention on the enclosing h2 `Relocation / Address Change`, not on the gold h3).
+- R6 process: `no process cites docs/superpowers/specs/2026-09-20-singularrag-serve-design.md::2. Process model` (the citing process, `singularrag serve process`, exists with the Watcher role and the 300 ms step, but it is 335th by name and the processes route listed the first 200). **Passes since caps-v0.**
+- H8 process: `no process cites people-group/time-off-and-absence/leave-types.md::How to Initiate Your Leave` (the citing process, `Initiating Parental Leave`, is 431st by name; same 200 cap). **Passes since caps-v0.**
+- H11 connection: `people-group/offboarding/faq.md::1Password not within 1 hops of 1Password` (the extraction holds the mention; the entities route returned the first 2,000 of 4,728 mentions in entity-id order, which stopped at entity 888, and 1Password is entity 911). **Passes since caps-v0.**
+- H12 connection: `people-group/relocation.md::Short-Term Stay Definition not within 2 hops of Compass` (first read as an extraction limit, because the Compass mention sits on the enclosing h2 `Relocation / Address Change`; the caps-v0 re-run showed the path is two hops through a relation: Compass → `Visa` (relation 3197) → `Visa`'s mention on the gold h3. Relation 3197 was past the entities route's first 2,000 relations by id). **Passes since caps-v0.**
 - N1 locate: `gold not served at 4096` (not traced).
 - N2 locate: `gold not served at 4096` (not traced).
 - N4 locate: `gold not served at 4096` (not traced).
@@ -478,8 +478,34 @@ Failing walks at 4096, seeds on (reason verbatim, then the cause as far as it wa
 
 What the failures are:
 
-- Product defects, recorded as leads for the next plan: R6 and H8 (the processes route lists only the first 200 processes by name, so on the handbook only names A–D are visible out of 1,052); H11 (the entities route caps mentions at 2,000 in entity-id order); the entities route's own cap (`queries::entities` returns at most `ENTITY_CAP = 500` entities, by mention count, so on the handbook most of the 3,006 entities cannot be a connection walk's `from` and such a walk fails as `<from> not found`, which reads the same as a start that was never extracted); and the defect behind the code-only repo change walks (a re-index drops a document's extraction, so a document change walk would need the background tick to refill it from the cache).
-- Walk or extraction limits: H12 (the Compass mention sits on the enclosing h2, not the gold h3); N8 (`HonoBase` is an export alias, not a symbol); the locate misses R1, R3, N1, N2, N4 (not traced).
+- Product defects, fixed on `caps-v0`: the processes route listed only the first 200 processes by name (R6, H8; on the handbook only names A–D of 1,052 were visible), and the entities route capped relations and mentions at 2,000 rows each in id order (H11, H12) and entities at 500, so most of the handbook's 3,006 entities could not be a connection walk's `from`. The processes query is now searchable and paged (`q`, `role`, `offset`, `limit`, with a `total`), and an entity is reached through the entity search and detail queries, uncapped; the walks grade through the same paths. The overlay still draws the top 500 entities by mentions, with the relations and mentions among them.
+- Product defect, still a lead: a change walk re-indexes the patched file, and a re-indexed document's sections lose their extraction until the background tick refills it from the cache, which is why the repo file's change walks are code-only.
+- Walk or extraction limits: N8 (`HonoBase` is an export alias, not a symbol); the locate misses R1, R3, N1, N2, N4 (not traced).
+
+### After the caps fix (caps-v0, 2026-10-15)
+
+Same corpora, commits and recipe as the baseline; hono not re-run (no process or entity walks, and nothing on this branch touches its paths). Every walk that passed at the baseline still passes; R6, H8, H11 and H12 now pass in all four runs. `git status --porcelain` was empty in both corpora before and after every run.
+
+`walks-repo.toml` on `singularrag-pinned`:
+
+| | 2048 seeds on | 2048 seeds off | 4096 seeds on | 4096 seeds off |
+|---|---|---|---|---|
+| `walks N/3 locate` | 0/3 | 1/3 | 1/3 | 1/3 |
+| `walks N/3 process` | 3/3 | 3/3 | 3/3 | 3/3 |
+| `walks N/3 connection` | 3/3 | 3/3 | 3/3 | 3/3 |
+| `walks N/3 change` | 3/3 | 3/3 | 3/3 | 3/3 |
+| `walks N/12` | 9/12 | 10/12 | **10/12** | 10/12 |
+
+`walks-handbook.toml` on `handbook-corpus`:
+
+| | 2048 seeds on | 2048 seeds off | 4096 seeds on | 4096 seeds off |
+|---|---|---|---|---|
+| `walks N/4 locate` | 4/4 | 1/4 | 4/4 | 3/4 |
+| `walks N/4 process` | 4/4 | 4/4 | 4/4 | 4/4 |
+| `walks N/4 connection` | 4/4 | 4/4 | 4/4 | 4/4 |
+| `walks N/12` | 12/12 | 9/12 | **12/12** | 11/12 |
+
+Still failing at 4096 seeds on: R1, R3 (locate); on the handbook nothing. Seeds off, the handbook's H1 (and at 2048 also H2, H3) locate walks miss as at the baseline; R2 misses at 2048 seeds on as at the baseline.
 
 Under the gate rule (spec §5) a walk that fails at the baseline is a lead, not a regression: only a walk that passed and then fails breaks the gate.
 

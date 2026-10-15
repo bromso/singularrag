@@ -76,6 +76,8 @@ Models: `locate` embeds the query once when seeds are on; a `connection` walk's 
 
 *Amended 2026-10-15 (plan execution).* A connection walk's entity start resolves by `norm_name` only and makes no model call, because the entity panel the walk models is reached by a person choosing an entity by name, and a vector fallback would pass a walk through an entity the person could not find. `--no-models` therefore affects `locate` only.
 
+*Amended 2026-10-16 (caps).* The `process` grader pages through the processes query (`queries::processes_page`, 200 a page, until `offset >= total`), so no cap hides a process; the entity start resolves through the entity search and detail queries (`GET /api/entities/search`, exact `norm_name` matches only, then `GET /api/entities/{id}` per hop), the panel's own path, instead of the capped overlay behind `GET /api/entities`.
+
 Lives in `crates/singularrag/src/walk.rs` (runner, grader, report) with the walk file types in `crates/singularrag-core/src/walks.rs` (parse, validate: ids unique, gold non-empty, kinds known, `from` present for `connection`, `patch` present for `change`).
 
 ## 4. Corpora and the baseline

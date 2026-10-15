@@ -740,6 +740,8 @@ fn step_dto(s: journeys::StepView) -> StepDto {
 }
 
 /// The first page of every `process` entity (name order), for callers that want it.
+/// Nothing in the binary calls it today (the route and the walks page explicitly).
+#[allow(dead_code)]
 pub fn processes(store: &Store) -> Result<ProcessesDto> {
     processes_page(
         store,
@@ -865,6 +867,8 @@ mod tests {
         })
         .unwrap();
         assert!(dto.processes.is_empty() && dto.total == 0);
+        let first = processes(&store).unwrap();
+        assert_eq!((first.offset, first.limit, first.total), (0, 50, 0));
     }
 
     #[test]
