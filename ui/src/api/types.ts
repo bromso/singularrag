@@ -41,6 +41,8 @@ export type Entity = { id: number; name: string; type: string; description: stri
 /** A relation between two entities, stated by one section (`symbol_id`, at `path` / `name`). */
 export type Relation = { id: number; src: number; dst: number; description: string; symbol_id: number; path: string; name: string };
 export type Mention = { entity_id: number; symbol_id: number; path: string; name: string };
+/** The overlay: the top 500 entities by mentions, and the relations and mentions among them only.
+ *  `truncated` is set when more entities exist; those are reached through search and detail. */
 export type EntitiesPayload = { entities: Entity[]; relations: Relation[]; mentions: Mention[]; truncated: boolean };
 
 /** How a code symbol came to implement a step: the step's text names it, or it serves a system the step uses. */
@@ -53,4 +55,10 @@ export type Step = {
   code: CodeLink[]; more_code: number;
 };
 export type Process = { id: number; name: string; description: string; roles: string[]; steps: Step[] };
-export type ProcessesPayload = { processes: Process[]; truncated: boolean };
+/** One page of the processes query: `total` counts every process the filters match, across pages. */
+export type ProcessesPayload = { processes: Process[]; total: number; offset: number; limit: number };
+export type ProcessParams = { q?: string; role?: string; offset?: number; limit?: number };
+/** Up to 20 entities by name: the exact match first, then prefixes by mentions. */
+export type EntitySearchPayload = { entities: Entity[] };
+/** One entity with every relation it is either end of, every mention, and a process's steps. */
+export type EntityDetail = { entity: Entity; relations: Relation[]; mentions: Mention[]; steps?: Step[] | null };

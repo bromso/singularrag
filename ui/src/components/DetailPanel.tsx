@@ -5,7 +5,7 @@ import type { BlastResult, EntitiesPayload, MapConfig } from "@/api/types";
 import { PROSE_KINDS } from "@/lib/entities";
 import { reasonsToSentences } from "@/lib/reasons";
 import { agentNoteFor, boundariesOf, boundaryNames, isExcluded, isPinned, noteFor } from "@/lib/mapEdits";
-import { EntityList, EntityView, SymbolKnowledge, type FocusSection } from "./EntityView";
+import { EntityList, EntityView, SymbolKnowledge, type FocusEntity, type FocusSection } from "./EntityView";
 import type { TreeRow } from "./RepoTree";
 
 export function DetailPanel({ row: focused, map, entities, onFocusEntity, onFocusSection, onPin, onExclude, onNote, onRemoveAgentNote, blast, blastLoading, onToggleBlast, expandedPath, onToggleExpand, onAddBoundary, onRemoveBoundary }: {
@@ -15,7 +15,7 @@ export function DetailPanel({ row: focused, map, entities, onFocusEntity, onFocu
   blast: BlastResult | null; blastLoading: boolean; onToggleBlast: (path: string, symbol: string) => void;
   expandedPath: string | null; onToggleExpand: (path: string) => void;
   onAddBoundary: (name: string, path: string) => void; onRemoveBoundary: (name: string, path: string) => void;
-  entities: EntitiesPayload | null; onFocusEntity: (id: number) => void; onFocusSection: FocusSection;
+  entities: EntitiesPayload | null; onFocusEntity: FocusEntity; onFocusSection: FocusSection;
 }) {
   // A focused entity has its own view; the hooks below (the note draft) are about a file or symbol.
   const row = focused?.kind === "entity" ? null : focused;
