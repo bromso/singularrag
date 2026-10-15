@@ -539,7 +539,7 @@ fn sql_regexes() -> &'static (Regex, Regex, Regex, Regex) {
             Regex::new(r"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED)\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(;]+)").unwrap(),
             Regex::new(r"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(;]+)").unwrap(),
             Regex::new(r"(?is)^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?([^\s(;]+)\s+(.*)$").unwrap(),
-            Regex::new(r"(?is)REFERENCES\s+([^\s(,;]+)").unwrap(),
+            Regex::new(r"(?is)\bREFERENCES\s+([^\s(,;]+)").unwrap(),
         )
     })
 }
@@ -801,6 +801,19 @@ ALTER TABLE "website" DROP COLUMN "labels";
             fks,
             vec![("user".to_string(), 17), ("user".to_string(), 20)]
         );
+    }
+
+    #[test]
+    fn a_word_ending_in_references_is_not_a_foreign_key() {
+        let src = "CREATE TABLE t (\n  \"notes\" TEXT DEFAULT 'set your preferences here',\n  \"owner\" UUID REFERENCES \"user\"(\"user_id\")\n);\n";
+        let x = extract(Language::Sql, src).unwrap();
+        let fks: Vec<&str> = x
+            .tags
+            .iter()
+            .filter(|t| !t.is_definition)
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(fks, vec!["user"]);
     }
 
     #[test]
