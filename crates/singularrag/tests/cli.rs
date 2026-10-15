@@ -821,3 +821,31 @@ fn walk_names_the_reason_when_gold_is_wrong() {
                 .and(predicate::str::ends_with("walks 0/1 locate\nwalks 0/1\n")),
         );
 }
+
+#[test]
+fn the_corpus_walk_files_parse() {
+    use singularrag_core::walks::{load_walks, WalkKind};
+    let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../e", "val"));
+    // (file, locate, process, connection, change)
+    for (name, kinds) in [
+        ("walks-repo.toml", [3, 3, 3, 3]),
+        ("walks-handbook.toml", [4, 4, 4, 0]),
+        ("walks-hono.toml", [4, 0, 4, 4]),
+    ] {
+        let f = load_walks(&dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(f.walk.len(), 12, "{name}");
+        let count = |k: WalkKind| f.walk.iter().filter(|w| w.kind == k).count();
+        let got = [
+            count(WalkKind::Locate),
+            count(WalkKind::Process),
+            count(WalkKind::Connection),
+            count(WalkKind::Change),
+        ];
+        assert_eq!(got, kinds, "{name}: locate, process, connection, change");
+        // every change walk's patch is checked in beside the walk file
+        for w in f.walk.iter().filter(|w| w.kind == WalkKind::Change) {
+            let patch = dir.join(w.patch.as_deref().unwrap());
+            assert!(patch.is_file(), "{name} {}: {}", w.id, patch.display());
+        }
+    }
+}

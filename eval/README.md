@@ -409,6 +409,73 @@ singularrag --repo <dir> eval --questions eval/questions-prose.toml --budget <N>
 
 The vault set (`~/.singularrag/questions-vault.toml`) does not exist yet and was not run.
 
+## Walks
+
+A walk is one question a person brings, the path the UI offers for it (the retrieval panel, Journeys, an entity or symbol's connections, the change view), and a deterministic check that the path ends at a gold section or symbol within its bound. Four kinds, `locate`, `process`, `connection` and `change`; the format, the grader and the gate rule are in the walks spec (`docs/superpowers/specs/2026-10-12-singularrag-walks-design.md`, §2–§5).
+
+The gate (spec §5): per release, no walk that passed still fails. The baseline below is the first full run (2026-10-15, branch `walks-v0`, Ollama with `nomic-embed-text` and `qwen2.5:7b-instruct`) and is allowed to be poor: a failing walk is a lead, recorded here, not fixed.
+
+### Recipe
+
+Three corpus checkouts, each a clean git toplevel with `.singularrag/` in `.git/info/exclude`:
+
+- `walks-repo.toml`: `../singularrag-pinned` at `0c2ed54` (the `5ec066b` tree plus `docs/voyage.md` and `docs/handbook.md`, the real-model extraction from "First real-model run" above); 3 locate, 3 process, 3 connection, 3 change (`patches/repo-*.patch`).
+- `walks-handbook.toml`: `../handbook-corpus` at `7cf88f9` (the GitLab handbook `people-group` directory, extracted: 3,006 entities, 1,052 processes); 4 locate, 4 process, 4 connection.
+- `walks-hono.toml`: hono at `098e119`, indexed, no extraction; 4 locate, 4 connection (symbol starts), 4 change (`patches/hono-*.patch`).
+
+```
+singularrag --repo <corpus> walk --questions eval/walks-<corpus>.toml --budget 2048
+singularrag --repo <corpus> walk --questions eval/walks-<corpus>.toml --budget 4096
+singularrag --repo <corpus> walk --questions eval/walks-<corpus>.toml --budget 2048 --no-models
+singularrag --repo <corpus> walk --questions eval/walks-<corpus>.toml --budget 4096 --no-models
+```
+
+Change walks apply their patch to the corpus checkout, read the changed list and revert; they refuse a dirty checkout, so `git -C <corpus> status --porcelain` must be empty before a run (it was, before and after every run below). The repo file's change walks are code-only: a change walk re-indexes the patched file, and a re-indexed document's sections lose their entities and steps until a `serve` or `mcp` process drains the extraction queue (from the cache, no model call), which would make later runs depend on the order they ran in.
+
+### Baseline, 2026-10-15
+
+`walks-repo.toml` on `singularrag-pinned`:
+
+| | 2048 seeds on | 2048 seeds off | 4096 seeds on | 4096 seeds off |
+|---|---|---|---|---|
+| `walks N/3 locate` | 0/3 | 1/3 | 2/3 | 2/3 |
+| `walks N/3 process` | 2/3 | 2/3 | 2/3 | 2/3 |
+| `walks N/3 connection` | 3/3 | 3/3 | 3/3 | 3/3 |
+| `walks N/3 change` | 3/3 | 3/3 | 3/3 | 3/3 |
+| `walks N/12` | 8/12 | 9/12 | **10/12** | 10/12 |
+
+`walks-handbook.toml` on `handbook-corpus`:
+
+| | 2048 seeds on | 2048 seeds off | 4096 seeds on | 4096 seeds off |
+|---|---|---|---|---|
+| `walks N/4 locate` | 4/4 | 1/4 | 4/4 | 3/4 |
+| `walks N/4 process` | 3/4 | 3/4 | 3/4 | 3/4 |
+| `walks N/4 connection` | 2/4 | 2/4 | 2/4 | 2/4 |
+| `walks N/12` | 9/12 | 6/12 | **9/12** | 8/12 |
+
+`walks-hono.toml` on hono:
+
+| | 2048 seeds on | 2048 seeds off | 4096 seeds on | 4096 seeds off |
+|---|---|---|---|---|
+| `walks N/4 locate` | 0/4 | 0/4 | 1/4 | 1/4 |
+| `walks N/4 connection` | 3/4 | 3/4 | 3/4 | 3/4 |
+| `walks N/4 change` | 4/4 | 4/4 | 4/4 | 4/4 |
+| `walks N/12` | 7/12 | 7/12 | **8/12** | 8/12 |
+
+hono's index holds no entities and no section embeddings, so a query embedding has nothing to seed and seeds on and off agree there.
+
+Failing walks at 4096, seeds on (reason verbatim, then the cause as far as it was traced):
+
+- R1 locate: `gold not served at 4096` (the design spec's §8 is not among the served items for a question in everyday words).
+- R6 process: `no process cites docs/superpowers/specs/2026-09-20-singularrag-serve-design.md::2. Process model` (the citing process, `singularrag serve process`, exists with the Watcher role and the 300 ms step, but it is 335th by name and the processes route lists the first 200).
+- H8 process: `no process cites people-group/time-off-and-absence/leave-types.md::How to Initiate Your Leave` (the citing process, `Initiating Parental Leave`, is 431st by name; same 200 cap).
+- H11 connection: `people-group/offboarding/faq.md::1Password not within 1 hops of 1Password` (the extraction holds the mention; the entities route returns the first 2,000 of 4,728 mentions in entity-id order, which stops at entity 888, and 1Password is entity 911).
+- H12 connection: `people-group/relocation.md::Short-Term Stay Definition not within 2 hops of Compass` (the extraction has no Compass mention for that section, where the page says to contact the People Team via Compass).
+- N1 locate: `gold not served at 4096`.
+- N2 locate: `gold not served at 4096`.
+- N4 locate: `gold not served at 4096`.
+- N8 connection: `src/hono.ts::Hono not within 2 hops of src/utils/url.ts::getPath` (hop 1 reaches `src/hono-base.ts`; `src/hono.ts` imports it as `HonoBase`, an export alias that is not a symbol name, so hop 2 does not reach it).
+
 ## Tier two
 
 *Retired as a release gate 2026-10-12 (walks design): five runs on three corpora, the last on the GitLab handbook with both conditions at 1.00, showed that an agent with grep does not need the map; the runs below stay as the record, the harness stays for anyone measuring an agent, and no release is judged by it. The gate is tier one plus the walks.*

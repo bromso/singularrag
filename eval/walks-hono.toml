@@ -1,0 +1,88 @@
+# Walks over hono, a TypeScript web framework: the checkout /Users/jonasbroms/Sites/hono at
+# 098e119 (4.13.8), indexed, not extracted, its `.singularrag/` in `.git/info/exclude`.
+# Run from the repository root:
+#   singularrag --repo /Users/jonasbroms/Sites/hono walk --questions eval/walks-hono.toml --budget 4096
+# Change walks apply `patches/hono-*.patch` to that checkout and revert it; they refuse a
+# dirty checkout, so `git -C /Users/jonasbroms/Sites/hono status --porcelain` must be empty.
+
+# locate: everyday words, not the symbol's or heading's words
+
+[[walk]]
+id = "N1"
+kind = "locate"
+query = "how do I stop clients uploading files bigger than a few megabytes"
+gold = ["src/middleware/body-limit/index.ts::bodyLimit"]
+
+[[walk]]
+id = "N2"
+kind = "locate"
+query = "which web pages on other sites are allowed to call my API from the browser"
+gold = ["src/middleware/cors/index.ts::cors"]
+
+[[walk]]
+id = "N3"
+kind = "locate"
+query = "how are handlers chained so each one can run code before and after the next one"
+gold = ["src/compose.ts::compose"]
+
+[[walk]]
+id = "N4"
+kind = "locate"
+query = "the old Deno import URL stopped getting new versions, where do I install it from now"
+gold = ["docs/MIGRATION.md::`deno.land/x` to JSR"]
+
+# connection: from a code symbol (blast radius within hops)
+
+[[walk]]
+id = "N5"
+kind = "connection"
+from = "src/compose.ts::compose"
+hops = 1
+gold = ["src/middleware/combine/index.ts::every"]
+
+[[walk]]
+id = "N6"
+kind = "connection"
+from = "src/http-exception.ts::HTTPException"
+hops = 1
+gold = ["src/middleware/body-limit/index.ts::bodyLimit"]
+
+[[walk]]
+id = "N7"
+kind = "connection"
+from = "src/utils/cookie.ts::parse"
+hops = 1
+gold = ["src/helper/cookie/index.ts::getCookie"]
+
+[[walk]]
+id = "N8"
+kind = "connection"
+from = "src/utils/url.ts::getPath"
+gold = ["src/hono.ts::Hono"]
+
+# change: a one-line edit inside a function; gold = the symbol the edit sits in, plus the
+# enclosing symbol the changed list also names
+
+[[walk]]
+id = "N9"
+kind = "change"
+patch = "patches/hono-compose-dispatch.patch"
+gold = ["src/compose.ts::dispatch", "src/compose.ts::compose"]
+
+[[walk]]
+id = "N10"
+kind = "change"
+patch = "patches/hono-cors.patch"
+gold = ["src/middleware/cors/index.ts::cors"]
+
+[[walk]]
+id = "N11"
+kind = "change"
+patch = "patches/hono-body-limit.patch"
+gold = ["src/middleware/body-limit/index.ts::bodyLimit"]
+
+[[walk]]
+id = "N12"
+kind = "change"
+patch = "patches/hono-http-exception-get-response.patch"
+gold = ["src/http-exception.ts::getResponse", "src/http-exception.ts::HTTPException"]

@@ -1,0 +1,13 @@
+diff --git a/src/middleware/body-limit/index.ts b/src/middleware/body-limit/index.ts
+index 39fff710..679e33e5 100644
+--- a/src/middleware/body-limit/index.ts
++++ b/src/middleware/body-limit/index.ts
+@@ -60,7 +60,7 @@ export const bodyLimit = (options: BodyLimitOptions): MiddlewareHandler => {
+ 
+   return async function bodyLimit(c, next) {
+     if (!c.req.raw.body) {
+-      // maybe GET or HEAD request
++      // a GET or HEAD request has no body
+       return next()
+     }
+ 

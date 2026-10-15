@@ -1,0 +1,13 @@
+diff --git a/crates/singularrag/src/hook.rs b/crates/singularrag/src/hook.rs
+index 00e2f6d..69e8cbc 100644
+--- a/crates/singularrag/src/hook.rs
++++ b/crates/singularrag/src/hook.rs
+@@ -48,7 +48,7 @@ pub fn run(event: HookEvent, repo: Option<PathBuf>, input: &str) -> String {
+     let dir = marker_dir(session);
+     match event {
+         HookEvent::Map => {
+-            touch(&dir, "mapped");
++            touch(&dir, "mapped"); // a map call opens every later Read
+             ALLOW_JSON.to_string()
+         }
+         HookEvent::Read => {
