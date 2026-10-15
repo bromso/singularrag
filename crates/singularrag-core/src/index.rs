@@ -21,6 +21,44 @@ use crate::{Error, Result};
 
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Alias → table name (schema spec §3): every table name, plus a Prisma model's name and
+/// its lower-camel form. Rebuilt from `table_names` after the schema files of a run.
+pub type Vocab = HashMap<String, String>;
+
+pub fn load_vocab(conn: &Connection) -> Result<Vocab> {
+    let mut stmt =
+        conn.prepare("SELECT alias, table_name FROM table_names ORDER BY alias, table_name")?;
+    let mut v = Vocab::new();
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let (alias, table) = row?;
+        v.entry(alias).or_insert(table);
+    }
+    Ok(v)
+}
+
+/// A stable digest of the vocabulary, kept in `meta` as `table_vocab`; a run whose
+/// vocabulary differs from the stored one re-indexes every code file once.
+pub fn vocab_hash(v: &Vocab) -> String {
+    let mut pairs: Vec<(&String, &String)> = v.iter().collect();
+    pairs.sort();
+    let mut h = blake3::Hasher::new();
+    for (a, t) in pairs {
+        h.update(a.as_bytes());
+        h.update(b"\t");
+        h.update(t.as_bytes());
+        h.update(b"\n");
+    }
+    h.finalize().to_hex()[..12].to_string()
+}
+
+fn is_schema_path(p: &str) -> bool {
+    Language::from_path(p).is_some_and(|l| l.is_schema())
+}
+
+fn is_code_path(p: &str) -> bool {
+    Language::from_path(p).is_some_and(|l| !l.is_schema() && !l.is_document())
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct IndexStats {
     pub scanned: usize,
@@ -129,38 +167,40 @@ impl<'a> Indexer<'a> {
             stats.skipped += 1;
         }
 
+        // Schema files first (spec §3): the vocabulary the code pass needs comes from them.
+        // Then everything else; when the vocabulary differs from the previous run's, every
+        // code file is re-indexed once, content hash or not.
+        let (schema, rest): (Vec<&WalkEntry>, Vec<&WalkEntry>) =
+            w.entries.iter().partition(|e| is_schema_path(&e.rel_path));
         let mut seen: Vec<&str> = Vec::with_capacity(w.entries.len());
-        for e in &w.entries {
+        let empty = Vocab::new();
+        for e in schema {
             seen.push(&e.rel_path);
-            if !Self::changed(&known, e) {
-                stats.unchanged += 1;
-                on_file();
-                continue;
-            }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                stats.remaining += 1;
-                on_file();
-                continue;
-            }
-            let prior = known.get(&e.rel_path);
-            // One unreadable or unparseable file must never abort the refresh: it becomes
-            // a skip row like any other skipped file, and the walk carries on. Only store
-            // errors (which mean the index itself is unusable) propagate.
-            match self.index_file(e, prior, now) {
-                Ok(Outcome::Indexed) => stats.indexed += 1,
-                Ok(Outcome::Unchanged) => stats.unchanged += 1,
-                Ok(Outcome::Skipped) => stats.skipped += 1,
-                Err(Error::Io(_)) => {
-                    self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "unreadable", now)?;
-                    stats.skipped += 1;
-                }
-                Err(Error::Tags(_)) => {
-                    self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "parse-error", now)?;
-                    stats.skipped += 1;
-                }
-                Err(other) => return Err(other),
-            }
+            self.process(e, &known, &empty, false, deadline, now, &mut stats)?;
             on_file();
+        }
+        let vocab = load_vocab(self.store.conn())?;
+        let hash = vocab_hash(&vocab);
+        // `None` (no run has ever finished, or a prior run was always cut off before
+        // persisting) means there is no stored vocabulary to differ from, so nothing is
+        // forced: every file is already going through the ordinary changed-file path,
+        // which already indexes it once (spec's "once" is per file, not per completed
+        // run). Treating a missing baseline as a mismatch would force *every* code file
+        // on *every* incomplete chunk of a long background drain — including files a
+        // previous chunk just finished — since the baseline is written only once the
+        // whole run clears its deadline with nothing left over.
+        let force = self
+            .store
+            .get_meta("table_vocab")?
+            .is_some_and(|stored| stored != hash);
+        for e in rest {
+            seen.push(&e.rel_path);
+            let force_this = force && is_code_path(&e.rel_path);
+            self.process(e, &known, &vocab, force_this, deadline, now, &mut stats)?;
+            on_file();
+        }
+        if stats.remaining == 0 {
+            self.store.set_meta("table_vocab", &hash)?;
         }
 
         // Remove rows for files that no longer exist (or are now gitignored), and write
@@ -182,6 +222,46 @@ impl<'a> Indexer<'a> {
         self.write_meta(now)?;
         tx.commit()?;
         Ok(stats)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process(
+        &self,
+        e: &WalkEntry,
+        known: &HashMap<String, Known>,
+        vocab: &Vocab,
+        force: bool,
+        deadline: Option<Instant>,
+        now: i64,
+        stats: &mut IndexStats,
+    ) -> Result<()> {
+        if !force && !Self::changed(known, e) {
+            stats.unchanged += 1;
+            return Ok(());
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            stats.remaining += 1;
+            return Ok(());
+        }
+        let prior = known.get(&e.rel_path);
+        // One unreadable or unparseable file must never abort the refresh: it becomes
+        // a skip row like any other skipped file, and the walk carries on. Only store
+        // errors (which mean the index itself is unusable) propagate.
+        match self.index_file(e, prior, now, vocab, force) {
+            Ok(Outcome::Indexed) => stats.indexed += 1,
+            Ok(Outcome::Unchanged) => stats.unchanged += 1,
+            Ok(Outcome::Skipped) => stats.skipped += 1,
+            Err(Error::Io(_)) => {
+                self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "unreadable", now)?;
+                stats.skipped += 1;
+            }
+            Err(Error::Tags(_)) => {
+                self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "parse-error", now)?;
+                stats.skipped += 1;
+            }
+            Err(other) => return Err(other),
+        }
+        Ok(())
     }
 
     fn upsert_skipped(
@@ -212,7 +292,14 @@ impl<'a> Indexer<'a> {
     /// stored (only mtime/size moved) so nothing besides those two columns was touched;
     /// `Outcome::Skipped` means the file was written to `files` with a `skipped_reason` and
     /// has no symbols; `Outcome::Indexed` means symbols/refs/FTS rows were (re)written.
-    fn index_file(&self, e: &WalkEntry, prior: Option<&Known>, now: i64) -> Result<Outcome> {
+    fn index_file(
+        &self,
+        e: &WalkEntry,
+        prior: Option<&Known>,
+        now: i64,
+        vocab: &Vocab,
+        force: bool,
+    ) -> Result<Outcome> {
         if e.size > MAX_FILE_BYTES {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "too-large", now)?;
             return Ok(Outcome::Skipped);
@@ -248,7 +335,7 @@ impl<'a> Indexer<'a> {
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let conn = self.store.conn();
 
-        if prior.and_then(|p| p.content_hash.as_deref()) == Some(hash.as_str()) {
+        if !force && prior.and_then(|p| p.content_hash.as_deref()) == Some(hash.as_str()) {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "UPDATE files SET mtime_ms = ?2, size = ?3 WHERE path = ?1",
@@ -264,11 +351,20 @@ impl<'a> Indexer<'a> {
             .map(|(s, _)| s)
             .unwrap_or(stem)
             .to_string();
-        let (tags, bodies, mentions) = if lang.is_document() {
+        let (tags, bodies, mentions, aliases) = if lang.is_document() {
             let d = crate::doc::extract(lang, source, &stem)?;
-            (d.tags, d.bodies, d.mentions)
+            (d.tags, d.bodies, d.mentions, Vec::new())
+        } else if lang.is_schema() {
+            let s = crate::schema::extract(lang, source)?;
+            (s.tags, Vec::new(), Vec::new(), s.aliases)
         } else {
-            (extract_tags(lang, source)?, Vec::new(), Vec::new())
+            let _ = vocab; // Task 4 turns the vocabulary into table mentions here
+            (
+                extract_tags(lang, source)?,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
         };
         let tx = conn.unchecked_transaction()?;
         tx.execute(
@@ -283,6 +379,13 @@ impl<'a> Indexer<'a> {
                 r.get(0)
             })?;
         delete_symbols_for(&tx, file_id)?;
+
+        for (alias, table) in &aliases {
+            tx.execute(
+                "INSERT OR REPLACE INTO table_names(alias, table_name, file_id) VALUES (?1, ?2, ?3)",
+                params![alias, table, file_id],
+            )?;
+        }
 
         let mut ids: Vec<i64> = Vec::with_capacity(tags.len());
         for t in &tags {
@@ -380,6 +483,7 @@ impl<'a> Indexer<'a> {
 /// itself), so the caller can either re-insert fresh ones or leave the file skipped.
 fn delete_symbols_for(conn: &Connection, file_id: i64) -> Result<()> {
     crate::knowledge::delete_for_symbols(conn, file_id)?;
+    conn.execute("DELETE FROM table_names WHERE file_id = ?1", [file_id])?;
     conn.execute(
         "DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
         [file_id],
@@ -422,7 +526,7 @@ pub fn git_head(root: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::MapConfig;
-    use crate::fixture::{write_rust_mini, write_ts_mini};
+    use crate::fixture::{write_rust_mini, write_schema_mini, write_ts_mini};
     use crate::store::Store;
     use crate::workspace::Workspace;
 
@@ -435,6 +539,172 @@ mod tests {
 
     fn count(store: &Store, sql: &str) -> i64 {
         store.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    fn index_dir(dir: &Path) -> Store {
+        Store::open(&dir.join(".singularrag/index.db")).unwrap()
+    }
+
+    fn refresh(store: &Store, dir: &Path) -> IndexStats {
+        let cfg = MapConfig::default();
+        Indexer::new(store, &Workspace::single(dir).unwrap(), &cfg)
+            .unwrap()
+            .refresh(None)
+            .unwrap()
+    }
+
+    fn symbols_of(store: &Store, path: &str, kind: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT s.name FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1 AND s.kind = ?2 ORDER BY s.line_start")
+            .unwrap();
+        stmt.query_map([path, kind], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn refs_named(store: &Store, name: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT DISTINCT f.path FROM refs r JOIN files f ON f.id = r.file_id WHERE r.name = ?1 ORDER BY f.path")
+            .unwrap();
+        stmt.query_map([name], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn schema_files_index_tables_columns_foreign_keys_and_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        let store = index_dir(dir.path());
+        let stats = refresh(&store, dir.path());
+        assert_eq!(stats.remaining, 0);
+        assert_eq!(
+            symbols_of(&store, "prisma/schema.prisma", "table"),
+            vec!["user", "website", "website_event"]
+        );
+        assert!(symbols_of(&store, "prisma/schema.prisma", "column")
+            .contains(&"website_event.website_id".to_string()));
+        assert_eq!(
+            symbols_of(
+                &store,
+                "prisma/migrations/02_add_event_name/migration.sql",
+                "column"
+            ),
+            vec!["website_event.event_name"]
+        );
+        assert_eq!(symbols_of(&store, "db/dump.sql", "table"), vec!["report"]);
+        // foreign keys: the schema, the init migration and the dump all reference `website`
+        // (`contains`, not equality: Task 4 adds the code file to this list)
+        let website_refs = refs_named(&store, "website");
+        for p in [
+            "db/dump.sql",
+            "prisma/migrations/01_init/migration.sql",
+            "prisma/schema.prisma",
+        ] {
+            assert!(
+                website_refs.contains(&p.to_string()),
+                "{p} missing from {website_refs:?}"
+            );
+        }
+        let lang: String = store
+            .conn()
+            .query_row(
+                "SELECT lang FROM files WHERE path = 'prisma/schema.prisma'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lang, "prisma");
+        let vocab = load_vocab(store.conn()).unwrap();
+        assert_eq!(
+            vocab.get("websiteEvent").map(String::as_str),
+            Some("website_event")
+        );
+        assert_eq!(
+            vocab.get("WebsiteEvent").map(String::as_str),
+            Some("website_event")
+        );
+        assert_eq!(vocab.get("report").map(String::as_str), Some("report"));
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue q JOIN symbols s ON s.id = q.symbol_id WHERE s.kind IN ('table', 'column')"),
+            0,
+            "a table is never queued for extraction"
+        );
+        assert!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue") >= 1,
+            "the document section is queued"
+        );
+    }
+
+    #[test]
+    fn a_vocabulary_change_reindexes_code_files_once() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        std::fs::write(
+            dir.path().join("src/queries/team.ts"),
+            "import { prisma } from \"../lib/prisma\";\nexport function getTeams() {\n  return prisma.client.team.findUnique({});\n}\n",
+        )
+        .unwrap();
+        let store = index_dir(dir.path());
+        refresh(&store, dir.path());
+        assert!(
+            refs_named(&store, "team").is_empty(),
+            "no `team` table yet, so no ref"
+        );
+        let second = refresh(&store, dir.path());
+        assert_eq!(second.indexed, 0, "nothing changed, nothing re-indexed");
+
+        // a new model appears; the code files' mtimes do not change
+        let schema = dir.path().join("prisma/schema.prisma");
+        let mut src = std::fs::read_to_string(&schema).unwrap();
+        src.push_str("\nmodel Team {\n  id String @id\n\n  @@map(\"team\")\n}\n");
+        std::fs::write(&schema, src).unwrap();
+        let third = refresh(&store, dir.path());
+        // `team.ts` is reindexed under the new vocabulary, but table mentions (Task 4's
+        // `schema::table_mentions` call) are not wired into `index_file` yet, so no ref
+        // is written from its `prisma.client.team` use.
+        assert!(
+            refs_named(&store, "team").is_empty(),
+            "table mentions land in Task 4"
+        );
+        // the schema file plus every code file (website.ts, prisma.ts, db.ts, team.ts), not the documents
+        assert_eq!(third.indexed, 5, "{third:?}");
+        let fourth = refresh(&store, dir.path());
+        assert_eq!(
+            fourth.indexed, 0,
+            "the forced re-index happens once: {fourth:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_vocabulary_forces_nothing_and_emits_nothing() {
+        let (dir, store) = setup();
+        let first = refresh(&store, dir.path());
+        assert!(first.indexed > 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM table_names"), 0);
+        let second = refresh(&store, dir.path());
+        assert_eq!(second.indexed, 0, "{second:?}");
+        assert_eq!(
+            store.get_meta("table_vocab").unwrap().as_deref(),
+            Some(vocab_hash(&Vocab::new()).as_str())
+        );
+    }
+
+    #[test]
+    fn removing_a_schema_file_removes_its_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        let store = index_dir(dir.path());
+        refresh(&store, dir.path());
+        assert!(load_vocab(store.conn()).unwrap().contains_key("report"));
+        std::fs::remove_file(dir.path().join("db/dump.sql")).unwrap();
+        refresh(&store, dir.path());
+        assert!(!load_vocab(store.conn()).unwrap().contains_key("report"));
+        assert!(load_vocab(store.conn()).unwrap().contains_key("website"));
     }
 
     #[test]

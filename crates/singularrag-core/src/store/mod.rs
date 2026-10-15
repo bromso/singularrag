@@ -199,42 +199,30 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_6() {
-        assert_eq!(SCHEMA_VERSION, 6);
+    fn schema_version_is_7() {
+        assert_eq!(SCHEMA_VERSION, 7);
     }
 
     #[test]
-    fn a_v5_index_is_rebuilt_as_v6_with_the_steps_tables() {
+    fn a_v6_index_is_rebuilt_as_v7_with_table_names() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.db");
         {
             let store = Store::open(&path).unwrap();
-            store.set_meta("schema_version", "5").unwrap();
+            store.set_meta("schema_version", "6").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(SCHEMA_VERSION, 6);
-        assert_eq!(store.schema_version().unwrap(), 6);
-        let mut stmt = store
+        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(store.schema_version().unwrap(), 7);
+        let n: i64 = store
             .conn()
-            .prepare("PRAGMA table_info(extract_queue)")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'table_names'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        let cols: Vec<String> = stmt
-            .query_map([], |r| r.get::<_, String>(1))
-            .unwrap()
-            .collect::<std::result::Result<_, _>>()
-            .unwrap();
-        assert!(cols.contains(&"stage".to_string()), "{cols:?}");
-        for t in ["steps", "step_systems", "steps_cache"] {
-            let n: i64 = store
-                .conn()
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
-                    [t],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(n, 1, "missing table {t}");
-        }
+        assert_eq!(n, 1, "missing table table_names");
     }
 
     #[test]

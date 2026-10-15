@@ -1,6 +1,6 @@
 /// Bumped whenever the DDL below changes. The index is derived data: on a mismatch
 /// `Store::init` drops every table and rebuilds from scratch.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -145,4 +145,11 @@ CREATE TABLE IF NOT EXISTS step_systems (
   PRIMARY KEY (step_id, entity_id)
 );
 CREATE TABLE IF NOT EXISTS steps_cache (hash TEXT PRIMARY KEY, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS table_names (
+  alias      TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  PRIMARY KEY (alias, file_id)
+);
+CREATE INDEX IF NOT EXISTS table_names_file ON table_names(file_id);
 "#;
