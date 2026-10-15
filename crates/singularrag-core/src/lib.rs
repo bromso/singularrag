@@ -27,6 +27,7 @@ pub mod time;
 pub mod tokens;
 pub mod trace;
 pub mod walk;
+pub mod walks;
 pub mod workspace;
 
 pub use error::{Error, Result};
