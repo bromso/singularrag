@@ -260,24 +260,24 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
     git_run(root, args)?.map_err(|e| anyhow!("git {}: {e}", args.join(" ")))
 }
 
-/// `git status` over the corpus, our own index directory (`.singularrag/`, which opening
-/// the engine creates inside the corpus root) excluded.
-fn status(root: &Path, extra: &[&str]) -> Result<String> {
-    let mut args = vec!["status", "--porcelain", "--untracked-files=all"];
-    args.extend_from_slice(extra);
-    args.extend_from_slice(&["--", ".", ":(exclude).singularrag"]);
-    git(root, &args)
-}
+/// Our own index directory, which opening the engine creates inside the corpus root.
+const INDEX_DIR: &str = ".singularrag";
 
-/// Clean means no tracked edit and no untracked file, `.singularrag/` aside.
-fn is_clean(root: &Path) -> Result<bool> {
-    Ok(status(root, &[])?.trim().is_empty())
-}
-
-/// The status entries as `(XY, path)`, from `-z` output so paths are literal. A rename or
-/// copy entry carries its source as the next field; both sides are returned.
+/// The status entries as `(XY, path)`, `.singularrag/` left out, from `-z` output so paths
+/// are literal. A rename or copy entry carries its source as the next field; both sides are
+/// returned. `--literal-pathspecs` throughout, so the exclusion is done here rather than
+/// with a `:(exclude)` pathspec (which literal mode would read as a file name).
 fn status_entries(root: &Path) -> Result<Vec<(String, String)>> {
-    let out = status(root, &["-z"])?;
+    let out = git(
+        root,
+        &[
+            "--literal-pathspecs",
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+        ],
+    )?;
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut entries = Vec::new();
     while let Some(f) = fields.next() {
@@ -292,7 +292,16 @@ fn status_entries(root: &Path) -> Result<Vec<(String, String)>> {
         }
         entries.push((xy, path));
     }
+    entries.retain(|(_, p)| {
+        let p = p.trim_end_matches('/');
+        p != INDEX_DIR && !p.starts_with(&format!("{INDEX_DIR}/"))
+    });
     Ok(entries)
+}
+
+/// Clean means no tracked edit and no untracked file, `.singularrag/` aside.
+fn is_clean(root: &Path) -> Result<bool> {
+    Ok(status_entries(root)?.is_empty())
 }
 
 /// `true` when `root` is the toplevel of its own git checkout, so `git apply` there cannot
@@ -316,15 +325,15 @@ fn apply_patch(root: &Path, patch: &Path) -> Result<()> {
 
 /// Undoes everything in the tree that `git status` reports. The tree was clean before
 /// the patch, so every entry is the patch's doing: untracked paths go with `clean`, every
-/// other status with `checkout`, one explicit path per call (never a bare `clean` or
+/// other status with `checkout`, one explicit literal path per call (never a bare `clean` or
 /// `checkout` over the root). A tree still dirty afterwards is a hard error naming what is
 /// left, so no grade is ever reported over a dirty corpus.
 fn revert(root: &Path) -> Result<()> {
     for (xy, path) in status_entries(root)? {
         let args: &[&str] = if xy == "??" {
-            &["clean", "-fd", "--", &path]
+            &["--literal-pathspecs", "clean", "-fd", "--", &path]
         } else {
-            &["checkout", "--", &path]
+            &["--literal-pathspecs", "checkout", "--", &path]
         };
         let _ = git(root, args);
     }
@@ -984,6 +993,34 @@ mod tests {
         git(dir.path(), &["add", "staged.txt"]).unwrap();
         let e = revert(dir.path()).unwrap_err().to_string();
         assert!(e.contains("staged.txt"), "{e}");
+    }
+
+    #[test]
+    fn glob_characters_in_patched_paths_are_literal_in_the_revert() {
+        // `[ab].txt` as a pathspec matches `a.txt`; `*` matches everything, `.singularrag/`
+        // included. Reverted literally, only the patch's own files are touched.
+        let dir = repo(&[("a.txt", "x\n")]);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("W.patch"),
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n\
+             --- /dev/null\n+++ b/[ab].txt\n@@ -0,0 +1 @@\n+z\n\
+             --- /dev/null\n+++ b/*\n@@ -0,0 +1 @@\n+star\n",
+        )
+        .unwrap();
+        let mut engine = Engine::open(dir.path(), "walk-test").unwrap();
+        engine.refresh(std::time::Duration::from_secs(600)).unwrap();
+        let opts = WalkOptions {
+            budget: None,
+            walk_dir: outside.path().to_path_buf(),
+        };
+        run_change(&mut engine, &change_walk(&[]), &opts).unwrap();
+        let root = dir.path();
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "x\n");
+        assert!(!root.join("[ab].txt").exists());
+        assert!(!root.join("*").exists());
+        assert!(root.join(".singularrag").exists(), "the index survives");
+        assert!(is_clean(root).unwrap());
     }
 
     #[test]
