@@ -36,8 +36,9 @@ pub fn load_vocab(conn: &Connection) -> Result<Vocab> {
     Ok(v)
 }
 
-/// A stable digest of the vocabulary, kept in `meta` as `table_vocab`; a run whose
-/// vocabulary differs from the stored one re-indexes every code file once.
+/// A stable digest of the vocabulary, stamped onto each code file's `files.vocab` row
+/// (spec §3) as it's indexed; a code file whose stamp differs from the vocabulary just
+/// loaded is re-indexed once, content hash or not.
 pub fn vocab_hash(v: &Vocab) -> String {
     let mut pairs: Vec<(&String, &String)> = v.iter().collect();
     pairs.sort();
@@ -84,6 +85,9 @@ struct Known {
     mtime_ms: i64,
     size: u64,
     content_hash: Option<String>,
+    /// The `vocab_hash` of the table-name vocabulary this file was last indexed under
+    /// (spec §3); `None` for a skipped file or one indexed before this column existed.
+    vocab: Option<String>,
 }
 
 /// What `index_file` did with one changed file.
@@ -106,7 +110,7 @@ impl<'a> Indexer<'a> {
         let mut stmt = self
             .store
             .conn()
-            .prepare("SELECT id, path, mtime_ms, size, content_hash FROM files")?;
+            .prepare("SELECT id, path, mtime_ms, size, content_hash, vocab FROM files")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(1)?,
@@ -115,6 +119,7 @@ impl<'a> Indexer<'a> {
                     mtime_ms: r.get(2)?,
                     size: r.get::<_, i64>(3)? as u64,
                     content_hash: r.get(4)?,
+                    vocab: r.get(5)?,
                 },
             ))
         })?;
@@ -168,39 +173,28 @@ impl<'a> Indexer<'a> {
         }
 
         // Schema files first (spec §3): the vocabulary the code pass needs comes from them.
-        // Then everything else; when the vocabulary differs from the previous run's, every
-        // code file is re-indexed once, content hash or not.
+        // Then everything else: a code file whose own `files.vocab` stamp doesn't match the
+        // vocabulary just loaded is re-indexed once, content hash or not. The stamp lives on
+        // the file's own row rather than in a run-level meta, so a deadline cutoff mid-run
+        // never loses track of which files still need the new vocabulary: whatever got
+        // stamped stays stamped, and whatever didn't is still behind next time, with no
+        // window where every code file looks forced just because no run has finished yet.
         let (schema, rest): (Vec<&WalkEntry>, Vec<&WalkEntry>) =
             w.entries.iter().partition(|e| is_schema_path(&e.rel_path));
         let mut seen: Vec<&str> = Vec::with_capacity(w.entries.len());
         let empty = Vocab::new();
+        let empty_hash = vocab_hash(&empty);
         for e in schema {
             seen.push(&e.rel_path);
-            self.process(e, &known, &empty, false, deadline, now, &mut stats)?;
+            self.process(e, &known, &empty, &empty_hash, deadline, now, &mut stats)?;
             on_file();
         }
         let vocab = load_vocab(self.store.conn())?;
         let hash = vocab_hash(&vocab);
-        // `None` (no run has ever finished, or a prior run was always cut off before
-        // persisting) means there is no stored vocabulary to differ from, so nothing is
-        // forced: every file is already going through the ordinary changed-file path,
-        // which already indexes it once (spec's "once" is per file, not per completed
-        // run). Treating a missing baseline as a mismatch would force *every* code file
-        // on *every* incomplete chunk of a long background drain — including files a
-        // previous chunk just finished — since the baseline is written only once the
-        // whole run clears its deadline with nothing left over.
-        let force = self
-            .store
-            .get_meta("table_vocab")?
-            .is_some_and(|stored| stored != hash);
         for e in rest {
             seen.push(&e.rel_path);
-            let force_this = force && is_code_path(&e.rel_path);
-            self.process(e, &known, &vocab, force_this, deadline, now, &mut stats)?;
+            self.process(e, &known, &vocab, &hash, deadline, now, &mut stats)?;
             on_file();
-        }
-        if stats.remaining == 0 {
-            self.store.set_meta("table_vocab", &hash)?;
         }
 
         // Remove rows for files that no longer exist (or are now gitignored), and write
@@ -230,11 +224,17 @@ impl<'a> Indexer<'a> {
         e: &WalkEntry,
         known: &HashMap<String, Known>,
         vocab: &Vocab,
-        force: bool,
+        hash: &str,
         deadline: Option<Instant>,
         now: i64,
         stats: &mut IndexStats,
     ) -> Result<()> {
+        let prior = known.get(&e.rel_path);
+        // Only a code file's own stamp can force it: documents and schema files are only
+        // ever reindexed by the ordinary changed-file check (a schema file's vocabulary
+        // stamp is irrelevant and never compared).
+        let force =
+            is_code_path(&e.rel_path) && prior.and_then(|p| p.vocab.as_deref()) != Some(hash);
         if !force && !Self::changed(known, e) {
             stats.unchanged += 1;
             return Ok(());
@@ -243,11 +243,10 @@ impl<'a> Indexer<'a> {
             stats.remaining += 1;
             return Ok(());
         }
-        let prior = known.get(&e.rel_path);
         // One unreadable or unparseable file must never abort the refresh: it becomes
         // a skip row like any other skipped file, and the walk carries on. Only store
         // errors (which mean the index itself is unusable) propagate.
-        match self.index_file(e, prior, now, vocab, force) {
+        match self.index_file(e, prior, now, vocab, hash, force) {
             Ok(Outcome::Indexed) => stats.indexed += 1,
             Ok(Outcome::Unchanged) => stats.unchanged += 1,
             Ok(Outcome::Skipped) => stats.skipped += 1,
@@ -275,10 +274,11 @@ impl<'a> Indexer<'a> {
         let conn = self.store.conn();
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason)
-             VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5)
+            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason, vocab)
+             VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, NULL)
              ON CONFLICT(path) DO UPDATE SET lang = NULL, content_hash = NULL, mtime_ms = excluded.mtime_ms,
-               size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = excluded.skipped_reason",
+               size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = excluded.skipped_reason,
+               vocab = NULL",
             params![path, mtime_ms, size as i64, now, reason],
         )?;
         let id: i64 = tx.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))?;
@@ -298,6 +298,7 @@ impl<'a> Indexer<'a> {
         prior: Option<&Known>,
         now: i64,
         vocab: &Vocab,
+        vocab_tag: &str,
         force: bool,
     ) -> Result<Outcome> {
         if e.size > MAX_FILE_BYTES {
@@ -368,11 +369,20 @@ impl<'a> Indexer<'a> {
         };
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason, vocab)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)
              ON CONFLICT(path) DO UPDATE SET lang = excluded.lang, content_hash = excluded.content_hash,
-               mtime_ms = excluded.mtime_ms, size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = NULL",
-            params![e.rel_path, lang.as_str(), hash, e.mtime_ms, e.size as i64, now],
+               mtime_ms = excluded.mtime_ms, size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = NULL,
+               vocab = excluded.vocab",
+            params![
+                e.rel_path,
+                lang.as_str(),
+                hash,
+                e.mtime_ms,
+                e.size as i64,
+                now,
+                vocab_tag
+            ],
         )?;
         let file_id: i64 =
             tx.query_row("SELECT id FROM files WHERE path = ?1", [&e.rel_path], |r| {
@@ -686,12 +696,23 @@ mod tests {
         let first = refresh(&store, dir.path());
         assert!(first.indexed > 0);
         assert_eq!(count(&store, "SELECT COUNT(*) FROM table_names"), 0);
+        let empty_hash = vocab_hash(&Vocab::new());
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT path, vocab FROM files WHERE skipped_reason IS NULL")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for (path, vocab) in &rows {
+            if is_code_path(path) {
+                assert_eq!(vocab.as_deref(), Some(empty_hash.as_str()), "{path}");
+            }
+        }
         let second = refresh(&store, dir.path());
         assert_eq!(second.indexed, 0, "{second:?}");
-        assert_eq!(
-            store.get_meta("table_vocab").unwrap().as_deref(),
-            Some(vocab_hash(&Vocab::new()).as_str())
-        );
     }
 
     #[test]
@@ -705,6 +726,68 @@ mod tests {
         refresh(&store, dir.path());
         assert!(!load_vocab(store.conn()).unwrap().contains_key("report"));
         assert!(load_vocab(store.conn()).unwrap().contains_key("website"));
+    }
+
+    /// Fix round 1 (controller ruling): the vocabulary stamp lives on each file's own
+    /// `files.vocab` row, not in a run-level meta, precisely so a deadline cutoff mid-run
+    /// can never leave the picture ambiguous: whatever was reindexed under the new
+    /// vocabulary is stamped and stays stamped; whatever wasn't still carries the old
+    /// stamp and is still owed a reindex, with no in-between state where every code file
+    /// looks forced just because no run has finished yet.
+    #[test]
+    fn a_deadline_mid_run_leaves_no_code_file_with_a_stale_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        let store = index_dir(dir.path());
+        refresh(&store, dir.path());
+        let old_hash = vocab_hash(&load_vocab(store.conn()).unwrap());
+
+        let schema = dir.path().join("prisma/schema.prisma");
+        let mut src = std::fs::read_to_string(&schema).unwrap();
+        src.push_str("\nmodel Team {\n  id String @id\n\n  @@map(\"team\")\n}\n");
+        std::fs::write(&schema, src).unwrap();
+
+        let cfg = MapConfig::default();
+        let cut = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg)
+            .unwrap()
+            .refresh(Some(std::time::Instant::now()))
+            .unwrap();
+        assert!(cut.remaining > 0, "{cut:?}");
+        let stamp: Option<String> = store
+            .conn()
+            .query_row(
+                "SELECT vocab FROM files WHERE path = 'src/queries/website.ts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stamp.as_deref(),
+            Some(old_hash.as_str()),
+            "a cut-off run must not half-stamp a file it never touched"
+        );
+
+        let caught_up = refresh(&store, dir.path());
+        assert_eq!(caught_up.remaining, 0, "{caught_up:?}");
+        let new_hash = vocab_hash(&load_vocab(store.conn()).unwrap());
+        assert_ne!(new_hash, old_hash);
+        for path in [
+            "src/queries/website.ts",
+            "src/lib/prisma.ts",
+            "src/lib/db.ts",
+        ] {
+            let stamp: Option<String> = store
+                .conn()
+                .query_row("SELECT vocab FROM files WHERE path = ?1", [path], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(stamp.as_deref(), Some(new_hash.as_str()), "{path}");
+        }
+        assert!(
+            refs_named(&store, "team").is_empty(),
+            "table mentions land in Task 4"
+        );
     }
 
     #[test]
