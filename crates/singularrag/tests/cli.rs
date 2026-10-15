@@ -704,3 +704,111 @@ fn walk_runs_a_locate_walk_and_prints_the_footer() {
                 .and(predicate::str::is_match(r"\nwalks [01]/1 locate\nwalks [01]/1\n$").unwrap()),
         );
 }
+
+fn walks_ci_path() -> &'static str {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../e", "val/walks-ci.toml")
+}
+fn prose_extraction_path() -> &'static str {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../singularrag-core/fixtures/prose/extraction.json"
+    )
+}
+
+#[test]
+fn walk_runs_all_four_kinds_on_the_fixtures_without_a_model() {
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_docs_mini(dir.path());
+    singularrag_core::fixture::write_prose(dir.path());
+    // the change walk needs a git checkout: init and commit the fixture
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(&args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let out = Command::cargo_bin("singularrag")
+        .unwrap()
+        .env("SINGULARRAG_OLLAMA_URL", "http://127.0.0.1:9")
+        .args([
+            "walk",
+            "--questions",
+            walks_ci_path(),
+            "--budget",
+            "4096",
+            "--no-models",
+            "--extraction",
+            prose_extraction_path(),
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.lines().any(|l| l == "walks 1/1 locate"), "{stdout}");
+    assert!(stdout.lines().any(|l| l == "walks 1/1 process"), "{stdout}");
+    assert!(
+        stdout.lines().any(|l| l == "walks 2/2 connection"),
+        "{stdout}"
+    );
+    assert!(stdout.lines().any(|l| l == "walks 1/1 change"), "{stdout}");
+    assert!(stdout.ends_with("walks 5/5\n"), "{stdout}");
+    // the checkout is clean again after the change walk
+    let st = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .unwrap();
+    assert!(st.stdout.is_empty());
+}
+
+#[test]
+fn walk_names_the_reason_when_gold_is_wrong() {
+    // a scratch walk file in the tempdir's parent with one locate walk whose gold is
+    // docs/handbook.md::Nowhere -> "gold not served at 4096" and "walks 0/1"
+    let dir = tempfile::tempdir().unwrap();
+    singularrag_core::fixture::write_prose(dir.path());
+    let walks = tempfile::tempdir().unwrap();
+    let file = walks.path().join("walks.toml");
+    std::fs::write(
+        &file,
+        "[[walk]]\nid = \"W1\"\nkind = \"locate\"\nquery = \"voyage\"\ngold = [\"docs/handbook.md::Nowhere\"]\n",
+    )
+    .unwrap();
+    Command::cargo_bin("singularrag")
+        .unwrap()
+        .env("SINGULARRAG_OLLAMA_URL", "http://127.0.0.1:9")
+        .args([
+            "walk",
+            "--questions",
+            file.to_str().unwrap(),
+            "--budget",
+            "4096",
+            "--no-models",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("gold not served at 4096")
+                .and(predicate::str::ends_with("walks 0/1 locate\nwalks 0/1\n")),
+        );
+}

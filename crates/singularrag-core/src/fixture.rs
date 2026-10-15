@@ -12,7 +12,10 @@ fn w(root: &Path, rel: &str, content: &str) {
 /// Four TS modules with a clear reference structure, one gitignored bundle,
 /// one denylisted `.env`, one secret-like config.
 pub fn write_ts_mini(root: &Path) {
-    w(root, ".gitignore", "dist/\n");
+    // `.singularrag/index.db` is the tool's own on-disk index, not corpus content (the
+    // project's own top-level .gitignore makes the same exclusion); a change walk's git
+    // checkout must stay clean after indexing, not just after the patch it applies.
+    w(root, ".gitignore", "dist/\n.singularrag/index.db\n");
     w(
         root,
         "src/auth/session.ts",

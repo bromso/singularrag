@@ -1,0 +1,13 @@
+diff --git a/src/auth/session.ts b/src/auth/session.ts
+index bea3d2b..fe1a336 100644
+--- a/src/auth/session.ts
++++ b/src/auth/session.ts
+@@ -1,7 +1,7 @@
+ export interface Session { id: string; userId: string; expiresAt: number }
+ export interface User { id: string }
+ export function createSession(user: User, ttl: number): Session {
+-  const store = new SessionStore();
++  const store = new SessionStore(); // ci walk touch
+   return store.create(user, ttl);
+ }
+ export class SessionStore {
