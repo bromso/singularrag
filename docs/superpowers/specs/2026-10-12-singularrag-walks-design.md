@@ -72,7 +72,9 @@ gold = ["src/auth/session.ts::createSession", "docs/design.md::Freshness"]
 
 No DOM and no browser: a walk that passes means the data the UI would render contains the answer. Output: one row per walk (`id`, `kind`, pass or fail, what the path reached: the served items, the process matched, the neighbours found, the changed list), a reason on every failing row (`gold not served at 2048`, `no process cites docs/handbook.md::Expense process`, `step with role Finance not found`, `Onboarding not within 2 hops of Okta`, `src/auth/session.ts::createSession not in the changed list`), and a footer `walks N/M` per kind and overall. `--json` writes the same for the record.
 
-Models: `locate` and `connection` embed the query once when seeds are on (the entity start resolves by name first, then by vector); `--no-models` gives the seeds-off row as tier one does. `process` and `change` never call a model. The walks run against an extracted index and never trigger extraction; `doctor` says whether the index is extracted.
+Models: `locate` embeds the query once when seeds are on; a `connection` walk's entity start resolves by name only and makes no model call (amended below); `--no-models` gives the seeds-off row as tier one does and so affects `locate` only. `process` and `change` never call a model. The walks run against an extracted index and never trigger extraction; `doctor` says whether the index is extracted.
+
+*Amended 2026-10-15 (plan execution).* A connection walk's entity start resolves by `norm_name` only and makes no model call, because the entity panel the walk models is reached by a person choosing an entity by name, and a vector fallback would pass a walk through an entity the person could not find. `--no-models` therefore affects `locate` only.
 
 Lives in `crates/singularrag/src/walk.rs` (runner, grader, report) with the walk file types in `crates/singularrag-core/src/walks.rs` (parse, validate: ids unique, gold non-empty, kinds known, `from` present for `connection`, `patch` present for `change`).
 
@@ -80,7 +82,7 @@ Lives in `crates/singularrag/src/walk.rs` (runner, grader, report) with the walk
 
 Three walk files at the start, twelve walks each, three per kind where the corpus allows it:
 
-- `eval/walks-repo.toml`: this repository at the documents pin (`5ec066b` plus the two prose fixture files, the `corpus` branch of `../../singularrag-pinned`), code and documents together; the only file with `change` walks, patches under `eval/patches/`.
+- `eval/walks-repo.toml`: this repository at the documents pin: `../singularrag-pinned` (`corpus` branch, commit `0c2ed54`, the `5ec066b` tree plus the two prose fixture files; paths relative to the main checkout root), code and documents together; the file with `change` walks on code and documents, patches under `eval/patches/`.
 - `eval/walks-handbook.toml`: the handbook `people-group` corpus (`../../handbook-corpus`, extracted): `locate`, `process`, `connection`; no `change`.
 - `eval/walks-hono.toml`: hono at its pin: `locate`, `connection`, `change`; it has no extraction and shows what the walks say about a plain codebase.
 

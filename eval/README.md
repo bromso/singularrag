@@ -429,7 +429,7 @@ singularrag --repo ../handbook-corpus walk --questions eval/walks-handbook.toml 
 singularrag --repo ../hono walk --questions eval/walks-hono.toml --budget 2048|4096 [--no-models]
 ```
 
-Change walks apply their patch to the corpus checkout, read the changed list and revert; they refuse a dirty checkout, so `git -C <corpus> status --porcelain` must be empty before a run (it was, before and after every run below). The repo file's change walks are code-only: a change walk re-indexes the patched file, and a re-indexed document's sections lose their entities and steps until a `serve` or `mcp` process drains the extraction queue (from the cache, no model call), which would make later runs depend on the order they ran in.
+Change walks apply their patch to the corpus checkout, read the changed list and revert; they refuse a dirty checkout, so `git -C <corpus> status --porcelain` must be empty before a run (it was, before and after every run below). The repo file's change walks are code-only: a change walk re-indexes the patched file, and a re-indexed document's sections lose their entities and steps until a `serve` or `mcp` process drains the extraction queue (from the cache, no model call), which would make later runs depend on the order they ran in. A patch must not add a path the corpus ignores: git does not list an ignored path, so the revert would never remove it.
 
 ### Baseline, 2026-10-15
 
@@ -478,7 +478,7 @@ Failing walks at 4096, seeds on (reason verbatim, then the cause as far as it wa
 
 What the failures are:
 
-- Product defects, recorded as leads for the next plan: R6 and H8 (the processes route lists only the first 200 processes by name, so on the handbook only names A–D are visible out of 1,052); H11 (the entities route caps mentions at 2,000 in entity-id order); and the defect behind the code-only repo change walks (a re-index drops a document's extraction, so a document change walk would need the background tick to refill it from the cache).
+- Product defects, recorded as leads for the next plan: R6 and H8 (the processes route lists only the first 200 processes by name, so on the handbook only names A–D are visible out of 1,052); H11 (the entities route caps mentions at 2,000 in entity-id order); the entities route's own cap (`queries::entities` returns at most `ENTITY_CAP = 500` entities, by mention count, so on the handbook most of the 3,006 entities cannot be a connection walk's `from` and such a walk fails as `<from> not found`, which reads the same as a start that was never extracted); and the defect behind the code-only repo change walks (a re-index drops a document's extraction, so a document change walk would need the background tick to refill it from the cache).
 - Walk or extraction limits: H12 (the Compass mention sits on the enclosing h2, not the gold h3); N8 (`HonoBase` is an export alias, not a symbol); the locate misses R1, R3, N1, N2, N4 (not traced).
 
 Under the gate rule (spec §5) a walk that fails at the baseline is a lead, not a regression: only a walk that passed and then fails breaks the gate.
