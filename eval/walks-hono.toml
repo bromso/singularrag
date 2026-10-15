@@ -1,9 +1,10 @@
-# Walks over hono, a TypeScript web framework: the checkout /Users/jonasbroms/Sites/hono at
-# 098e119 (4.13.8), indexed, not extracted, its `.singularrag/` in `.git/info/exclude`.
+# Walks over hono, a TypeScript web framework: the checkout `../hono` (relative to the
+# repository root of the main checkout; from a worktree use an absolute path) at 098e119
+# (4.13.8), indexed, not extracted, its `.singularrag/` in `.git/info/exclude`.
 # Run from the repository root:
-#   singularrag --repo /Users/jonasbroms/Sites/hono walk --questions eval/walks-hono.toml --budget 4096
+#   singularrag --repo ../hono walk --questions eval/walks-hono.toml --budget 4096
 # Change walks apply `patches/hono-*.patch` to that checkout and revert it; they refuse a
-# dirty checkout, so `git -C /Users/jonasbroms/Sites/hono status --porcelain` must be empty.
+# dirty checkout, so `git -C ../hono status --porcelain` must be empty.
 
 # locate: everyday words, not the symbol's or heading's words
 
@@ -28,7 +29,7 @@ gold = ["src/compose.ts::compose"]
 [[walk]]
 id = "N4"
 kind = "locate"
-query = "the old Deno import URL stopped getting new versions, where do I install it from now"
+query = "the old address I imported the framework from on another JavaScript runtime stopped getting releases, where is it published now"
 gold = ["docs/MIGRATION.md::`deno.land/x` to JSR"]
 
 # connection: from a code symbol (blast radius within hops)

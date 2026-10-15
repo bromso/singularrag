@@ -1,5 +1,6 @@
 # Walks over the GitLab handbook `people-group` directory (CC BY-SA 4.0): the corpus checkout
-# `../../handbook-corpus` at 7cf88f9, extracted with the real models (3,006 entities, 1,052
+# `../handbook-corpus` (relative to the repository root of the main checkout; from a worktree
+# use an absolute path) at 7cf88f9, extracted with the real models (3,006 entities, 1,052
 # processes), its `.singularrag/` excluded. Run from the repository root:
 #   singularrag --repo ../handbook-corpus walk --questions eval/walks-handbook.toml --budget 4096
 # No change walks: the corpus is prose, and a section edit would leave its extraction pending.
@@ -93,5 +94,6 @@ gold = ["people-group/offboarding/faq.md::1Password"]
 id = "H12"
 kind = "connection"
 from = "Compass"
-# The page's "Considerations for Short-Term Travel" is an h4, indexed inside this h3.
+# The page's "Considerations for Short-Term Travel" is an h4, indexed inside this h3; the
+# extraction puts the Compass mention on the enclosing h2 `Relocation / Address Change`.
 gold = ["people-group/relocation.md::Short-Term Stay Definition"]

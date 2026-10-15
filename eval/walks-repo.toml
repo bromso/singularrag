@@ -1,5 +1,6 @@
 # Walks over this repository's tree at the documents pin plus the two prose fixture files:
-# the corpus checkout `../../singularrag-pinned` at 0c2ed54 (real-model extraction, its
+# the corpus checkout `../singularrag-pinned` (relative to the repository root of the main
+# checkout; from a worktree use an absolute path) at 0c2ed54 (real-model extraction, its
 # `.singularrag/` excluded). Run from the repository root:
 #   singularrag --repo ../singularrag-pinned walk --questions eval/walks-repo.toml --budget 4096
 # Change walks apply `patches/repo-*.patch` to that checkout and revert it; they refuse a
@@ -23,7 +24,7 @@ gold = ["docs/voyage.md::Kolbeinsey"]
 [[walk]]
 id = "R3"
 kind = "locate"
-query = "how does setup add its hooks to my Claude settings without wiping what I already have"
+query = "when I run setup, how does it add itself to my coding assistant's config file without wiping what is already there"
 gold = ["crates/singularrag/src/init.rs::merge_hooks"]
 
 # process: a role and a step phrase the page states
