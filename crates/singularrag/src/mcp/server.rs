@@ -32,7 +32,7 @@ pub const FIND_SYMBOL_DESCRIPTION: &str =
     "Looks a symbol or section name up and lists its definitions and the files that reference it. `name`: the exact or partial name.";
 
 #[allow(dead_code)]
-pub const ANNOTATE_DESCRIPTION: &str = "Leaves a one-paragraph note on a file or symbol in map.toml; it shows in the next map with an (agent) tag. `path`, optional `symbol`, `note`.";
+pub const ANNOTATE_DESCRIPTION: &str = "Leaves a one-paragraph note on a file or symbol in map.toml; it shows in the next map with an (agent) tag. `path`, optional `symbol`, `text`.";
 
 #[allow(dead_code)]
 pub const TRACE_PATH_DESCRIPTION: &str =
@@ -223,7 +223,7 @@ impl SingularragServer {
 
     #[tool(
         name = "annotate",
-        description = "Leaves a one-paragraph note on a file or symbol in map.toml; it shows in the next map with an (agent) tag. `path`, optional `symbol`, `note`."
+        description = "Leaves a one-paragraph note on a file or symbol in map.toml; it shows in the next map with an (agent) tag. `path`, optional `symbol`, `text`."
     )]
     async fn annotate(
         &self,

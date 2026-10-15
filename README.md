@@ -76,7 +76,7 @@ The server binds to localhost only and requires the per-run token in the URL. `-
 
 Building from source needs Bun for the UI: `cd ui && bun install && bun run build`, then `cargo build --release`.
 
-## Does it earn its place? (tier-two eval)
+## Does it earn its place?
 
 singularrag is for a person understanding a corpus, not for the agent: the agent is a consumer of the same index the person reads, no longer the job it is judged by. The gates are tier one (`cargo test`, deterministic, every commit) and the walks: `singularrag walk` runs `--questions eval/walks-<corpus>.toml`, a file of questions a person would actually bring, one per corpus, against the real tools. Five tier-two runs across three corpora, the last on the GitLab handbook with both conditions at 1.00, showed an agent with grep does not need the map, so tier two no longer gates a release; the harness still exists for anyone measuring an agent, and the full record is in `eval/README.md`.
 

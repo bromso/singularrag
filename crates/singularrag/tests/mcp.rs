@@ -12,7 +12,7 @@ use tokio::process::Command;
 const REPO_MAP_DESCRIPTION: &str = "Token-budgeted map of the code symbols and document sections most relevant to a task, each file with the files that reference it. `query`: a question or identifiers; `focus_files`: workspace-relative paths; `budget_tokens`: default 1024, up to 8192; `entities`, `themes`: optional names and phrases. Rows are `line  signature` or `line  ## heading`, never bodies.";
 const FIND_SYMBOL_DESCRIPTION: &str =
     "Looks a symbol or section name up and lists its definitions and the files that reference it. `name`: the exact or partial name.";
-const ANNOTATE_DESCRIPTION: &str = "Leaves a one-paragraph note on a file or symbol in map.toml; it shows in the next map with an (agent) tag. `path`, optional `symbol`, `note`.";
+const ANNOTATE_DESCRIPTION: &str = "Leaves a one-paragraph note on a file or symbol in map.toml; it shows in the next map with an (agent) tag. `path`, optional `symbol`, `text`.";
 const TRACE_PATH_DESCRIPTION: &str =
     "How two symbols connect through references. `from`, `to`: `path::name`.";
 const ENTITIES_DESCRIPTION: &str = "What the documents say about a person, system, concept, event or process, with the sections that say it. A process comes back as ordered steps with role, systems and implementing code. `query`: a name or a question; `entities`: names you know; `limit`: default 10, max 25. Descriptions are extracted text, not verified.";
