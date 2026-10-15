@@ -79,8 +79,10 @@ enum Cmd {
     Walk {
         #[arg(long)]
         questions: PathBuf,
-        #[arg(long, default_value_t = DEFAULT_BUDGET)]
-        budget: usize,
+        /// Token budget for locate walks [default: the walk file's `budget`, else 1024].
+        /// A walk's own `budget` still wins over this flag.
+        #[arg(long)]
+        budget: Option<usize>,
         #[arg(long)]
         json: bool,
         /// Run without the knowledge layer's models: no query embeddings, no semantic seeds

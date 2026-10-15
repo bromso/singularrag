@@ -23,10 +23,18 @@ pub struct WalkResult {
 }
 
 pub struct WalkOptions {
-    pub budget: usize,
+    /// An explicit `--budget`; `None` when the flag was absent.
+    pub budget: Option<usize>,
     /// The walk file's directory: `change` patches are relative to it.
     #[allow(dead_code)] // read by the change walks (Task 4)
     pub walk_dir: PathBuf,
+}
+
+/// A locate walk's budget: the walk's own, then an explicit `--budget`, then the walk
+/// file's default, then `DEFAULT_BUDGET`. The flag beats the file so a budget sweep
+/// (1024/2048/4096, as tier one is run) works over one file. Clamped.
+pub fn effective_budget(w: &Walk, cli: Option<usize>, file: Option<usize>) -> usize {
+    map::clamp_budget(w.budget.or(cli).or(file).unwrap_or(map::DEFAULT_BUDGET))
 }
 
 pub fn grade_locate(
@@ -112,14 +120,12 @@ pub fn run_walks(
     file: &WalkFile,
     opts: &WalkOptions,
 ) -> Result<Vec<WalkResult>> {
-    // The walk's own budget, else the file's default, else the command's (spec §2).
-    let default_budget = file.budget.unwrap_or(opts.budget);
     let mut processes: Option<ProcessesDto> = None;
     let mut results = Vec::with_capacity(file.walk.len());
     for w in &file.walk {
         let (pass, reached, reason) = match w.kind {
             WalkKind::Locate => {
-                let budget = map::clamp_budget(w.budget_or(default_budget));
+                let budget = effective_budget(w, opts.budget, file.budget);
                 let r = engine.repo_map(&MapRequest {
                     query: w.query.clone(),
                     budget_tokens: budget,
@@ -199,6 +205,16 @@ pub fn render_report(results: &[WalkResult]) -> String {
 mod tests {
     use super::*;
     use crate::serve::queries::{SectionRefDto, StepDto};
+
+    #[test]
+    fn the_budget_is_the_walks_then_the_flags_then_the_files_then_the_default() {
+        let mut w = walk(WalkKind::Locate, &["a::b"]);
+        assert_eq!(effective_budget(&w, None, None), map::DEFAULT_BUDGET);
+        assert_eq!(effective_budget(&w, None, Some(2048)), 2048);
+        assert_eq!(effective_budget(&w, Some(4096), Some(2048)), 4096);
+        w.budget = Some(512);
+        assert_eq!(effective_budget(&w, Some(4096), Some(2048)), 512);
+    }
 
     #[test]
     fn locate_passes_when_any_gold_is_served_and_names_the_budget_when_not() {
