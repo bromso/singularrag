@@ -240,25 +240,6 @@ pub fn grade_change(gold: &[String], c: &Changed) -> (bool, Vec<String>, Option<
     }
 }
 
-/// Every file a patch touches (`--- a/<path>` and `+++ b/<path>`), once each, in order;
-/// `/dev/null` (the old side of a new file, the new side of a deleted one) is skipped.
-pub fn patch_paths(patch: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in patch.lines() {
-        let Some(p) = line
-            .strip_prefix("+++ b/")
-            .or_else(|| line.strip_prefix("--- a/"))
-        else {
-            continue;
-        };
-        let p = p.trim_end();
-        if p != "/dev/null" && !out.iter().any(|o| o == p) {
-            out.push(p.to_string());
-        }
-    }
-    out
-}
-
 /// `git -C root <args>`: `Ok(stdout)`, or `Err(first stderr line)` when git fails.
 fn git_run(root: &Path, args: &[&str]) -> Result<std::result::Result<String, String>> {
     let out = std::process::Command::new("git")
@@ -279,22 +260,49 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
     git_run(root, args)?.map_err(|e| anyhow!("git {}: {e}", args.join(" ")))
 }
 
-/// Clean means no tracked edit and no untracked file, ignoring our own index directory
-/// (`.singularrag/`, which opening the engine creates inside the corpus root).
+/// `git status` over the corpus, our own index directory (`.singularrag/`, which opening
+/// the engine creates inside the corpus root) excluded.
+fn status(root: &Path, extra: &[&str]) -> Result<String> {
+    let mut args = vec!["status", "--porcelain", "--untracked-files=all"];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["--", ".", ":(exclude).singularrag"]);
+    git(root, &args)
+}
+
+/// Clean means no tracked edit and no untracked file, `.singularrag/` aside.
 fn is_clean(root: &Path) -> Result<bool> {
-    Ok(git(
-        root,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            ".",
-            ":(exclude).singularrag",
-        ],
-    )?
-    .trim()
-    .is_empty())
+    Ok(status(root, &[])?.trim().is_empty())
+}
+
+/// The status entries as `(XY, path)`, from `-z` output so paths are literal. A rename or
+/// copy entry carries its source as the next field; both sides are returned.
+fn status_entries(root: &Path) -> Result<Vec<(String, String)>> {
+    let out = status(root, &["-z"])?;
+    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+    let mut entries = Vec::new();
+    while let Some(f) = fields.next() {
+        if f.len() < 4 {
+            continue;
+        }
+        let (xy, path) = (f[..2].to_string(), f[3..].to_string());
+        if xy.contains('R') || xy.contains('C') {
+            if let Some(src) = fields.next() {
+                entries.push((" D".to_string(), src.to_string()));
+            }
+        }
+        entries.push((xy, path));
+    }
+    Ok(entries)
+}
+
+/// `true` when `root` is the toplevel of its own git checkout, so `git apply` there cannot
+/// write into an enclosing repository.
+fn is_git_toplevel(root: &Path) -> bool {
+    let Ok(Ok(top)) = git_run(root, &["rev-parse", "--show-toplevel"]) else {
+        return false;
+    };
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(Path::new(top.trim())) == canon(root)
 }
 
 /// `git apply --check`, then `git apply`; a failed check is `patch does not apply: <why>`.
@@ -306,33 +314,52 @@ fn apply_patch(root: &Path, patch: &Path) -> Result<()> {
     git(root, &["apply", &p]).map(|_| ())
 }
 
-/// Tracked edits go back with `checkout`; a file the patch added has nothing to check out,
-/// so that error is ignored and `clean` removes it. One `checkout` per path: git refuses
-/// the whole call when any one pathspec matches nothing, which would leave every edit.
-fn revert(root: &Path, paths: &[String]) -> Result<()> {
-    for p in paths {
-        let _ = git(root, &["checkout", "--", p]);
+/// Undoes everything in the tree that `git status` reports. The tree was clean before
+/// the patch, so every entry is the patch's doing: untracked paths go with `clean`, every
+/// other status with `checkout`, one explicit path per call (never a bare `clean` or
+/// `checkout` over the root). A tree still dirty afterwards is a hard error naming what is
+/// left, so no grade is ever reported over a dirty corpus.
+fn revert(root: &Path) -> Result<()> {
+    for (xy, path) in status_entries(root)? {
+        let args: &[&str] = if xy == "??" {
+            &["clean", "-fd", "--", &path]
+        } else {
+            &["checkout", "--", &path]
+        };
+        let _ = git(root, args);
     }
-    let mut args: Vec<&str> = vec!["clean", "-fd", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git(root, &args).map(|_| ())
+    let left: Vec<String> = status_entries(root)?.into_iter().map(|e| e.1).collect();
+    if !left.is_empty() {
+        return Err(anyhow!(
+            "revert left the corpus dirty at {}: {}",
+            root.display(),
+            left.join(", ")
+        ));
+    }
+    Ok(())
 }
 
-/// Reverts the patched paths when dropped, so an error between apply and grade (a failed
-/// refresh, a failed `changed`) still leaves the checkout as it was.
+/// Reverts the patch when dropped, so an error between apply and grade (a failed refresh,
+/// a failed `changed`) still leaves the checkout as it was. `finish` reverts on the normal
+/// path and returns the revert's error.
 struct Revert {
     root: PathBuf,
-    paths: Vec<String>,
+    armed: bool,
+}
+
+impl Revert {
+    fn finish(mut self) -> Result<()> {
+        self.armed = false;
+        revert(&self.root)
+    }
 }
 
 impl Drop for Revert {
     fn drop(&mut self) {
-        if let Err(e) = revert(&self.root, &self.paths) {
-            eprintln!(
-                "walk: reverting {} in {} failed: {e}",
-                self.paths.join(", "),
-                self.root.display()
-            );
+        if self.armed {
+            if let Err(e) = revert(&self.root) {
+                eprintln!("walk: {e}");
+            }
         }
     }
 }
@@ -353,6 +380,9 @@ fn run_change(
     if walk_dir.starts_with(&root) {
         return refuse("walk file lives inside the corpus: refused".into());
     }
+    if !is_git_toplevel(&root) {
+        return refuse("corpus is not a git toplevel: refused".into());
+    }
     match is_clean(&root) {
         Ok(true) => {}
         Ok(false) => return refuse("checkout is dirty: refused".into()),
@@ -363,18 +393,17 @@ fn run_change(
         Ok(p) => p,
         Err(e) => return refuse(format!("patch {rel}: {e}")),
     };
-    let paths = patch_paths(&std::fs::read_to_string(&patch_file)?);
     if let Err(e) = apply_patch(&root, &patch_file) {
         return refuse(e.to_string());
     }
     let guard = Revert {
         root: root.clone(),
-        paths,
+        armed: true,
     };
     engine.refresh(Duration::from_secs(600))?;
     let config = MapConfig::load(&root)?;
     let c = changed(engine.store(), &config, engine.workspace(), None)?;
-    drop(guard);
+    guard.finish()?;
     // Re-index the reverted tree, so later walks in the file see the corpus as it is.
     engine.refresh(Duration::from_secs(600))?;
     Ok(grade_change(&w.gold, &c))
@@ -809,12 +838,6 @@ mod tests {
     }
 
     #[test]
-    fn patch_paths_lists_touched_files_once_including_new_ones() {
-        let p = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+z\n";
-        assert_eq!(patch_paths(p), vec!["src/a.ts", "src/new.ts"]);
-    }
-
-    #[test]
     fn grade_change_needs_every_gold_in_the_list() {
         use singularrag_core::changed::{Changed, ChangedSymbol};
         let sym = |p: &str, n: &str| ChangedSymbol {
@@ -881,9 +904,107 @@ mod tests {
         apply_patch(root, &patch).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "y\n");
         assert!(root.join("new.txt").exists());
-        revert(root, &["a.txt".into(), "new.txt".into()]).unwrap();
+        revert(root).unwrap();
         assert!(is_clean(root).unwrap());
         assert!(!root.join("new.txt").exists());
+    }
+
+    /// Applies `patch` to a fresh repo of `files`, checks it wrote something, reverts, and
+    /// checks the tree is back: clean, and no tracked difference (modes included).
+    fn applies_and_reverts(files: &[(&str, &str)], patch: &str) -> tempfile::TempDir {
+        let dir = repo(files);
+        let root = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        let p = outside.path().join("p.patch");
+        std::fs::write(&p, patch).unwrap();
+        apply_patch(root, &p).unwrap();
+        assert!(!is_clean(root).unwrap(), "the patch wrote nothing");
+        revert(root).unwrap();
+        assert!(is_clean(root).unwrap());
+        git(root, &["diff", "--quiet"]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_mode_only_patch_reverts() {
+        let dir = applies_and_reverts(
+            &[("a.sh", "echo\n")],
+            "diff --git a/a.sh b/a.sh\nold mode 100644\nnew mode 100755\n",
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join("a.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0, "the mode is back");
+    }
+
+    #[test]
+    fn a_pure_rename_reverts() {
+        let dir = applies_and_reverts(
+            &[("a.txt", "x\n")],
+            "diff --git a/a.txt b/b.txt\nsimilarity index 100%\nrename from a.txt\nrename to b.txt\n",
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "x\n"
+        );
+        assert!(!dir.path().join("b.txt").exists());
+    }
+
+    #[test]
+    fn a_header_with_a_tab_and_timestamp_reverts() {
+        let dir = applies_and_reverts(
+            &[("a.txt", "x\n")],
+            "--- a/a.txt\t2026-10-15 10:00:00.000000000 +0200\n+++ b/a.txt\t2026-10-15 10:01:00.000000000 +0200\n@@ -1 +1 @@\n-x\n+y\n",
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "x\n"
+        );
+    }
+
+    #[test]
+    fn a_patch_deleting_a_file_reverts() {
+        let dir = applies_and_reverts(
+            &[("a.txt", "x\n"), ("b.txt", "keep\n")],
+            "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "x\n"
+        );
+    }
+
+    #[test]
+    fn a_tree_still_dirty_after_revert_is_a_hard_error_naming_the_paths() {
+        // A staged new file: `checkout` leaves the index entry, so the tree stays dirty.
+        let dir = repo(&[("a.txt", "x\n")]);
+        std::fs::write(dir.path().join("staged.txt"), "s\n").unwrap();
+        git(dir.path(), &["add", "staged.txt"]).unwrap();
+        let e = revert(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("staged.txt"), "{e}");
+    }
+
+    #[test]
+    fn a_corpus_that_is_not_its_own_git_toplevel_is_refused() {
+        let dir = repo(&[("sub/src/session.ts", SESSION_TS)]);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("W.patch"), SESSION_PATCH).unwrap();
+        let mut engine = Engine::open(&dir.path().join("sub"), "walk-test").unwrap();
+        let opts = WalkOptions {
+            budget: None,
+            walk_dir: outside.path().to_path_buf(),
+        };
+        let w = change_walk(&["src/session.ts::createSession"]);
+        assert_eq!(
+            run_change(&mut engine, &w, &opts).unwrap().2.as_deref(),
+            Some("corpus is not a git toplevel: refused")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sub/src/session.ts")).unwrap(),
+            SESSION_TS
+        );
     }
 
     const SESSION_TS: &str = "export function createSession() {\n  return 1;\n}\n";
