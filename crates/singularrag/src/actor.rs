@@ -315,9 +315,17 @@ impl Actor {
 
     fn handle(&mut self, job: Job) -> bool {
         // Every received job passes through here exactly once.
-        let _ = self
-            .queued
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        // A compare-exchange loop rather than `fetch_update`, which newer stable deprecates.
+        let mut cur = self.queued.load(Ordering::SeqCst);
+        while cur > 0 {
+            match self
+                .queued
+                .compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
         let refreshes = matches!(
             job,
             Job::Map(..)
