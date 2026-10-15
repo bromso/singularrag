@@ -222,7 +222,7 @@ fn prisma(source: &str) -> SchemaExtract {
             "table",
             *start as u32 + 1,
             *end as u32 + 1,
-            sig,
+            truncate(&sig),
         ));
         out.tags.extend(columns);
         for (field, target, rel_line) in fks {
@@ -392,5 +392,16 @@ enum Role {
         let col = x.tags.iter().find(|t| t.name == "A.id").unwrap();
         assert_eq!(col.signature.chars().count(), SIGNATURE_MAX);
         assert!(col.signature.ends_with('…'));
+    }
+
+    #[test]
+    fn a_long_table_signature_is_cut_at_the_cap() {
+        let model = "A".repeat(200);
+        let table = "B".repeat(200);
+        let src = format!("model {model} {{\n  id String @id\n\n  @@map(\"{table}\")\n}}\n");
+        let x = extract(Language::Prisma, &src).unwrap();
+        let t = x.tags.iter().find(|t| t.name == table).unwrap();
+        assert_eq!(t.signature.chars().count(), SIGNATURE_MAX);
+        assert!(t.signature.ends_with('…'));
     }
 }
