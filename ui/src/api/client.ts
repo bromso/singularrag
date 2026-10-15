@@ -1,4 +1,4 @@
-import type { BlastResult, EntitiesPayload, GraphPayload, MapConfig, MapDoc, ProcessesPayload, QueryResult, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "./types";
+import type { BlastResult, EntitiesPayload, EntityDetail, EntitySearchPayload, GraphPayload, MapConfig, MapDoc, ProcessesPayload, ProcessParams, QueryResult, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "./types";
 
 export class ApiError extends Error {
   /** `current` carries the server's document on a 409 so the caller can reload from it. */
@@ -52,6 +52,16 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   }
 }
 
+function processQuery(p: ProcessParams): string {
+  const qs = new URLSearchParams();
+  if (p.q) qs.set("q", p.q);
+  if (p.role) qs.set("role", p.role);
+  if (p.offset !== undefined) qs.set("offset", String(p.offset));
+  if (p.limit !== undefined) qs.set("limit", String(p.limit));
+  const s = qs.toString();
+  return s ? `?${s}` : "";
+}
+
 export const api = {
   status: () => req<Status>("GET", "/status"),
   retrievals: (before?: number) => req<RetrievalSummary[]>("GET", `/retrievals?limit=50${before ? `&before=${before}` : ""}`),
@@ -64,7 +74,9 @@ export const api = {
   saveMap: (cfg: MapConfig, expectedVersion: number) => req<MapDoc>("PUT", "/map", { ...cfg, expected_version: expectedVersion }),
   graph: () => req<GraphPayload>("GET", "/graph"),
   entities: () => req<EntitiesPayload>("GET", "/entities"),
-  processes: () => req<ProcessesPayload>("GET", "/processes"),
+  entitySearch: (q: string) => req<EntitySearchPayload>("GET", `/entities/search?q=${encodeURIComponent(q)}`),
+  entityDetail: (id: number) => req<EntityDetail>("GET", `/entities/${id}`),
+  processes: (params: ProcessParams = {}) => req<ProcessesPayload>("GET", `/processes${processQuery(params)}`),
   blast: (path: string, symbol: string) => req<BlastResult>("GET", `/blast?path=${encodeURIComponent(path)}&symbol=${encodeURIComponent(symbol)}`),
   query: (query: string, budget: number) => req<QueryResult>("POST", "/query", { query, budget }),
 };

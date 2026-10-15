@@ -14,7 +14,7 @@ const entitiesFixture = {
     { id: 1, name: "Ada Lovelace", type: "person", description: "Wrote the first program.", mentions: 3 },
     { id: 2, name: "Analytical Engine", type: "system", description: "A mechanical computer.", mentions: 1 },
   ],
-  relations: [{ id: 1, src: 1, dst: 2, description: "programmed", symbol_id: 10, path: "docs/guide.md", name: "Intro" }],
+  relations: [{ id: 1, src: 1, dst: 2, description: "programmed", symbol_id: 10, path: "docs/guide.md", name: "Intro", src_name: "Ada Lovelace", dst_name: "Analytical Engine" }],
   mentions: [{ entity_id: 1, symbol_id: 10, path: "docs/guide.md", name: "Intro" }, { entity_id: 2, symbol_id: 99, path: "docs/other.md", name: "Elsewhere" }],
   truncated: false,
 };
@@ -22,12 +22,14 @@ const processesFixture = {
   processes: [{ id: 1, name: "Onboarding", description: "", roles: ["engineer"], steps: [
     { ordinal: 1, text: "Read the intro", role: "engineer", systems: [], section: { symbol_id: 10, path: "docs/guide.md", name: "Intro", line: 1 }, code: [], more_code: 0 },
   ] }],
-  truncated: false,
+  total: 1, offset: 0, limit: 50,
 };
 // Merged into every `GET /api/status` answer; a test can set knowledge-status flags.
 let statusExtra: Record<string, unknown> = {};
 // When set, `GET /api/entities` answers with it instead of `entitiesFixture`.
 let entitiesOverride: unknown = null;
+// Entities the search and detail routes know but the overlay does not (past its cap).
+let extraEntities: { id: number; name: string; type: string; description: string; mentions: number }[] = [];
 let saved: any = null;
 let mapState: any = null;
 // What `GET /api/retrievals` answers; a test can push to it before firing a change event.
@@ -100,6 +102,7 @@ beforeEach(() => {
   statusGates = null;
   statusExtra = {};
   entitiesOverride = null;
+  extraEntities = [];
   (globalThis as any).EventSource = class {
     addEventListener(type: string, cb: (e: { data: string }) => void) {
       if (type === "change") changeHandler = cb;
@@ -127,7 +130,21 @@ beforeEach(() => {
     if (url.endsWith("/api/retrievals/7")) return json({ ...retrieval, items: [...detailItems, ...extraRetrievalItems] });
     if (url.endsWith("/api/tree")) return json(treeOverride ?? tree);
     if (url.endsWith("/api/entities")) return json(entitiesOverride ?? entitiesFixture);
-    if (url.endsWith("/api/processes")) return json(processesFixture);
+    if (url.includes("/api/entities/search?")) {
+      const q = new URL(url, "http://x").searchParams.get("q")!.toLowerCase();
+      const e = (entitiesOverride ?? entitiesFixture) as typeof entitiesFixture;
+      return json({ entities: [...e.entities, ...extraEntities].filter((x) => x.name.toLowerCase().startsWith(q)) });
+    }
+    const detailMatch = /\/api\/entities\/(\d+)$/.exec(url);
+    if (detailMatch) {
+      // The detail the server would build: the overlay's rows for this entity, plus `extraEntities`.
+      const id = Number(detailMatch[1]);
+      const e = (entitiesOverride ?? entitiesFixture) as typeof entitiesFixture;
+      const entity = [...e.entities, ...extraEntities].find((x) => x.id === id);
+      if (!entity) return new Response("{\"error\":\"no such entity\"}", { status: 404 });
+      return json({ entity, relations: e.relations.filter((x) => x.src === id || x.dst === id), mentions: e.mentions.filter((x) => x.entity_id === id), steps: null });
+    }
+    if (url.includes("/api/processes")) return json(processesFixture);
     if (url.endsWith("/api/skipped")) return json([{ path: ".env", reason: "denylisted" }]);
     // GET /api/map returns a fresh object (new identity) each call, reflecting
     // whatever was last PUT — this both matches how the real server behaves
@@ -197,7 +214,7 @@ describe("App", () => {
     // A later retrieval, arriving live, is announced in full.
     retrievalList = [{ ...retrieval, id: 8, session_label: "Codex", tool: "find_symbol", served: 2, cut: 1 }, retrieval];
     expect(changeHandler).not.toBeNull();
-    changeHandler?.({ data: JSON.stringify({ max_retrieval_id: 8 }) });
+    act(() => { changeHandler?.({ data: JSON.stringify({ max_retrieval_id: 8 }) }); });
     await waitFor(() => expect(live.textContent).toContain("New retrieval from Codex: find_symbol, 2 served, 1 cut, fresh"));
   });
   test("identical freshness payloads announce once; a change announces again", async () => {
@@ -262,7 +279,7 @@ describe("App", () => {
     const mapCallsBefore = (globalThis.fetch as any).mock.calls.filter(
       (c: any[]) => String(c[0]).endsWith("/api/map") && c[1]?.method === "GET",
     ).length;
-    changeHandler?.({ data: JSON.stringify({ max_retrieval_id: 7 }) });
+    act(() => { changeHandler?.({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
     await waitFor(() => {
       const mapCallsAfter = (globalThis.fetch as any).mock.calls.filter(
         (c: any[]) => String(c[0]).endsWith("/api/map") && c[1]?.method === "GET",
@@ -473,12 +490,12 @@ describe("App", () => {
 
     statusGates = [];
     // Load A starts (older generation) and blocks on its /api/status call.
-    changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) });
+    act(() => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
     await waitFor(() => expect(statusGates!.length).toBe(1));
 
     // Load B starts (newer generation, newer index version) and also blocks.
     statusVersion = "def456";
-    changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) });
+    act(() => { changeHandler!({ data: JSON.stringify({ max_retrieval_id: 7 }) }); });
     await waitFor(() => expect(statusGates!.length).toBe(2));
 
     // Release B's gate and let it run to completion (including its tree/graph
@@ -736,8 +753,9 @@ describe("App", () => {
     expect(within(panel).getByRole("heading", { name: "Ada Lovelace" })).toBeTruthy();
     expect(within(panel).getByText("person")).toBeTruthy();
     expect(within(panel).getByText("Wrote the first program.")).toBeTruthy();
-    const mentions = within(panel).getByRole("list", { name: "Mentioned in" });
+    const mentions = await within(panel).findByRole("list", { name: "Mentioned in" });
     expect(within(mentions).getAllByRole("listitem")).toHaveLength(1);
+    expect(calls("/api/entities/1")).toBe(1);
     expect(within(mentions).getAllByRole("button", { name: /^Go to section/ })).toHaveLength(1);
     const relations = within(panel).getByRole("list", { name: "Relations" });
     expect(within(relations).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Ada Lovelace → Analytical Engine: programmed"]);
@@ -754,7 +772,7 @@ describe("App", () => {
     const panel = screen.getByRole("region", { name: "Details" });
     const list = await within(panel).findByRole("list", { name: "Entities" });
     await user.click(within(list).getByRole("button", { name: /^Ada Lovelace/ }));
-    await user.click(within(panel).getByRole("button", { name: /^Go to section/ }));
+    await user.click(await within(panel).findByRole("button", { name: /^Go to section/ }));
     await screen.findByRole("treegrid", { name: "Repository" });
     await waitFor(() => {
       const ae = document.activeElement;
@@ -801,7 +819,7 @@ describe("App", () => {
     ];
     entitiesOverride = {
       entities: [{ id: 1, name: "Ada", type: "person", description: "", mentions: 1 }, { id: 2, name: "Engine", type: "system", description: "", mentions: 1 }],
-      relations: [{ id: 1, src: 1, dst: 2, description: "maintains", symbol_id: 21, path: "notes/n.md", name: "N" }],
+      relations: [{ id: 1, src: 1, dst: 2, description: "maintains", symbol_id: 21, path: "notes/n.md", name: "N", src_name: "Ada", dst_name: "Engine" }],
       mentions: [{ entity_id: 1, symbol_id: 21, path: "notes/n.md", name: "N" }, { entity_id: 2, symbol_id: 20, path: "app/src/a.ts", name: "a" }],
       truncated: false,
     };
@@ -829,12 +847,35 @@ describe("App", () => {
     expect(localStorage.getItem("singularrag.view")).toBe("journeys");
   });
 
-  test("a change event refetches the processes", async () => {
+  test("the Journeys view fetches its first 50 processes, and a change event refetches them", async () => {
+    localStorage.setItem("singularrag.view", "journeys");
     render(<App />);
-    await screen.findByText("src/auth/session.ts");
+    await screen.findByRole("list", { name: "Processes" });
     await waitFor(() => expect(calls("/api/processes")).toBe(1));
+    const url = (globalThis.fetch as any).mock.calls.map((c: any[]) => String(c[0])).find((u: string) => u.includes("/api/processes"));
+    expect(new URL(url, "http://x").searchParams.get("limit")).toBe("50");
     await act(async () => { changeHandler!({ data: "{}" }); });
     await waitFor(() => expect(calls("/api/processes")).toBe(2));
+  });
+
+  test("the tree view does not fetch the processes", async () => {
+    render(<App />);
+    await screen.findByText("src/auth/session.ts");
+    await waitFor(() => expect(calls("/api/entities")).toBe(1));
+    expect(calls("/api/processes")).toBe(0);
+  });
+
+  test("an entity found by name past the overlay's cap opens in the panel from its detail", async () => {
+    extraEntities = [{ id: 9, name: "Babbage", type: "person", description: "Designed the engine.", mentions: 1 }];
+    const user = userEvent.setup();
+    render(<App />);
+    const panel = await screen.findByRole("region", { name: "Details" });
+    await within(panel).findByRole("list", { name: "Entities" });
+    await user.type(within(panel).getByRole("searchbox", { name: "Find an entity" }), "bab");
+    await user.click(await within(panel).findByRole("button", { name: /^Babbage/ }));
+    expect(within(panel).getByRole("heading", { name: "Babbage" })).toBeTruthy();
+    expect(await within(panel).findByText("No mentions on record.")).toBeTruthy();
+    expect(calls("/api/entities/9")).toBe(1);
   });
 
   test("Documented in switches to the tree and focuses that section's row", async () => {

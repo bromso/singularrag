@@ -20,7 +20,7 @@ use singularrag_core::knowledge::norm_name;
 use singularrag_core::map;
 use singularrag_core::walks::{Walk, WalkFile, WalkKind};
 
-use crate::serve::queries::{self, EntitiesDto, ProcessDto, ProcessesDto};
+use crate::serve::queries::{self, EntityDetailDto, ProcessDto, ProcessQuery, ProcessesDto};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WalkResult {
@@ -111,25 +111,34 @@ pub fn grade_process(w: &Walk, dto: &ProcessesDto) -> (bool, Vec<String>, Option
     (false, reached, Some(reason))
 }
 
-/// An entity-start connection walk: every entity whose normalised name matches `w.from`
-/// is a BFS root over the entities DTO. Hop 1 from an entity reaches its mention sections
-/// (`path::name`) and its related entities (either end of a relation); hop 2 reaches those
-/// entities' mentions and relations; and so on to `w.hops()`.
-pub fn grade_connection_entity(w: &Walk, dto: &EntitiesDto) -> (bool, Vec<String>, Option<String>) {
-    let from = w.from.as_deref().unwrap_or_default();
+/// An entity-start connection walk's roots: every entity the panel's search finds whose
+/// normalised name equals the start's (exact matches only; prefixes are for the UI).
+pub fn entity_starts(store: &singularrag_core::store::Store, from: &str) -> Result<Vec<i64>> {
     let norm_from = norm_name(from);
-    let starts: Vec<i64> = dto
-        .entities
-        .iter()
+    Ok(queries::entities_search(store, &norm_from)?
+        .into_iter()
         .filter(|e| norm_name(&e.name) == norm_from)
         .map(|e| e.id)
-        .collect();
+        .collect())
+}
+
+/// An entity-start connection walk: each of `starts` is a BFS root, and `fetch` gives an
+/// entity's detail (the panel's own query, uncapped). Hop 1 from an entity reaches its
+/// mention sections (`path::name`) and its related entities (either end of a relation);
+/// hop 2 reaches those entities' mentions and relations; and so on to `w.hops()`. Each
+/// reached entity is fetched at most once.
+pub fn grade_connection_entity(
+    w: &Walk,
+    starts: &[i64],
+    fetch: &dyn Fn(i64) -> singularrag_core::Result<Option<EntityDetailDto>>,
+) -> Result<(bool, Vec<String>, Option<String>)> {
+    let from = w.from.as_deref().unwrap_or_default();
     if starts.is_empty() {
-        return (false, vec![], Some(format!("{from} not found")));
+        return Ok((false, vec![], Some(format!("{from} not found"))));
     }
 
     let mut visited: HashSet<i64> = starts.iter().copied().collect();
-    let mut frontier: Vec<i64> = starts;
+    let mut frontier: Vec<i64> = starts.to_vec();
     // Every key reached grades the walk; `reached` is only the first 50, for the report.
     let mut all: HashSet<String> = HashSet::new();
     let mut reached: Vec<String> = Vec::new();
@@ -139,14 +148,15 @@ pub fn grade_connection_entity(w: &Walk, dto: &EntitiesDto) -> (bool, Vec<String
         }
         let mut next_frontier: Vec<i64> = Vec::new();
         for eid in &frontier {
-            for m in dto.mentions.iter().filter(|m| m.entity_id == *eid) {
+            let Some(d) = fetch(*eid)? else { continue };
+            for m in &d.mentions {
                 let key = format!("{}::{}", m.path, m.name);
                 if reached.len() < 50 {
                     reached.push(key.clone());
                 }
                 all.insert(key);
             }
-            for rel in &dto.relations {
+            for rel in &d.relations {
                 let other = if rel.src == *eid {
                     Some(rel.dst)
                 } else if rel.dst == *eid {
@@ -166,15 +176,46 @@ pub fn grade_connection_entity(w: &Walk, dto: &EntitiesDto) -> (bool, Vec<String
 
     let pass = w.gold.iter().any(|g| all.contains(g));
     if pass {
-        (true, reached, None)
+        Ok((true, reached, None))
     } else {
         let first_gold = w.gold.first().cloned().unwrap_or_default();
         let hops = w.hops();
-        (
+        Ok((
             false,
             reached,
             Some(format!("{first_gold} not within {hops} hops of {from}")),
-        )
+        ))
+    }
+}
+
+/// Every process, by paging the processes query (`limit` per page) until `offset >= total`:
+/// the process grader sees what the Journeys view can reach, with no cap hiding any.
+fn all_processes_paged(
+    store: &singularrag_core::store::Store,
+    limit: usize,
+) -> Result<ProcessesDto> {
+    let mut processes = Vec::new();
+    loop {
+        let page = queries::processes_page(
+            store,
+            &ProcessQuery {
+                q: None,
+                role: None,
+                offset: processes.len(),
+                limit,
+            },
+        )?;
+        let n = page.processes.len();
+        processes.extend(page.processes);
+        if n == 0 || processes.len() >= page.total {
+            let total = page.total;
+            return Ok(ProcessesDto {
+                total,
+                offset: 0,
+                limit: processes.len(),
+                processes,
+            });
+        }
     }
 }
 
@@ -431,7 +472,6 @@ pub fn run_walks(
     opts: &WalkOptions,
 ) -> Result<Vec<WalkResult>> {
     let mut processes: Option<ProcessesDto> = None;
-    let mut entities: Option<EntitiesDto> = None;
     let mut results = Vec::with_capacity(file.walk.len());
     for w in &file.walk {
         let (pass, reached, reason) = match w.kind {
@@ -447,7 +487,10 @@ pub fn run_walks(
             }
             WalkKind::Process => {
                 if processes.is_none() {
-                    processes = Some(queries::processes(engine.store())?);
+                    processes = Some(all_processes_paged(
+                        engine.store(),
+                        queries::PROCESS_PAGE_MAX,
+                    )?);
                 }
                 grade_process(w, processes.as_ref().expect("loaded above"))
             }
@@ -465,10 +508,9 @@ pub fn run_walks(
                     )?;
                     grade_connection_symbol(w, (path, symbol), blast.as_ref())
                 } else {
-                    if entities.is_none() {
-                        entities = Some(queries::entities(engine.store())?);
-                    }
-                    grade_connection_entity(w, entities.as_ref().expect("loaded above"))
+                    let store = engine.store();
+                    let starts = entity_starts(store, &from)?;
+                    grade_connection_entity(w, &starts, &|id| queries::entity_detail(store, id))?
                 }
             }
             WalkKind::Change => run_change(engine, w, opts)?,
@@ -536,6 +578,7 @@ mod tests {
     use crate::serve::queries::{
         EntityDto, EntityMentionDto, EntityRelationDto, SectionRefDto, StepDto,
     };
+    use std::collections::HashMap;
 
     #[test]
     fn the_budget_is_the_walks_then_the_flags_then_the_files_then_the_default() {
@@ -601,7 +644,9 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
-            truncated: false,
+            total: 0,
+            offset: 0,
+            limit: 50,
         }
     }
 
@@ -620,54 +665,75 @@ mod tests {
         }
     }
 
-    fn edto(
+    /// Hand-built entity details, as `entity_detail` would answer: each entity with every
+    /// relation it is either end of and its own mentions.
+    fn details(
         entities: &[(i64, &str, &str)],
         relations: &[(i64, i64)],
         mentions: &[(i64, &str)],
-    ) -> EntitiesDto {
-        EntitiesDto {
-            entities: entities
-                .iter()
-                .map(|(id, n, t)| EntityDto {
-                    id: *id,
-                    name: n.to_string(),
-                    r#type: t.to_string(),
-                    description: String::new(),
-                    mentions: 1,
-                })
-                .collect(),
-            relations: relations
-                .iter()
-                .enumerate()
-                .map(|(i, (s, d))| EntityRelationDto {
-                    id: i as i64,
-                    src: *s,
-                    dst: *d,
-                    description: String::new(),
-                    symbol_id: 0,
-                    path: "p.md".into(),
-                    name: "s".into(),
-                })
-                .collect(),
-            mentions: mentions
-                .iter()
-                .map(|(e, key)| {
-                    let (p, n) = key.split_once("::").unwrap();
-                    EntityMentionDto {
-                        entity_id: *e,
-                        symbol_id: 0,
-                        path: p.into(),
-                        name: n.into(),
-                    }
-                })
-                .collect(),
-            truncated: false,
-        }
+    ) -> HashMap<i64, EntityDetailDto> {
+        let rels: Vec<EntityRelationDto> = relations
+            .iter()
+            .enumerate()
+            .map(|(i, (s, d))| EntityRelationDto {
+                id: i as i64,
+                src: *s,
+                dst: *d,
+                description: String::new(),
+                symbol_id: 0,
+                path: "p.md".into(),
+                name: "s".into(),
+                src_name: String::new(),
+                dst_name: String::new(),
+            })
+            .collect();
+        entities
+            .iter()
+            .map(|(id, n, t)| {
+                let detail = EntityDetailDto {
+                    entity: EntityDto {
+                        id: *id,
+                        name: n.to_string(),
+                        r#type: t.to_string(),
+                        description: String::new(),
+                        mentions: 1,
+                    },
+                    relations: rels
+                        .iter()
+                        .filter(|r| r.src == *id || r.dst == *id)
+                        .cloned()
+                        .collect(),
+                    mentions: mentions
+                        .iter()
+                        .filter(|(e, _)| e == id)
+                        .map(|(e, key)| {
+                            let (p, n) = key.split_once("::").unwrap();
+                            EntityMentionDto {
+                                entity_id: *e,
+                                symbol_id: 0,
+                                path: p.into(),
+                                name: n.into(),
+                            }
+                        })
+                        .collect(),
+                    steps: None,
+                };
+                (*id, detail)
+            })
+            .collect()
+    }
+
+    fn grade(
+        w: &Walk,
+        starts: &[i64],
+        d: &HashMap<i64, EntityDetailDto>,
+    ) -> (bool, Vec<String>, Option<String>) {
+        grade_connection_entity(w, starts, &|id| Ok(d.get(&id).cloned())).unwrap()
     }
 
     #[test]
     fn an_entity_reaches_its_mentions_at_one_hop_and_its_relations_mentions_at_two() {
-        let d = edto(
+        let d = details(
             &[(1, "Okta", "system"), (2, "IT desk", "organisation")],
             &[(2, 1)],
             &[(1, "docs/handbook.md::Onboarding"), (2, "docs/it.md::Desk")],
@@ -675,20 +741,20 @@ mod tests {
         let mut w = walk(WalkKind::Connection, &["docs/it.md::Desk"]);
         w.from = Some("okta".into());
         w.hops = Some(1);
-        let (pass, _, reason) = grade_connection_entity(&w, &d);
+        let (pass, _, reason) = grade(&w, &[1], &d);
         assert!(!pass);
         assert_eq!(
             reason.as_deref(),
             Some("docs/it.md::Desk not within 1 hops of okta")
         );
         w.hops = Some(2);
-        let (pass, reached, _) = grade_connection_entity(&w, &d);
+        let (pass, reached, _) = grade(&w, &[1], &d);
         assert!(pass, "{reached:?}");
     }
 
     #[test]
-    fn an_entity_start_tries_every_entity_of_that_name() {
-        let d = edto(
+    fn an_entity_start_tries_every_start_it_is_given() {
+        let d = details(
             &[(1, "Finance", "organisation"), (2, "Finance", "role")],
             &[],
             &[
@@ -698,34 +764,133 @@ mod tests {
         );
         let mut w = walk(WalkKind::Connection, &["docs/handbook.md::Expense process"]);
         w.from = Some("Finance".into());
-        assert!(grade_connection_entity(&w, &d).0);
+        assert!(grade(&w, &[1, 2], &d).0);
     }
 
     #[test]
     fn an_entity_start_passes_on_a_gold_beyond_the_reached_display_cap() {
         let keys: Vec<String> = (1..=60).map(|i| format!("docs/m{i}.md::S")).collect();
         let mentions: Vec<(i64, &str)> = keys.iter().map(|k| (1, k.as_str())).collect();
-        let d = edto(&[(1, "Okta", "system")], &[], &mentions);
+        let d = details(&[(1, "Okta", "system")], &[], &mentions);
         let mut w = walk(WalkKind::Connection, &["docs/m60.md::S"]);
         w.from = Some("Okta".into());
-        let (pass, reached, reason) = grade_connection_entity(&w, &d);
+        let (pass, reached, reason) = grade(&w, &[1], &d);
         assert!(pass, "{reason:?}");
         assert!(reached.len() <= 50, "{}", reached.len());
     }
 
     #[test]
     fn an_unknown_entity_start_fails_with_not_found() {
-        let d = edto(
+        let d = details(
             &[(1, "Okta", "system")],
             &[],
             &[(1, "docs/handbook.md::Onboarding")],
         );
         let mut w = walk(WalkKind::Connection, &["docs/handbook.md::Onboarding"]);
         w.from = Some("Workday".into());
-        assert_eq!(
-            grade_connection_entity(&w, &d).2.as_deref(),
-            Some("Workday not found")
+        assert_eq!(grade(&w, &[], &d).2.as_deref(), Some("Workday not found"));
+    }
+
+    #[test]
+    fn the_entity_bfs_fetches_each_entity_once_and_only_to_the_hop_limit() {
+        let d = details(
+            &[
+                (1, "A", "concept"),
+                (2, "B", "concept"),
+                (3, "C", "concept"),
+            ],
+            &[(1, 2), (2, 3), (3, 1)],
+            &[(3, "docs/c.md::C")],
         );
+        let mut w = walk(WalkKind::Connection, &["docs/c.md::C"]);
+        w.from = Some("A".into());
+        w.hops = Some(2);
+        let fetched = std::cell::RefCell::new(Vec::new());
+        let (pass, _, _) = grade_connection_entity(&w, &[1], &|id| {
+            fetched.borrow_mut().push(id);
+            Ok(d.get(&id).cloned())
+        })
+        .unwrap();
+        assert!(pass);
+        let mut f = fetched.into_inner();
+        f.sort();
+        assert_eq!(f, [1, 2, 3], "each reached entity is fetched once");
+    }
+
+    fn prose_engine() -> (tempfile::TempDir, Engine) {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_prose(dir.path());
+        let mut e = Engine::open(dir.path(), "t").unwrap();
+        e.refresh(Duration::from_secs(120)).unwrap();
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../singularrag-core/fixtures/prose/extraction.json"
+        ))
+        .unwrap();
+        singularrag_core::knowledge::load_extraction_json(e.store(), None, &json).unwrap();
+        (dir, e)
+    }
+
+    #[test]
+    fn an_entity_start_resolves_exact_names_only_through_the_search() {
+        let (_d, e) = prose_engine();
+        let okta = entity_starts(e.store(), "  OKTA. ").unwrap();
+        assert_eq!(okta.len(), 1);
+        let detail = queries::entity_detail(e.store(), okta[0]).unwrap().unwrap();
+        assert_eq!(detail.entity.name, "Okta");
+        // "Aurelia" has prefix matches ("Aurelia voyage", "Aurelia report"): only the exact one starts.
+        assert_eq!(entity_starts(e.store(), "Aurelia").unwrap().len(), 1);
+        assert!(entity_starts(e.store(), "Okt").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_name_extracted_as_two_types_is_one_start_reaching_both_sections() {
+        // `entities.norm_name` is unique: a second section typing `Finance` as an
+        // organisation joins the role entity the handbook made, so the search finds one
+        // start, and it reaches the sections of both.
+        let (_d, e) = prose_engine();
+        let extra = serde_json::json!({"docs/voyage.md::Departure": {
+            "entities": [{"name": "Finance", "type": "organisation", "description": "paid for the voyage"}],
+            "relations": []
+        }});
+        singularrag_core::knowledge::load_extraction_json(e.store(), None, &extra.to_string())
+            .unwrap();
+        let starts = entity_starts(e.store(), "Finance").unwrap();
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        let store = e.store();
+        for gold in [
+            "docs/voyage.md::Departure",
+            "docs/handbook.md::Expense process",
+        ] {
+            let mut w = walk(WalkKind::Connection, &[gold]);
+            w.from = Some("Finance".into());
+            w.hops = Some(1);
+            let (pass, reached, reason) =
+                grade_connection_entity(&w, &starts, &|id| queries::entity_detail(store, id))
+                    .unwrap();
+            assert!(pass, "{gold}: {reason:?} {reached:?}");
+        }
+    }
+
+    #[test]
+    fn the_process_grader_pages_through_every_process() {
+        let (_d, e) = prose_engine();
+        let all = all_processes_paged(e.store(), 1).unwrap();
+        assert_eq!(
+            all.processes
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Expense process",
+                "Incident process",
+                "Onboarding",
+                "Release process"
+            ]
+        );
+        assert_eq!(all.total, 4);
+        let w = walk(WalkKind::Process, &["docs/handbook.md::Release process"]);
+        assert!(grade_process(&w, &all).0);
     }
 
     #[test]

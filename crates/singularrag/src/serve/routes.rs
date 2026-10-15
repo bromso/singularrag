@@ -85,8 +85,65 @@ pub async fn entities(State(s): State<AppState>) -> Result<Json<queries::Entitie
     Ok(Json(locked(&s, queries::entities)?))
 }
 
-pub async fn processes(State(s): State<AppState>) -> Result<Json<queries::ProcessesDto>, ApiError> {
-    Ok(Json(locked(&s, queries::processes)?))
+#[derive(Deserialize)]
+pub struct EntitySearchQuery {
+    pub q: Option<String>,
+}
+
+pub async fn entities_search(
+    State(s): State<AppState>,
+    Query(p): Query<EntitySearchQuery>,
+) -> Result<Json<queries::EntitySearchDto>, ApiError> {
+    let q = p.q.unwrap_or_default();
+    let q = q.trim();
+    if q.is_empty() || q.chars().count() > 2000 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({ "error": "q must be 1 to 2000 characters", "field": "q" }),
+        ));
+    }
+    Ok(Json(queries::EntitySearchDto {
+        entities: locked(&s, |store| queries::entities_search(store, q))?,
+    }))
+}
+
+pub async fn entity(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<queries::EntityDetailDto>, ApiError> {
+    match locked(&s, |store| queries::entity_detail(store, id))? {
+        Some(d) => Ok(Json(d)),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "no such entity" }),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ProcessParams {
+    pub q: Option<String>,
+    pub role: Option<String>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+pub async fn processes(
+    State(s): State<AppState>,
+    Query(p): Query<ProcessParams>,
+) -> Result<Json<queries::ProcessesDto>, ApiError> {
+    let query = queries::ProcessQuery {
+        q: p.q,
+        role: p.role,
+        offset: p.offset.unwrap_or(0),
+        limit: p
+            .limit
+            .unwrap_or(queries::PROCESS_PAGE_DEFAULT)
+            .clamp(1, queries::PROCESS_PAGE_MAX),
+    };
+    Ok(Json(locked(&s, |store| {
+        queries::processes_page(store, &query)
+    })?))
 }
 
 /// `MapConfig` plus the token a client must hand back to write: `map.toml`'s mtime in
@@ -292,6 +349,189 @@ pub async fn blast(
 
 #[cfg(test)]
 mod tests {
+    /// The prose fixture with its canned extraction loaded: four processes (Expense,
+    /// Incident, Onboarding, Release), roles on their steps, relations and mentions.
+    fn prose_app() -> (
+        tempfile::TempDir,
+        axum::Router,
+        String,
+        crate::actor::EngineHandle,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        singularrag_core::fixture::write_prose(dir.path());
+        let mut e = singularrag_core::engine::Engine::open(dir.path(), "t").unwrap();
+        e.refresh(std::time::Duration::from_secs(120)).unwrap();
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../singularrag-core/fixtures/prose/extraction.json"
+        ))
+        .unwrap();
+        singularrag_core::knowledge::load_extraction_json(e.store(), None, &json).unwrap();
+        drop(e);
+        let (state, handle) = crate::serve::state::test_state(dir.path(), 1);
+        let token = state.token.to_string();
+        (dir, crate::serve::router(state), token, handle)
+    }
+
+    async fn get_json(
+        app: &axum::Router,
+        token: &str,
+        uri: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let res = tower::ServiceExt::oneshot(
+            app.clone(),
+            axum::http::Request::builder()
+                .uri(uri)
+                .header("host", "127.0.0.1:1")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let status = res.status();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    fn names(v: &serde_json::Value) -> Vec<String> {
+        v["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn processes_page_through_the_name_order_with_a_total() {
+        let (_d, app, token, handle) = prose_app();
+        let (st, v) = get_json(&app, &token, "/api/processes?limit=2").await;
+        assert_eq!(st, 200);
+        assert_eq!(v["total"], 4, "{v}");
+        assert_eq!(v["offset"], 0);
+        assert_eq!(v["limit"], 2);
+        assert_eq!(names(&v), ["Expense process", "Incident process"]);
+        assert!(v.get("truncated").is_none(), "{v}");
+        let (_, v) = get_json(&app, &token, "/api/processes?limit=2&offset=2").await;
+        assert_eq!(v["total"], 4);
+        assert_eq!(v["offset"], 2);
+        assert_eq!(names(&v), ["Onboarding", "Release process"]);
+        let (_, v) = get_json(&app, &token, "/api/processes").await;
+        assert_eq!(v["limit"], 50);
+        assert_eq!(names(&v).len(), 4);
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn processes_filter_by_name_substring_and_role() {
+        let (_d, app, token, handle) = prose_app();
+        let (_, v) = get_json(&app, &token, "/api/processes?q=PROCESS").await;
+        assert_eq!(v["total"], 3, "{v}");
+        assert_eq!(
+            names(&v),
+            ["Expense process", "Incident process", "Release process"]
+        );
+        let (_, v) = get_json(&app, &token, "/api/processes?role=Employee").await;
+        assert_eq!(v["total"], 2, "{v}");
+        assert_eq!(names(&v), ["Expense process", "Onboarding"]);
+        let (_, v) = get_json(
+            &app,
+            &token,
+            "/api/processes?role=Employee&limit=1&offset=1",
+        )
+        .await;
+        assert_eq!(v["total"], 2, "{v}");
+        assert_eq!(names(&v), ["Onboarding"]);
+        let (_, v) = get_json(&app, &token, "/api/processes?q=process&role=Employee").await;
+        assert_eq!(v["total"], 1, "{v}");
+        assert_eq!(names(&v), ["Expense process"]);
+        // LIKE wildcards in `q` are literal.
+        let (_, v) = get_json(&app, &token, "/api/processes?q=%25").await;
+        assert_eq!(v["total"], 0, "{v}");
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn processes_limit_is_clamped() {
+        let (_d, app, token, handle) = prose_app();
+        let (_, v) = get_json(&app, &token, "/api/processes?limit=5000").await;
+        assert_eq!(v["limit"], 200, "{v}");
+        let (_, v) = get_json(&app, &token, "/api/processes?limit=0").await;
+        assert_eq!(v["limit"], 1, "{v}");
+        assert_eq!(names(&v).len(), 1);
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn entity_search_puts_the_exact_name_before_prefixes() {
+        let (_d, app, token, handle) = prose_app();
+        // "Aurelia" (exact) before "Aurelia report" and "Aurelia voyage" (prefixes).
+        let (st, v) = get_json(&app, &token, "/api/entities/search?q=%20aurelia%20").await;
+        assert_eq!(st, 200, "{v}");
+        let found: Vec<&str> = v["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(found[0], "Aurelia", "{v}");
+        assert_eq!(found.len(), 3, "{v}");
+        assert!(found.contains(&"Aurelia report") && found.contains(&"Aurelia voyage"));
+        // A prefix only: no exact match, both prefixes.
+        let (_, v) = get_json(&app, &token, "/api/entities/search?q=Aurel").await;
+        assert_eq!(v["entities"].as_array().unwrap().len(), 3, "{v}");
+        let (st, v) = get_json(&app, &token, "/api/entities/search?q=%20%20").await;
+        assert_eq!(st, 422, "{v}");
+        assert_eq!(v["field"], "q");
+        let (st, _) = get_json(&app, &token, "/api/entities/search").await;
+        assert_eq!(st, 422);
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn entity_detail_has_every_relation_and_mention_and_a_process_has_steps() {
+        let (_d, app, token, handle) = prose_app();
+        let (_, v) = get_json(&app, &token, "/api/entities/search?q=Expense%20process").await;
+        let id = v["entities"][0]["id"].as_i64().unwrap();
+        let (st, d) = get_json(&app, &token, &format!("/api/entities/{id}")).await;
+        assert_eq!(st, 200, "{d}");
+        assert_eq!(d["entity"]["name"], "Expense process");
+        let rels = d["relations"].as_array().unwrap();
+        assert_eq!(rels.len(), 3, "{d}");
+        assert!(rels.iter().all(|r| r["src"] == id || r["dst"] == id));
+        // Each relation names both of its ends, so a far end outside the overlay reads by name.
+        let finance = rels
+            .iter()
+            .find(|r| {
+                r["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("reviews approved claims")
+            })
+            .expect("Finance → Expense process");
+        assert_eq!(finance["src_name"], "Finance", "{finance}");
+        assert_eq!(finance["dst_name"], "Expense process", "{finance}");
+        let mentions = d["mentions"].as_array().unwrap();
+        assert!(!mentions.is_empty(), "{d}");
+        assert!(mentions.iter().all(|m| m["entity_id"] == id));
+        let steps = d["steps"].as_array().expect("a process carries steps");
+        assert_eq!(steps.len(), 4, "{d}");
+        assert_eq!(steps[0]["ordinal"], 1);
+        assert_eq!(steps[0]["section"]["path"], "docs/handbook.md");
+
+        let (_, v) = get_json(&app, &token, "/api/entities/search?q=Expensify").await;
+        let id = v["entities"][0]["id"].as_i64().unwrap();
+        let (_, d) = get_json(&app, &token, &format!("/api/entities/{id}")).await;
+        assert!(d["steps"].is_null(), "{d}");
+
+        let (st, d) = get_json(&app, &token, "/api/entities/999999").await;
+        assert_eq!(st, 404, "{d}");
+        handle.shutdown();
+    }
+
     #[tokio::test]
     async fn entities_lists_entities_relations_and_mentions_from_the_prose_fixture() {
         let dir = tempfile::tempdir().unwrap();
@@ -430,7 +670,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(v["truncated"], false, "{v}");
+        assert_eq!(v["total"], 1, "{v}");
 
         let processes = v["processes"].as_array().unwrap();
         assert_eq!(processes.len(), 1, "{v}");

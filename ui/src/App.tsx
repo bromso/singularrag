@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { ApiError, api, setToken, tokenFromFragment } from "@/api/client";
 import { subscribe } from "@/api/events";
-import type { BlastResult, EntitiesPayload, GraphPayload, MapConfig, MapDoc, ProcessesPayload, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
+import type { BlastResult, EntitiesPayload, Entity, GraphPayload, MapConfig, MapDoc, RetrievalDetail, RetrievalSummary, SkippedFile, Status, TreeFile } from "@/api/types";
 import { filterEntitiesToRoot } from "@/lib/graph";
 import { joinRetrieval } from "@/lib/join";
 import { addToBoundary, boundariesOf, noteFor, removeAgentNote, removeFromBoundary, setNote, toggleExclude, togglePin } from "@/lib/mapEdits";
@@ -53,9 +53,8 @@ export function App() {
   // Every change event refetches the entities; an unchanged answer keeps the old object,
   // so the map (which rebuilds its graph when `entities` changes identity) stays put.
   const entitiesJson = useRef("");
-  // The processes follow the same rule: refetched on every load, replaced only when changed.
-  const [processes, setProcesses] = useState<ProcessesPayload | null>(null);
-  const processesJson = useRef("");
+  // The Journeys view owns its processes fetch; every SSE change event bumps this so it refetches.
+  const [changeSeq, setChangeSeq] = useState(0);
   const [reveal, setReveal] = useState<RevealRequest | null>(null);
   const revealSeq = useRef(0);
   const indexRef = useRef<string | null>(null);
@@ -99,8 +98,6 @@ export function App() {
       // unhandled rejection; the `await` at the end reports a failure.
       const entitiesReq = api.entities();
       entitiesReq.catch(() => {});
-      const processesReq = api.processes();
-      processesReq.catch(() => {});
       const [s, rs, sk, m] = await Promise.all([api.status(), api.retrievals(), api.skipped(), api.map()]);
       if (gen !== loadGen.current) return;
       setStatus(s); setRetrievals(rs); setSkipped(sk); applyMapDoc(m);
@@ -127,14 +124,10 @@ export function App() {
       if (gen !== loadGen.current) return;
       const json = JSON.stringify(e);
       if (json !== entitiesJson.current) { entitiesJson.current = json; setEntities(e); }
-      const p = await processesReq;
-      if (gen !== loadGen.current) return;
-      const pJson = JSON.stringify(p);
-      if (pJson !== processesJson.current) { processesJson.current = pJson; setProcesses(p); }
     };
     load().catch((e: unknown) => toastError(e));
     return subscribe(
-      () => { load().catch(() => {}); },
+      () => { setChangeSeq((n) => n + 1); load().catch(() => {}); },
       (s) => {
         setStatus(s);
         const text = `Index ${freshnessText(s)}`;
@@ -242,8 +235,9 @@ export function App() {
 
   // An entity shares the `focused` slot with rows. From the panel's list (the keyboard
   // path) focus moves to the panel's heading, as a row action does; a map click does not.
-  const focusEntity = useCallback((id: number, moveFocus: boolean) => {
-    const entity = entities?.entities.find((e) => e.id === id);
+  // A search result may lie past the overlay's cap: then the caller hands the entity over.
+  const focusEntity = useCallback((id: number, moveFocus: boolean, given?: Entity) => {
+    const entity = entities?.entities.find((e) => e.id === id) ?? given;
     if (!entity) return;
     setFocused({ kind: "entity", entity });
     if (moveFocus) requestAnimationFrame(() => document.getElementById("detail-heading")?.focus());
@@ -255,7 +249,9 @@ export function App() {
     setFocused((f) => {
       if (f?.kind !== "entity") return f;
       const e = entities?.entities.find((x) => x.id === f.entity.id);
-      return e ? (e === f.entity ? f : { kind: "entity", entity: e }) : null;
+      // Not in a capped overlay says nothing about whether it still exists: keep it.
+      if (!e) return entities?.truncated ? f : null;
+      return e === f.entity ? f : { kind: "entity", entity: e };
     });
   }, [entities]);
 
@@ -352,7 +348,7 @@ export function App() {
           <RepoTree rows={filteredRows} filter={filter} seedKey={detail?.id ?? 0} onFocusRow={setFocused} onAction={openDetail}
             reveal={reveal} onRevealed={() => setReveal(null)} />
         ) : view === "journeys" ? (
-          <JourneysView payload={processes} pending={status?.entities_pending ?? 0} onFocusSection={focusSection} />
+          <JourneysView changeSeq={changeSeq} pending={status?.entities_pending ?? 0} onFocusSection={focusSection} />
         ) : (
           <MapErrorBoundary onSwitchToTable={switchToTable}>
             <MapView payload={filteredGraph} rows={filteredRows} hasRetrieval={detail !== null}
@@ -364,7 +360,7 @@ export function App() {
         )}
       </main>
       <DetailPanel row={focused} map={map} entities={entities}
-        onFocusEntity={(id) => focusEntity(id, true)} onFocusSection={focusSection}
+        onFocusEntity={(id, e) => focusEntity(id, true, e)} onFocusSection={focusSection}
         onPin={(p, s) => save((c) => togglePin(c, p, s))}
         onExclude={(p) => save((c) => toggleExclude(c, p))}
         onNote={(p, s, t) => { if (t !== noteFor(map, p, s)) save((c) => setNote(c, p, s, t)); }}
