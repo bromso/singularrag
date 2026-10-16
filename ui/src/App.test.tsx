@@ -803,6 +803,7 @@ describe("App", () => {
       expect(ae?.getAttribute("role")).toBe("row");
       expect(ae?.textContent).toContain("website");
     });
+    await waitFor(() => expect(within(panel).getByRole("heading", { name: "prisma/migrations/01_init/migration.sql :: website" })).toBeTruthy());
   });
 
   test("a section row lists its entities and the relations it states", async () => {
