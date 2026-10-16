@@ -274,11 +274,22 @@ fn relation_field(attrs: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Keywords that open a top-level Prisma block; a header line also ends with `{`, which
+/// is what tells `type Foo {` apart from a field named `type`.
+const BLOCK_HEADERS: [&str; 6] = [
+    "model ",
+    "enum ",
+    "type ",
+    "view ",
+    "generator ",
+    "datasource ",
+];
+
 fn prisma(source: &str) -> SchemaExtract {
     let lines: Vec<&str> = source.lines().collect();
     // (model, table, first line index, last line index, closing brace found); an
-    // unterminated model runs to EOF, where the last line index is content, not a
-    // delimiter, so the field scan below must include it.
+    // unterminated model runs to the next block header or EOF, where the last line index
+    // is content, not a delimiter, so the field scan below must include it.
     let mut blocks: Vec<(String, String, usize, usize, bool)> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -294,6 +305,12 @@ fn prisma(source: &str) -> SchemaExtract {
             if t == "}" {
                 end = j;
                 terminated = true;
+                break;
+            }
+            // No `}` before the next block header: the block ends on the line above it,
+            // so an unterminated model never swallows the one after it.
+            if t.ends_with('{') && BLOCK_HEADERS.iter().any(|h| t.starts_with(h)) {
+                end = j - 1;
                 break;
             }
             if t.starts_with("@@map(") {
@@ -818,6 +835,23 @@ enum Role {
     fn prisma_enum_generator_and_datasource_produce_nothing() {
         let x = extract(Language::Prisma, "generator client {\n  provider = \"x\"\n}\ndatasource db {\n  provider = \"postgresql\"\n}\nenum Role {\n  admin\n}\n").unwrap();
         assert!(x.tags.is_empty() && x.aliases.is_empty());
+    }
+
+    #[test]
+    fn an_unterminated_model_stops_at_the_next_model() {
+        let src = "model A {\n  id String @id\nmodel B {\n  id String @id\n}\n";
+        let x = extract(Language::Prisma, src).unwrap();
+        assert_eq!(names(&x.tags, "table"), vec!["A", "B"]);
+        let a = x.tags.iter().find(|t| t.name == "A").unwrap();
+        assert_eq!((a.line_start, a.line_end), (1, 2));
+        let b = x.tags.iter().find(|t| t.name == "B").unwrap();
+        assert_eq!((b.line_start, b.line_end), (3, 5));
+        assert_eq!(names(&x.tags, "column"), vec!["A.id", "B.id"]);
+        assert!(!x.tags.iter().any(|t| t.name == "A.model"));
+        // A field named like a block keyword is still a field (umami's `type String`).
+        let src = "model R {\n  id String @id\n  type String @db.VarChar(50)\n  view Int\n}\n";
+        let x = extract(Language::Prisma, src).unwrap();
+        assert_eq!(names(&x.tags, "column"), vec!["R.id", "R.type", "R.view"]);
     }
 
     #[test]
