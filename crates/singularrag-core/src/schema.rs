@@ -545,9 +545,12 @@ fn sql_regexes() -> &'static (Regex, Regex, Regex, Regex) {
 
 // ---- Code mentions of tables (spec §3) ----
 
-/// Where code names a table: a property identifier after a dot (`prisma.client.website`)
-/// or a token inside a string or template literal (`from website_event`). Plain
-/// identifiers never count. Returns `(table name, 1-based line)`, deduplicated, in order.
+/// Where code names a table: a property identifier after a dot, i.e. the object side of
+/// a member/field expression (`prisma.client.website`, `row.website`) — not an object
+/// literal key, a destructuring pattern, or a Rust struct field declaration/initializer,
+/// which reuse the same node kinds — or a token inside a string or template literal
+/// (`from website_event`). Plain identifiers never count. Returns `(table name, 1-based
+/// line)`, deduplicated, in order.
 pub fn table_mentions(
     lang: Language,
     source: &str,
@@ -556,29 +559,34 @@ pub fn table_mentions(
     if vocab.is_empty() {
         return Ok(Vec::new());
     }
-    let (language, props, strings): (tree_sitter::Language, &[&str], &[&str]) = match lang {
-        Language::TypeScript => (
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            &["property_identifier"],
-            &["string_fragment"],
-        ),
-        Language::Tsx => (
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            &["property_identifier"],
-            &["string_fragment"],
-        ),
-        Language::JavaScript => (
-            tree_sitter_javascript::LANGUAGE.into(),
-            &["property_identifier"],
-            &["string_fragment"],
-        ),
-        Language::Rust => (
-            tree_sitter_rust::LANGUAGE.into(),
-            &["field_identifier"],
-            &["string_content"],
-        ),
-        _ => return Ok(Vec::new()),
-    };
+    let (language, props, member_parent, strings): (tree_sitter::Language, &[&str], &str, &[&str]) =
+        match lang {
+            Language::TypeScript => (
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                &["property_identifier"],
+                "member_expression",
+                &["string_fragment"],
+            ),
+            Language::Tsx => (
+                tree_sitter_typescript::LANGUAGE_TSX.into(),
+                &["property_identifier"],
+                "member_expression",
+                &["string_fragment"],
+            ),
+            Language::JavaScript => (
+                tree_sitter_javascript::LANGUAGE.into(),
+                &["property_identifier"],
+                "member_expression",
+                &["string_fragment"],
+            ),
+            Language::Rust => (
+                tree_sitter_rust::LANGUAGE.into(),
+                &["field_identifier"],
+                "field_expression",
+                &["string_content"],
+            ),
+            _ => return Ok(Vec::new()),
+        };
     let mut parser = Parser::new();
     parser
         .set_language(&language)
@@ -599,7 +607,7 @@ pub fn table_mentions(
         let node = cursor.node();
         let kind = node.kind();
         let line = node.start_position().row as u32 + 1;
-        if props.contains(&kind) {
+        if props.contains(&kind) && node.parent().is_some_and(|p| p.kind() == member_parent) {
             if let Ok(text) = node.utf8_text(source.as_bytes()) {
                 if let Some(table) = vocab.get(text) {
                     push(table, line, &mut out);
@@ -607,21 +615,15 @@ pub fn table_mentions(
             }
         } else if strings.contains(&kind) {
             if let Ok(text) = node.utf8_text(source.as_bytes()) {
-                for (i, tok) in text
-                    .split(|c: char| !c.is_alphanumeric() && c != '_')
-                    .enumerate()
-                {
+                for tok in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
                     if tok.is_empty() {
                         continue;
                     }
                     if let Some(table) = vocab.get(tok) {
-                        // a multi-line template: the token's own line
-                        let offset = text
-                            .split(|c: char| !c.is_alphanumeric() && c != '_')
-                            .take(i)
-                            .map(|s| s.len() + 1)
-                            .sum::<usize>();
-                        let extra = text.as_bytes()[..offset.min(text.len())]
+                        // the token's exact byte offset within the fragment (`tok` is a
+                        // substring of `text`), not an approximation from re-splitting
+                        let off = tok.as_ptr() as usize - text.as_ptr() as usize;
+                        let extra = text.as_bytes()[..off.min(text.len())]
                             .iter()
                             .filter(|&&b| b == b'\n')
                             .count() as u32;
@@ -1021,7 +1023,7 @@ ALTER TABLE "website" DROP COLUMN "labels";
 
     #[test]
     fn properties_and_strings_reference_tables_but_plain_identifiers_do_not() {
-        let src = "import { Website } from './types';\nconst session = create();\nexport function f(websiteId: string) {\n  prisma.client.websiteEvent.findMany();\n  return db.raw(`select 1 from website_event where id = ${websiteId}`);\n}\nconst s = \"session\";\nconst u = user;\n";
+        let src = "import { Website } from './types';\nconst session = create();\nexport function f(websiteId: string) {\n  prisma.client.websiteEvent.findMany();\n  return db.raw(`select 1 from website_event where id = ${websiteId}`);\n}\nconst s = \"session\";\nconst u = user;\nconst cfg = { website: 1 };\nconst { session: s2 } = cfg;\n";
         let m = table_mentions(Language::TypeScript, src, &vocab()).unwrap();
         assert_eq!(
             m,
@@ -1035,12 +1037,19 @@ ALTER TABLE "website" DROP COLUMN "labels";
 
     #[test]
     fn rust_field_names_and_string_contents_count_too() {
-        let src = "fn q(conn: &Conn) {\n    let user = 1;\n    conn.execute(\"INSERT INTO session(id) VALUES (1)\", []);\n    let n = row.website;\n}\n";
+        let src = "fn q(conn: &Conn) {\n    let user = 1;\n    conn.execute(\"INSERT INTO session(id) VALUES (1)\", []);\n    let n = row.website;\n}\nstruct Row { website: String }\nlet r = Row { website: String::new() };\n";
         let m = table_mentions(Language::Rust, src, &vocab()).unwrap();
         assert_eq!(
             m,
             vec![("session".to_string(), 3), ("website".to_string(), 4)]
         );
+    }
+
+    #[test]
+    fn a_token_in_a_multi_line_template_string_gets_its_own_line() {
+        let src = "const x = 1;\nconst q = `foo———\nbar\nfrom website_event`;\n";
+        let m = table_mentions(Language::TypeScript, src, &vocab()).unwrap();
+        assert_eq!(m, vec![("website_event".to_string(), 4)]);
     }
 
     #[test]
