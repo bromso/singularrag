@@ -1,6 +1,15 @@
 /// Bumped whenever the DDL below changes. The index is derived data: on a mismatch
-/// `Store::init` drops every table and rebuilds from scratch.
+/// `Store::init` drops every table except the content-hash caches (`CACHE_TABLES`) and
+/// rebuilds from scratch, so a re-index drains from the caches without a model call.
 pub const SCHEMA_VERSION: i64 = 8;
+
+/// Bumped whenever the DDL of a table in `CACHE_TABLES` changes. On a mismatch (or a
+/// store from before schema v5, when the key did not exist) `Store::init` drops the
+/// caches too.
+pub const CACHE_VERSION: i64 = 1;
+
+/// Keyed by content hash (and model), valid across any change to the derived tables.
+pub const CACHE_TABLES: &[&str] = &["extraction_cache", "embedding_cache", "steps_cache"];
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (

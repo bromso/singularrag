@@ -30,6 +30,8 @@ Identifiers are unquoted: backticks and double quotes stripped, schema prefixes 
 
 **Caps.** Schema files obey the existing `MAX_FILE_BYTES` (1 MiB) and are skipped with the existing `too-large` reason above it; a dump with data usually exceeds it, and the guidance (README) is a schema-only export. No larger cap for dumps: a dump can carry data, and the secret-like-content check runs on the whole file before any parsing.
 
+*Amended 2026-10-16 (final review).* A `schema_version` change no longer drops the content-hash caches (`extraction_cache`, `embedding_cache`, `steps_cache`): they carry their own `cache_version` meta key (a store from schema v5 to v8 without the key counts as cache version 1), and only a change to that drops them, so a rebuild re-drains extraction without a model call.
+
 **Names collide on purpose.** The `session` table is a `table` symbol in `schema.prisma` and again in `01_init/migration.sql`. The index already treats a function defined twice this way: locate and change walks use path plus name, and referrers match by name, so both definitions share the same code links.
 
 ## 3. Links

@@ -7,7 +7,8 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::Result;
-pub use schema::SCHEMA_VERSION;
+use schema::CACHE_TABLES;
+pub use schema::{CACHE_VERSION, SCHEMA_VERSION};
 
 /// One SQLite connection to a repo's `.singularrag/index.db`.
 #[derive(Debug)]
@@ -73,12 +74,19 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 1000)?;
-        if stored_version(&conn)?.is_some_and(|v| v != SCHEMA_VERSION) {
-            drop_all_tables(&conn)?;
+        if let Some(found) = stored_version(&conn)? {
+            let caches_current = stored_cache_version(&conn, found)? == Some(CACHE_VERSION);
+            match (found == SCHEMA_VERSION, caches_current) {
+                (true, true) => {}
+                (true, false) => drop_cache_tables(&conn)?,
+                (false, true) => drop_all_but_the_caches(&conn)?,
+                (false, false) => drop_all_tables(&conn)?,
+            }
         }
         conn.execute_batch(schema::DDL)?;
         let store = Store { conn };
         store.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
+        store.set_meta("cache_version", &CACHE_VERSION.to_string())?;
         Ok(store)
     }
 
@@ -156,10 +164,46 @@ fn stored_version(conn: &Connection) -> Result<Option<i64>> {
         .and_then(|v| v.parse().ok()))
 }
 
+/// The `cache_version` already in the file. A store written before the key existed
+/// (schema v5 to v8) already has today's cache shapes — `embedding_cache` gained its
+/// `model` column in v5 — so it counts as cache version 1; anything older has none.
+fn stored_cache_version(conn: &Connection, schema_version: i64) -> Result<Option<i64>> {
+    let found = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'cache_version'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(match found {
+        Some(v) => v.parse().ok(),
+        None => (schema_version >= 5).then_some(1),
+    })
+}
+
 /// The index is derived from the working tree, so a schema change is resolved by
-/// throwing the file's contents away and rebuilding — never by migrating.
-/// Virtual tables go first so their shadow tables disappear with them.
+/// throwing the file's contents away and rebuilding — never by migrating. This drops
+/// the content-hash caches too, so it is the path for a `cache_version` change.
 fn drop_all_tables(conn: &Connection) -> Result<()> {
+    drop_tables_except(conn, &[])
+}
+
+/// A `schema_version` change with current caches: everything is rebuilt except the
+/// content-hash caches, so a re-index drains without a model call.
+fn drop_all_but_the_caches(conn: &Connection) -> Result<()> {
+    drop_tables_except(conn, CACHE_TABLES)
+}
+
+/// A `cache_version` change on an otherwise current store: only the caches go.
+fn drop_cache_tables(conn: &Connection) -> Result<()> {
+    for name in CACHE_TABLES {
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{name}\""))?;
+    }
+    Ok(())
+}
+
+/// Virtual tables go first so their shadow tables disappear with them.
+fn drop_tables_except(conn: &Connection, keep: &[&str]) -> Result<()> {
     for virtual_first in [true, false] {
         let mut stmt = conn.prepare(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -168,7 +212,7 @@ fn drop_all_tables(conn: &Connection) -> Result<()> {
         let names: Vec<String> = stmt
             .query_map([virtual_first], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<_, _>>()?;
-        for name in names {
+        for name in names.iter().filter(|n| !keep.contains(&n.as_str())) {
             conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{name}\""))?;
         }
     }
@@ -221,6 +265,103 @@ mod tests {
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert!(cols.contains(&"vocab".to_string()), "{cols:?}");
+    }
+
+    /// One row in each content-hash cache and one entity, with the real column shapes.
+    fn seed_caches(store: &Store) {
+        store
+            .conn()
+            .execute_batch(
+                "INSERT INTO extraction_cache(hash, json) VALUES ('h1', '{}');
+                 INSERT INTO embedding_cache(hash, model, dim, blob) VALUES ('h2', 'm', 2, x'00000000');
+                 INSERT INTO steps_cache(hash, json) VALUES ('h3', '[]');
+                 INSERT INTO entities(name, norm_name, type, description) VALUES ('A', 'a', 'concept', 'd');",
+            )
+            .unwrap();
+    }
+
+    fn count(store: &Store, table: &str) -> i64 {
+        store
+            .conn()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_rebuild_keeps_the_content_hash_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seed_caches(&store);
+            store.set_meta("schema_version", "7").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 8);
+        for t in ["extraction_cache", "embedding_cache", "steps_cache"] {
+            assert_eq!(count(&store, t), 1, "{t} must survive a schema rebuild");
+        }
+        assert_eq!(count(&store, "entities"), 0, "derived tables are rebuilt");
+        for t in ["steps", "step_systems", "steps_cache", "table_names"] {
+            let n: i64 = store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [t],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "missing table {t} after the rebuild");
+        }
+    }
+
+    #[test]
+    fn a_cache_version_change_drops_the_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seed_caches(&store);
+            store.set_meta("cache_version", "0").unwrap();
+            store.set_meta("schema_version", "7").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 8);
+        for t in ["extraction_cache", "embedding_cache", "steps_cache"] {
+            assert_eq!(
+                count(&store, t),
+                0,
+                "{t} must be dropped on a cache_version change"
+            );
+        }
+        assert_eq!(count(&store, "entities"), 0);
+    }
+
+    /// A store written before `cache_version` existed: from v5 on its caches already
+    /// have today's shapes and are kept; before v5 they are dropped.
+    #[test]
+    fn a_store_without_a_cache_version_keeps_its_caches_from_v5_on() {
+        for (from, kept) in [("7", 1), ("5", 1), ("4", 0)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("index.db");
+            {
+                let store = Store::open(&path).unwrap();
+                seed_caches(&store);
+                store
+                    .conn()
+                    .execute("DELETE FROM meta WHERE key = 'cache_version'", [])
+                    .unwrap();
+                store.set_meta("schema_version", from).unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                store.get_meta("cache_version").unwrap().as_deref(),
+                Some("1")
+            );
+            for t in ["extraction_cache", "embedding_cache", "steps_cache"] {
+                assert_eq!(count(&store, t), kept, "{t} from v{from}");
+            }
+        }
     }
 
     #[test]
