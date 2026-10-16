@@ -1,0 +1,91 @@
+# Walks over umami, a self-hosted analytics app with a Prisma schema and ClickHouse DDL:
+# the checkout `~/Sites/umami-corpus` (absolute path; a worktree needs one regardless) at
+# ec0ff50 (ec0ff50388c264ed8ce46f00967e92f7e71476ae), indexed, not extracted, its
+# `.singularrag/` in `.git/info/exclude`. Tables and columns are symbols (schema spec
+# `docs/superpowers/specs/2026-10-15-singularrag-schema-design.md`).
+# Run from the repository root:
+#   singularrag --repo ~/Sites/umami-corpus walk --questions eval/walks-umami.toml --budget 4096
+# Change walks apply `patches/umami-*.patch` to that checkout and revert it; they refuse a
+# dirty checkout, so `git -C ~/Sites/umami-corpus status --porcelain` must be empty.
+
+# locate: everyday words, not the table's own name
+
+[[walk]]
+id = "U1"
+kind = "locate"
+query = "which table stores the page views and events a tracked site sends in"
+gold = ["prisma/schema.prisma::website_event", "db/clickhouse/schema.sql::website_event"]
+
+[[walk]]
+id = "U2"
+kind = "locate"
+query = "where are a visitor's browser, operating system, device and screen size kept"
+gold = ["prisma/schema.prisma::session", "db/clickhouse/schema.sql::website_event"]
+
+[[walk]]
+id = "U3"
+kind = "locate"
+query = "which table says which people belong to a team and with what role"
+gold = ["prisma/schema.prisma::team_user"]
+
+[[walk]]
+id = "U4"
+kind = "locate"
+query = "where do the custom properties attached to an event end up"
+gold = ["prisma/schema.prisma::event_data", "db/clickhouse/schema.sql::event_data"]
+
+# connection: from a table to the code that reads or writes it (symbol starts)
+
+[[walk]]
+id = "U5"
+kind = "connection"
+from = "prisma/schema.prisma::website"
+hops = 1
+gold = ["src/queries/prisma/website.ts::getWebsite"]
+
+[[walk]]
+id = "U6"
+kind = "connection"
+from = "prisma/schema.prisma::website_event"
+hops = 1
+gold = ["src/queries/sql/getWebsiteDateRange.ts::getWebsiteDateRange"]
+
+[[walk]]
+id = "U7"
+kind = "connection"
+from = "prisma/schema.prisma::session"
+hops = 1
+gold = ["src/queries/prisma/session.ts::deleteSession"]
+
+[[walk]]
+id = "U8"
+kind = "connection"
+from = "prisma/schema.prisma::team"
+hops = 1
+gold = ["src/queries/prisma/team.ts::getTeam"]
+
+# change: a schema edit or a new migration; patches/umami-*.patch
+
+[[walk]]
+id = "U9"
+kind = "change"
+patch = "patches/umami-1.patch"
+gold = ["prisma/schema.prisma::website"]
+
+[[walk]]
+id = "U10"
+kind = "change"
+patch = "patches/umami-2.patch"
+gold = ["prisma/schema.prisma::session"]
+
+[[walk]]
+id = "U11"
+kind = "change"
+patch = "patches/umami-3.patch"
+gold = ["prisma/migrations/27_add_website_notes/migration.sql::website.notes"]
+
+[[walk]]
+id = "U12"
+kind = "change"
+patch = "patches/umami-4.patch"
+gold = ["db/clickhouse/schema.sql::website_event"]

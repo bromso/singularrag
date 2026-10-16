@@ -422,11 +422,13 @@ Three corpus checkouts, each a clean git toplevel with `.singularrag/` in `.git/
 - `walks-repo.toml`: `../singularrag-pinned` at `0c2ed54` (the `5ec066b` tree plus `docs/voyage.md` and `docs/handbook.md`, the real-model extraction from "First real-model run" above); 3 locate, 3 process, 3 connection, 3 change (`patches/repo-*.patch`).
 - `walks-handbook.toml`: `../handbook-corpus` at `7cf88f9` (the GitLab handbook `people-group` directory, extracted: 3,006 entities, 1,052 processes); 4 locate, 4 process, 4 connection.
 - `walks-hono.toml`: `../hono` at `098e119`, indexed, no extraction; 4 locate, 4 connection (symbol starts), 4 change (`patches/hono-*.patch`).
+- `walks-umami.toml`: `~/Sites/umami-corpus` at `ec0ff50`, indexed, not extracted; 4 locate, 4 connection (symbol starts), 4 change (`patches/umami-*.patch`); schema sources (Prisma, SQL DDL) as `table`/`column` symbols, schema spec `docs/superpowers/specs/2026-10-15-singularrag-schema-design.md`.
 
 ```
 singularrag --repo ../singularrag-pinned walk --questions eval/walks-repo.toml --budget 2048|4096 [--no-models]
 singularrag --repo ../handbook-corpus walk --questions eval/walks-handbook.toml --budget 2048|4096 [--no-models]
 singularrag --repo ../hono walk --questions eval/walks-hono.toml --budget 2048|4096 [--no-models]
+singularrag --repo ~/Sites/umami-corpus walk --questions eval/walks-umami.toml --budget 2048|4096 [--no-models]
 ```
 
 Change walks apply their patch to the corpus checkout, read the changed list and revert; they refuse a dirty checkout, so `git -C <corpus> status --porcelain` must be empty before a run (it was, before and after every run below). The repo file's change walks are code-only: a change walk re-indexes the patched file, and a re-indexed document's sections lose their entities and steps until a `serve` or `mcp` process drains the extraction queue (from the cache, no model call), which would make later runs depend on the order they ran in. A patch must not add a path the corpus ignores: git does not list an ignored path, so the revert would never remove it.
@@ -510,6 +512,23 @@ Still failing at 4096 seeds on: R1, R3 (locate); on the handbook nothing. Seeds 
 Under the gate rule (spec §5) a walk that fails at the baseline is a lead, not a regression: only a walk that passed and then fails breaks the gate.
 
 The ids freeze with this baseline. R3 and N4 were rephrased before it so that neither query shares a distinctive word with its gold (R3 no longer says "hooks", N4 no longer says "Deno"); R3 passed at 4096 with the word and fails without it, and N4 failed either way.
+
+### Schema sources: umami, 2026-10-16 (schema-v0)
+
+`walks-umami.toml` on `umami-corpus` (26 Prisma models, 27 migrations, the ClickHouse DDL; schema spec):
+
+| | 2048 seeds on | 2048 seeds off | 4096 seeds on | 4096 seeds off |
+|---|---|---|---|---|
+| `walks N/4 locate` | 4/4 | 4/4 | 4/4 | 4/4 |
+| `walks N/4 connection` | 4/4 | 4/4 | 4/4 | 4/4 |
+| `walks N/4 change` | 4/4 | 4/4 | 4/4 | 4/4 |
+| overall | **12/12** | 12/12 | **12/12** | 12/12 |
+
+Failing walks and why: none; every walk passes at every budget and seed setting.
+
+Two golds did not exist as drafted and were substituted, both recorded in the walk file as written: U7's `from = "prisma/schema.prisma::session"` names `src/queries/prisma/session.ts::getSession` in the draft, but that file defines only `deleteSession` (confirmed by `SELECT ... FROM symbols ... WHERE f.path = 'src/queries/prisma/session.ts'`), so the gold is `src/queries/prisma/session.ts::deleteSession`. U11's patch creates a new migration folder; the draft numbered it `28_add_website_notes`, but the corpus's last real migration is `26_add_api_key`, so the patch and gold use `27_add_website_notes` instead, the next real number. Every other `gold` and `from` was confirmed against the Step 1 listings unchanged.
+
+No process walks: umami has ten Markdown files and no process documentation; Journeys over tables is judged on the CI fixture (`walks-ci.toml` C7, `implemented_by`). The three earlier walk files at 4096 seeds on: hono unchanged at 8/12 (locate 1/4, connection 3/4, change 4/4, byte-identical to the caps-fix table). `singularrag-pinned` and `handbook-corpus` regressed — `singularrag-pinned` 5/12 (locate 1/3, process **0/3**, connection **1/3**, change 3/3) against the recorded 10/12, and `handbook-corpus` 3/12 (locate **3/4**, process **0/4**, connection **0/4**) against the recorded 12/12. This is not a defect in the schema feature: it is `Store::init`'s existing version-mismatch path (`crates/singularrag-core/src/store/mod.rs`, `drop_all_tables` when the stored `schema_version` differs from the binary's), which wipes the whole `.singularrag/index.db` — entities, relations, steps and section embeddings included — the first time a build with this branch's schema bump (`table_names`, `files.vocab`, v8) opens an index.db that predates it. These two corpora had never been opened by a v8 build before this task's Step 3; running `walk` against them (as the step requires) triggered the wipe, confirmed by `entities`/`relations`/`steps` all at 0 rows and `extract_queue` freshly populated (243 for `singularrag-pinned`, 983 for `handbook-corpus`) at the exact timestamp of the run. `singularrag-pinned`'s and `handbook-corpus`'s locate/process/connection misses all report `gold not served`, `no process cites ...` or `<entity> not found` — consistent with empty knowledge tables, not with the table/vocabulary code (which never touches these two corpora: neither has a schema file, so the vocabulary stays empty and the spec's own empty-vocabulary test applies). `hono` holds no entities either way, which is why it alone is unaffected. Recovering the recorded numbers needs a `serve` run to redrain each queue through the real model (documented at roughly 1.5-1.9 sections/minute for `singularrag-pinned`'s 243 sections, i.e. about two hours; `handbook-corpus`'s 983 sections would take proportionally longer) — out of this task's scope; flagged for the project owner rather than attempted here. Tier one on hono and docs: identical before and after (hono 0.644/0.771 at 2048/4096, docs 0.361/0.653 at 2048/4096, byte-for-byte diffs empty in all four comparisons); no schema files in either corpus, so the vocabulary pass is a no-op there as the spec requires.
 
 ## Tier two
 

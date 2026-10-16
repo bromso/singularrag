@@ -1,0 +1,12 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index a57873235..3007d9125 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -109,6 +109,7 @@ model Website {
+ 
+   recorderEnabled Boolean @default(false) @map("recorder_enabled")
+   replayConfig    Json?   @map("replay_config")
++  notes           String? @db.VarChar(500)
+ 
+   user                User?                @relation("user", fields: [userId], references: [id])
+   createUser          User?                @relation("createUser", fields: [createdBy], references: [id])

@@ -1,0 +1,8 @@
+diff --git a/prisma/migrations/27_add_website_notes/migration.sql b/prisma/migrations/27_add_website_notes/migration.sql
+new file mode 100644
+index 000000000..767711a10
+--- /dev/null
++++ b/prisma/migrations/27_add_website_notes/migration.sql
+@@ -0,0 +1,2 @@
++-- AlterTable
++ALTER TABLE "website" ADD COLUMN "notes" VARCHAR(500);

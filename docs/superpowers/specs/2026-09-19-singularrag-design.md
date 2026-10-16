@@ -50,6 +50,8 @@ Decision: singularrag is a separate repo with its own stack. Reasons: the job is
 
 *Amended 2026-09-23 (knowledge design, `docs/superpowers/specs/2026-09-23-singularrag-knowledge-design.md`).* "Any LLM call" becomes "no query-time model call beyond one embedding; extraction and embeddings run through a local model runtime, opt-in API for extraction". The embeddings/vector-search non-goal above is superseded the same way; see §7's retired gate.
 
+*Amended 2026-10-15 (schema design, `docs/superpowers/specs/2026-10-15-singularrag-schema-design.md`).* "Code and text documents" becomes "code, text documents and database schemas (Prisma, SQL DDL)".
+
 ## 6. v0 scope: smallest valuable slice
 
 One binary, `singularrag`, with:
