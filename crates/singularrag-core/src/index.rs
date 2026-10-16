@@ -230,11 +230,16 @@ impl<'a> Indexer<'a> {
         stats: &mut IndexStats,
     ) -> Result<()> {
         let prior = known.get(&e.rel_path);
-        // Only a code file's own stamp can force it: documents and schema files are only
-        // ever reindexed by the ordinary changed-file check (a schema file's vocabulary
-        // stamp is irrelevant and never compared).
-        let force =
-            is_code_path(&e.rel_path) && prior.and_then(|p| p.vocab.as_deref()) != Some(hash);
+        // Only a code file's own stamp can force it, and only when it was actually indexed
+        // before (`content_hash` is set): a skipped file (secret-like, binary, too-large,
+        // parse-error, unreadable) has no stamp to be stale, and forcing it anyway would
+        // re-read and re-scan it on every single run forever, inflating `skipped` and, under
+        // a deadline, `remaining`/STALE on a corpus where nothing changed. A skipped file that
+        // later becomes indexable changes content, so the ordinary mtime/size check catches
+        // it. Documents and schema files are only ever reindexed by that same check (a schema
+        // file's vocabulary stamp is irrelevant and never compared).
+        let force = is_code_path(&e.rel_path)
+            && prior.is_some_and(|p| p.content_hash.is_some() && p.vocab.as_deref() != Some(hash));
         if !force && !Self::changed(known, e) {
             stats.unchanged += 1;
             return Ok(());
@@ -713,6 +718,26 @@ mod tests {
         }
         let second = refresh(&store, dir.path());
         assert_eq!(second.indexed, 0, "{second:?}");
+        // Only the walk-level `.env` denylist row: `src/config.ts` (secret-like, so never
+        // indexed and never stamped) must not be force-rechecked every run just because its
+        // `vocab` column is NULL — it now counts as unchanged, like any other skipped file
+        // whose mtime/size haven't moved.
+        assert_eq!(
+            second.skipped, 1,
+            "only the walk-level .env denylist row: {second:?}"
+        );
+        // An already-expired deadline must not make an unchanged corpus look STALE: there is
+        // nothing left for the deadline check to even see, because every file either hit the
+        // walk-level skip (unconditional, not deadline-gated) or the cheap unchanged shortcut.
+        let third = Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(Some(std::time::Instant::now()))
+        .unwrap();
+        assert_eq!(third.remaining, 0, "{third:?}");
     }
 
     #[test]
@@ -728,16 +753,20 @@ mod tests {
         assert!(load_vocab(store.conn()).unwrap().contains_key("website"));
     }
 
-    /// Fix round 1 (controller ruling): the vocabulary stamp lives on each file's own
-    /// `files.vocab` row, not in a run-level meta, precisely so a deadline cutoff mid-run
-    /// can never leave the picture ambiguous: whatever was reindexed under the new
-    /// vocabulary is stamped and stays stamped; whatever wasn't still carries the old
-    /// stamp and is still owed a reindex, with no in-between state where every code file
-    /// looks forced just because no run has finished yet.
+    /// A deadline that expires partway through phase 2 (the code/document pass, after the
+    /// vocabulary has already changed) must not corrupt or lose track of which code files
+    /// still carry the old stamp: whatever the cut run didn't reach keeps its old stamp and
+    /// is still owed a reindex; a later uninterrupted run finishes the job exactly once per
+    /// file, no more and no less.
     #[test]
     fn a_deadline_mid_run_leaves_no_code_file_with_a_stale_stamp() {
         let dir = tempfile::tempdir().unwrap();
         write_schema_mini(dir.path());
+        std::fs::write(
+            dir.path().join("src/queries/team.ts"),
+            "import { prisma } from \"../lib/prisma\";\nexport function getTeams() {\n  return prisma.client.team.findUnique({});\n}\n",
+        )
+        .unwrap();
         let store = index_dir(dir.path());
         refresh(&store, dir.path());
         let old_hash = vocab_hash(&load_vocab(store.conn()).unwrap());
@@ -748,46 +777,58 @@ mod tests {
         std::fs::write(&schema, src).unwrap();
 
         let cfg = MapConfig::default();
-        let cut = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg)
-            .unwrap()
-            .refresh(Some(std::time::Instant::now()))
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let mut calls = 0usize;
+        let cut = ix
+            .refresh_with(Some(deadline), || {
+                calls += 1;
+                // The fixture has one Prisma file and three SQL files: once all four
+                // schema entries have been processed (and the vocabulary has changed),
+                // sleep past the deadline so the cut lands inside phase 2, not before
+                // the vocabulary even changes.
+                if calls == 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+            })
             .unwrap();
         assert!(cut.remaining > 0, "{cut:?}");
-        let stamp: Option<String> = store
-            .conn()
-            .query_row(
-                "SELECT vocab FROM files WHERE path = 'src/queries/website.ts'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            stamp.as_deref(),
-            Some(old_hash.as_str()),
-            "a cut-off run must not half-stamp a file it never touched"
+
+        let code_stamps = |store: &Store| -> Vec<(String, Option<String>)> {
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT path, vocab FROM files WHERE skipped_reason IS NULL")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .filter(|(path, _): &(String, Option<String>)| is_code_path(path))
+                .collect()
+        };
+        assert!(
+            code_stamps(&store)
+                .iter()
+                .any(|(_, vocab)| vocab.as_deref() == Some(old_hash.as_str())),
+            "at least one code file must still carry the old stamp: {:?}",
+            code_stamps(&store)
         );
 
         let caught_up = refresh(&store, dir.path());
         assert_eq!(caught_up.remaining, 0, "{caught_up:?}");
+        assert_eq!(
+            cut.indexed + caught_up.indexed,
+            5,
+            "the schema file plus four code files, split across the two runs: cut={cut:?} caught_up={caught_up:?}"
+        );
+
         let new_hash = vocab_hash(&load_vocab(store.conn()).unwrap());
         assert_ne!(new_hash, old_hash);
-        for path in [
-            "src/queries/website.ts",
-            "src/lib/prisma.ts",
-            "src/lib/db.ts",
-        ] {
-            let stamp: Option<String> = store
-                .conn()
-                .query_row("SELECT vocab FROM files WHERE path = ?1", [path], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            assert_eq!(stamp.as_deref(), Some(new_hash.as_str()), "{path}");
+        for (path, vocab) in code_stamps(&store) {
+            assert_eq!(vocab.as_deref(), Some(new_hash.as_str()), "{path}");
         }
-        assert!(
-            refs_named(&store, "team").is_empty(),
-            "table mentions land in Task 4"
-        );
+
+        let fourth = refresh(&store, dir.path());
+        assert_eq!(fourth.indexed, 0, "{fourth:?}");
     }
 
     #[test]
