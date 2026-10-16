@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use singularrag_core::fixture::write_ts_mini;
+use singularrag_core::fixture::{write_schema_mini, write_ts_mini};
 
 struct Server {
     child: Child,
@@ -562,4 +562,37 @@ async fn put_map_round_trips_agent_notes_and_rejects_a_second_one() {
     assert_eq!(r.status(), 422);
     let e: serde_json::Value = r.json().await.unwrap();
     assert_eq!(e["field"], "note[2].path");
+}
+
+#[tokio::test]
+async fn the_tree_carries_a_columns_foreign_key_targets_and_nothing_for_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    write_schema_mini(dir.path());
+    let s = spawn(dir.path());
+    let tree: serde_json::Value = get(&s, "/tree").await.json().await.unwrap();
+    let schema = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "prisma/schema.prisma")
+        .expect("schema file in the tree");
+    assert_eq!(schema["lang"], "prisma");
+    let syms = schema["symbols"].as_array().unwrap();
+    let col = syms
+        .iter()
+        .find(|s| s["name"] == "website_event.website_id")
+        .unwrap();
+    assert_eq!(col["kind"], "column");
+    assert_eq!(col["refs"], serde_json::json!(["website"]));
+    let plain = syms
+        .iter()
+        .find(|s| s["name"] == "website_event.url_path")
+        .unwrap();
+    assert!(
+        plain.get("refs").is_none(),
+        "no key when there is nothing to show: {plain}"
+    );
+    let table = syms.iter().find(|s| s["name"] == "website_event").unwrap();
+    assert_eq!(table["kind"], "table");
+    assert!(table.get("refs").is_none());
 }
