@@ -181,27 +181,20 @@ impl<'a> Indexer<'a> {
         // window where every code file looks forced just because no run has finished yet.
         let (schema, rest): (Vec<&WalkEntry>, Vec<&WalkEntry>) =
             w.entries.iter().partition(|e| is_schema_path(&e.rel_path));
-        let mut seen: Vec<&str> = Vec::with_capacity(w.entries.len());
         let empty = Vocab::new();
         let empty_hash = vocab_hash(&empty);
         for e in schema {
-            seen.push(&e.rel_path);
             self.process(e, &known, &empty, &empty_hash, deadline, now, &mut stats)?;
             on_file();
         }
-        let vocab = load_vocab(self.store.conn())?;
-        let hash = vocab_hash(&vocab);
-        for e in rest {
-            seen.push(&e.rel_path);
-            self.process(e, &known, &vocab, &hash, deadline, now, &mut stats)?;
-            on_file();
-        }
 
-        // Remove rows for files that no longer exist (or are now gitignored), and write
-        // meta, atomically: either both land or neither does.
-        let present: std::collections::HashSet<&str> = seen
+        // Remove rows for files that no longer exist (or are now gitignored) before the
+        // vocabulary is loaded: a removed schema file's aliases go with its row, so the code
+        // pass below stamps files with the post-removal vocabulary, not a stale one.
+        let present: std::collections::HashSet<&str> = w
+            .entries
             .iter()
-            .copied()
+            .map(|e| e.rel_path.as_str())
             .chain(w.skipped.iter().map(|s| s.rel_path.as_str()))
             .collect();
         let conn = self.store.conn();
@@ -213,6 +206,16 @@ impl<'a> Indexer<'a> {
                 stats.removed += 1;
             }
         }
+        tx.commit()?;
+
+        let vocab = load_vocab(self.store.conn())?;
+        let hash = vocab_hash(&vocab);
+        for e in rest {
+            self.process(e, &known, &vocab, &hash, deadline, now, &mut stats)?;
+            on_file();
+        }
+
+        let tx = conn.unchecked_transaction()?;
         self.write_meta(now)?;
         tx.commit()?;
         Ok(stats)
@@ -777,8 +780,28 @@ mod tests {
         assert!(load_vocab(store.conn()).unwrap().contains_key("report"));
         std::fs::remove_file(dir.path().join("db/dump.sql")).unwrap();
         refresh(&store, dir.path());
-        assert!(!load_vocab(store.conn()).unwrap().contains_key("report"));
-        assert!(load_vocab(store.conn()).unwrap().contains_key("website"));
+        let vocab = load_vocab(store.conn()).unwrap();
+        assert!(!vocab.contains_key("report"));
+        assert!(vocab.contains_key("website"));
+        // The removal run already indexed code under the post-removal vocabulary, so
+        // every code file carries its hash and the next run has nothing to force.
+        let hash = vocab_hash(&vocab);
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT path, vocab FROM files WHERE skipped_reason IS NULL")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for (path, stamp) in &rows {
+            if is_code_path(path) {
+                assert_eq!(stamp.as_deref(), Some(hash.as_str()), "{path}");
+            }
+        }
+        let again = refresh(&store, dir.path());
+        assert_eq!(again.indexed, 0, "{again:?}");
     }
 
     /// A deadline that expires partway through phase 2 (the code/document pass, after the
