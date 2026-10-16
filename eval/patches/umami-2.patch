@@ -1,0 +1,12 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index a57873235..301d974bc 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -65,6 +65,7 @@ model Session {
+   city       String?   @db.VarChar(50)
+   distinctId String?   @map("distinct_id") @db.VarChar(50)
+   createdAt  DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
++  notes      String?   @db.VarChar(100)
+ 
+   websiteEvents WebsiteEvent[]
+   sessionData   SessionData[]

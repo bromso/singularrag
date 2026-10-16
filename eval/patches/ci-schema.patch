@@ -1,0 +1,11 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -19,6 +19,7 @@ model Website {
+   id        String         @id @map("website_id") @db.Uuid
+   name      String         @db.VarChar(100)
+   domain    String?        @db.VarChar(500)
++  notes     String?        @db.VarChar(500)
+   userId    String?        @map("user_id") @db.Uuid
+   user      User?          @relation(fields: [userId], references: [id])
+   events    WebsiteEvent[]

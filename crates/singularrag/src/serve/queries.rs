@@ -87,6 +87,10 @@ pub struct TreeSymbol {
     pub line_start: i64,
     pub line_end: i64,
     pub signature: String,
+    /// For `column` symbols: the tables its foreign keys reference (the distinct ref names
+    /// on the column's lines). Absent otherwise (schema spec §4).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -337,6 +341,9 @@ pub fn tree(store: &Store) -> Result<Vec<TreeFile>> {
     let mut syms = conn.prepare(
         "SELECT id, name, kind, line_start, line_end, signature FROM symbols WHERE file_id = ?1 ORDER BY line_start",
     )?;
+    let mut refs = conn.prepare(
+        "SELECT DISTINCT name FROM refs WHERE file_id = ?1 AND line BETWEEN ?2 AND ?3 ORDER BY name",
+    )?;
     let mut out = Vec::new();
     for row in files.query_map([], |r| {
         Ok((
@@ -346,7 +353,7 @@ pub fn tree(store: &Store) -> Result<Vec<TreeFile>> {
         ))
     })? {
         let (fid, path, lang) = row?;
-        let symbols = syms
+        let mut symbols = syms
             .query_map([fid], |r| {
                 Ok(TreeSymbol {
                     id: r.get(0)?,
@@ -355,9 +362,17 @@ pub fn tree(store: &Store) -> Result<Vec<TreeFile>> {
                     line_start: r.get(3)?,
                     line_end: r.get(4)?,
                     signature: r.get(5)?,
+                    refs: Vec::new(),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        for s in symbols.iter_mut().filter(|s| s.kind == "column") {
+            s.refs = refs
+                .query_map(params![fid, s.line_start, s.line_end], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+        }
         out.push(TreeFile {
             path,
             lang,

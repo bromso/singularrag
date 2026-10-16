@@ -3,6 +3,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { App } from "./App";
+import type { TreeSymbol } from "./api/types";
 
 const status = { index_version: "abc123", git_head: "9b1e0d4f", indexed_at_ms: Date.now(), stale_count: 0, lock_timeout: false, foreign_indexing: false, indexing: false, files: { indexed: 4, skipped: 1 }, roots: [{ name: "", path: "/repo", git_head: "9b1e0d4f" }], entities_pending: 0, models_unavailable: false, embeddings_rebuilding: false };
 const r = { score: 0.1, file_rank: 0.1, seeds: ["query:session"], referenced_by: [{ path: "src/http/middleware.ts", count: 2 }], pinned: false, fts_hit: true, query_ident_match: true, note_hit: false, body_hit: false, semantic: null, entities: [], themes: [] };
@@ -780,6 +781,29 @@ describe("App", () => {
       expect(ae?.textContent).toContain("Intro");
     });
     await waitFor(() => expect(within(panel).getByRole("heading", { name: "docs/guide.md :: Intro" })).toBeTruthy());
+  });
+
+  test("a_foreign_key_button_reaches_a_table_defined_in_another_file", async () => {
+    treeOverride = [
+      { path: "prisma/schema.prisma", lang: "prisma", skipped_reason: null, symbols: [{ id: 30, name: "report.website_id", kind: "column", line_start: 5, line_end: 5, signature: "String @db.Uuid", refs: ["website"] } as TreeSymbol] },
+      { path: "prisma/migrations/01_init/migration.sql", lang: "sql", skipped_reason: null, symbols: [{ id: 31, name: "website", kind: "table", line_start: 1, line_end: 1, signature: "CREATE TABLE website (...)" }] },
+    ];
+    const user = userEvent.setup();
+    render(<App />);
+    const grid = await screen.findByRole("treegrid", { name: "Repository" });
+    await user.click(within(grid).getByText("prisma/schema.prisma"));
+    await user.keyboard("{ArrowRight}");
+    await user.click(await within(grid).findByText("report.website_id"));
+    const panel = screen.getByRole("region", { name: "Details" });
+    await waitFor(() => expect(within(panel).getByRole("heading", { name: "prisma/schema.prisma :: report.website_id" })).toBeTruthy());
+    await user.click(within(panel).getByRole("button", { name: "References website" }));
+    await screen.findByRole("treegrid", { name: "Repository" });
+    await waitFor(() => {
+      const ae = document.activeElement;
+      expect(ae?.getAttribute("role")).toBe("row");
+      expect(ae?.textContent).toContain("website");
+    });
+    await waitFor(() => expect(within(panel).getByRole("heading", { name: "prisma/migrations/01_init/migration.sql :: website" })).toBeTruthy());
   });
 
   test("a section row lists its entities and the relations it states", async () => {

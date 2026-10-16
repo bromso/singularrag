@@ -1,0 +1,14 @@
+diff --git a/db/clickhouse/schema.sql b/db/clickhouse/schema.sql
+index 1030538c1..ebb16d382 100644
+--- a/db/clickhouse/schema.sql
++++ b/db/clickhouse/schema.sql
+@@ -46,7 +46,8 @@ CREATE TABLE umami.website_event
+     tag String,
+     distinct_id String,
+     created_at DateTime('UTC'),
+-    job_id Nullable(UUID)
++    job_id Nullable(UUID),
++    notes String
+ )
+ ENGINE = MergeTree
+     PARTITION BY toYYYYMM(created_at)

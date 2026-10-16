@@ -258,11 +258,16 @@ export function App() {
   // "Go to section": reveal the section's row in the tree (switching from the map) and
   // focus it; the row's own focus report then moves the panel to that section.
   const focusSection = (path: string, name: string, symbolId?: number) => {
-    const file = filteredRows.find((r) => r.path === path);
-    const sym = file && (file.symbols.find((s) => s.symbol.id === symbolId) ?? file.symbols.find((s) => s.symbol.name === name));
+    let file = filteredRows.find((r) => r.path === path);
+    let sym = file && (file.symbols.find((s) => s.symbol.id === symbolId) ?? file.symbols.find((s) => s.symbol.name === name));
+    if (!sym && symbolId === undefined) {
+      // A foreign key names a table that may be defined in another file (schema spec §4).
+      file = filteredRows.find((r) => r.symbols.some((s) => s.symbol.kind === "table" && s.symbol.name === name));
+      sym = file?.symbols.find((s) => s.symbol.kind === "table" && s.symbol.name === name);
+    }
     if (!file || !sym) { toast.error(`${path} :: ${name} is not in the tree`); return; }
     if (view !== "tree") changeView("tree");
-    setReveal({ path, key: sym.key, seq: ++revealSeq.current });
+    setReveal({ path: file.path, key: sym.key, seq: ++revealSeq.current });
   };
 
   // `MapView`'s treegrid target may be freshly (re)mounted this same tick — a real

@@ -174,3 +174,165 @@ pub fn write_prose(root: &Path) {
         include_str!("../fixtures/prose/handbook.md"),
     );
 }
+
+/// A codebase with its database (schema spec §5): a Prisma schema with three models, two
+/// migrations, a dump with a data block, one query module that names tables the two ways
+/// code does (a client property, a SQL string) and the way the rule ignores (a variable
+/// called `session`), and a document whose process step names a table in a code span.
+pub fn write_schema_mini(root: &Path) {
+    w(root, ".gitignore", "dist/\n.singularrag/index.db\n");
+    w(
+        root,
+        "prisma/schema.prisma",
+        r#"datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String    @id @map("user_id") @db.Uuid
+  username  String    @unique @db.VarChar(255)
+  createdAt DateTime? @default(now()) @map("created_at")
+  websites  Website[]
+
+  @@map("user")
+}
+
+model Website {
+  id        String         @id @map("website_id") @db.Uuid
+  name      String         @db.VarChar(100)
+  domain    String?        @db.VarChar(500)
+  userId    String?        @map("user_id") @db.Uuid
+  user      User?          @relation(fields: [userId], references: [id])
+  events    WebsiteEvent[]
+
+  @@index([userId])
+  @@map("website")
+}
+
+model WebsiteEvent {
+  id        String   @id @map("event_id") @db.Uuid
+  websiteId String   @map("website_id") @db.Uuid
+  urlPath   String   @map("url_path") @db.VarChar(500)
+  eventName String?  @map("event_name") @db.VarChar(50)
+  createdAt DateTime @default(now()) @map("created_at")
+  website   Website  @relation(fields: [websiteId], references: [id])
+
+  @@map("website_event")
+}
+
+enum Role {
+  admin
+  user
+}
+"#,
+    );
+    w(
+        root,
+        "prisma/migrations/01_init/migration.sql",
+        r#"-- CreateTable
+CREATE TABLE "user" (
+    "user_id" UUID NOT NULL,
+    "username" VARCHAR(255) NOT NULL,
+    "created_at" TIMESTAMPTZ(6) DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "user_pkey" PRIMARY KEY ("user_id")
+);
+
+-- CreateTable
+CREATE TABLE "website" (
+    "website_id" UUID NOT NULL,
+    "name" VARCHAR(100) NOT NULL,
+    "domain" VARCHAR(500),
+    "user_id" UUID REFERENCES "user"("user_id"),
+
+    CONSTRAINT "website_pkey" PRIMARY KEY ("website_id")
+);
+
+-- CreateTable
+CREATE TABLE "website_event" (
+    "event_id" UUID NOT NULL,
+    "website_id" UUID NOT NULL,
+    "url_path" VARCHAR(500) NOT NULL,
+    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "website_event_pkey" PRIMARY KEY ("event_id"),
+    CONSTRAINT "website_event_website_fk" FOREIGN KEY ("website_id") REFERENCES "website"("website_id")
+);
+
+-- CreateIndex
+CREATE INDEX "website_event_website_id_idx" ON "website_event"("website_id");
+"#,
+    );
+    w(
+        root,
+        "prisma/migrations/02_add_event_name/migration.sql",
+        "-- AlterTable\nALTER TABLE \"website_event\" ADD COLUMN \"event_name\" VARCHAR(50);\n",
+    );
+    w(
+        root,
+        "db/dump.sql",
+        r#"--
+-- PostgreSQL database dump (schema and data)
+--
+SET statement_timeout = 0;
+
+CREATE TABLE public.report (
+    report_id uuid NOT NULL,
+    website_id uuid NOT NULL,
+    name character varying(200) NOT NULL
+);
+
+ALTER TABLE ONLY public.report
+    ADD CONSTRAINT report_website_fk FOREIGN KEY (website_id) REFERENCES public.website(website_id);
+
+COPY public.report (report_id, website_id, name) FROM stdin;
+0b1c	9f3a	Weekly (CREATE TABLE in data, not DDL)
+\.
+
+INSERT INTO public.report VALUES ('0b1d', '9f3a', 'CREATE TABLE phantom (x int)');
+"#,
+    );
+    w(
+        root,
+        "src/queries/website.ts",
+        r#"import { prisma } from "../lib/prisma";
+import { rawQuery } from "../lib/db";
+
+export function getWebsite(websiteId: string) {
+  return prisma.client.website.findUnique({ where: { id: websiteId } });
+}
+
+export function getWebsiteDateRange(websiteId: string) {
+  return rawQuery(`
+    select min(created_at) as mindate, max(created_at) as maxdate
+    from website_event
+    where website_id = {{websiteId::uuid}}
+  `, { websiteId });
+}
+
+export function touchSession(id: string) {
+  const session = { id, seenAt: Date.now() };
+  return session;
+}
+"#,
+    );
+    w(
+        root,
+        "src/lib/prisma.ts",
+        "export const prisma = { client: {} as Record<string, { findUnique: (q: unknown) => unknown }> };\n",
+    );
+    w(
+        root,
+        "src/lib/db.ts",
+        "export function rawQuery(sql: string, params: Record<string, string>) {\n  return { sql, params };\n}\n",
+    );
+    w(
+        root,
+        "docs/data-model.md",
+        "# Data model\n\n## Recording a visit\n\nWhen a visitor opens a page, the tracker script posts to the collect endpoint. The collector looks up the website row by its tracking id, then writes one row to the `website_event` table with the URL path and the event name. Reports read `website_event` through `getWebsiteDateRange`.\n",
+    );
+}

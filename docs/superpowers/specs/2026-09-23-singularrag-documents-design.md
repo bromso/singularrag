@@ -19,7 +19,7 @@ The decomposition, in build order, each its own spec, plan and PR:
 1. **This spec:** workspace with several roots; Markdown, HTML, CSS, JSON, YAML, TOML and plain text as sources; the Documents and Retrieval perspectives.
 2. LightRAG-style retrieval: fastembed plus sqlite-vec, local-model entity and relation extraction into the graph, dual-level (low-level entity, high-level theme) keyword retrieval, the document eval set. Overturns the parent spec's "never talks to a model" rule; that spec records it.
 3. Processes and journeys: an ontology (Process, Step, Role, System; "documented in", "implemented by"), extraction prompts for steps and roles, links to code, the Journeys perspective.
-4. Database schemas as files: migrations, SQL dumps, Prisma and Drizzle schemas as tables and columns in the graph.
+4. Database schemas as files: migrations, SQL dumps, Prisma and Drizzle schemas as tables and columns in the graph. (built as `2026-10-15-singularrag-schema-design.md`; Drizzle deferred; dumps as DDL only)
 5. Office and PDF: born-digital PDF, Word, PowerPoint and Excel text extraction, OCR for scanned pages, a `read_section` tool.
 6. Media: images (OCR, optional local vision caption), video (keyframes, local transcription).
 7. More programming languages: one grammar at a time, bounded tasks.

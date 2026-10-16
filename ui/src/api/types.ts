@@ -15,7 +15,7 @@ export type RetrievalSummary = {
   git_head: string | null; stale_count: number; created_at_ms: number; served: number; cut: number;
 };
 export type RetrievalDetail = RetrievalSummary & { items: Item[] };
-export type TreeSymbol = { id: number; name: string; kind: string; line_start: number; line_end: number; signature: string };
+export type TreeSymbol = { id: number; name: string; kind: string; line_start: number; line_end: number; signature: string; refs?: string[] };
 export type TreeFile = { path: string; lang: string | null; skipped_reason: string | null; symbols: TreeSymbol[] };
 export type SkippedFile = { path: string; reason: string };
 export type Target = { path: string; symbol?: string };

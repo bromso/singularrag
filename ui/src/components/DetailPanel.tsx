@@ -6,7 +6,7 @@ import { PROSE_KINDS } from "@/lib/entities";
 import { reasonsToSentences } from "@/lib/reasons";
 import { agentNoteFor, boundariesOf, boundaryNames, isExcluded, isPinned, noteFor } from "@/lib/mapEdits";
 import { EntityList, EntityView, SymbolKnowledge, type FocusEntity, type FocusSection } from "./EntityView";
-import type { TreeRow } from "./RepoTree";
+import type { GridRow, TreeRow } from "./RepoTree";
 
 export function DetailPanel({ row: focused, map, entities, onFocusEntity, onFocusSection, onPin, onExclude, onNote, onRemoveAgentNote, blast, blastLoading, onToggleBlast, expandedPath, onToggleExpand, onAddBoundary, onRemoveBoundary }: {
   row: TreeRow | null; map: MapConfig;
@@ -75,6 +75,8 @@ export function DetailPanel({ row: focused, map, entities, onFocusEntity, onFocu
       {row.kind === "symbol" && PROSE_KINDS.has(row.symbol.symbol.kind) && (
         <SymbolKnowledge symbolId={row.symbol.symbol.id} entities={entities} onFocusEntity={onFocusEntity} />
       )}
+      {row.kind === "symbol" && row.symbol.symbol.kind === "table" && <TableColumns row={row} onFocusSection={onFocusSection} />}
+      {row.kind === "symbol" && row.symbol.symbol.kind === "column" && <ColumnParent row={row} onFocusSection={onFocusSection} />}
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="outline" aria-pressed={isPinned(map, row.path, symbol)} onClick={() => onPin(row.path, symbol)}>
           {isPinned(map, row.path, symbol) ? "Unpin" : symbol ? "Pin symbol" : "Pin file"}
@@ -151,5 +153,55 @@ export function DetailPanel({ row: focused, map, entities, onFocusEntity, onFocu
         <p className="text-xs text-muted-foreground">{isPinned(map, row.path, symbol) ? "Pinned. " : ""}{isExcluded(map, row.path) ? "Excluded." : ""}</p>
       )}
     </section>
+  );
+}
+
+type SymbolGridRow = Extract<GridRow, { kind: "symbol" }>;
+
+/** A table's columns (the file's `table.column` symbols) with their types; a column whose
+ *  line carries a foreign key gets a button to the referenced table (schema spec §4). */
+function TableColumns({ row, onFocusSection }: { row: SymbolGridRow; onFocusSection: FocusSection }) {
+  const table = row.symbol.symbol.name;
+  const columns = row.file.symbols.filter((s) => s.symbol.kind === "column" && s.symbol.name.startsWith(`${table}.`));
+  return (
+    <div>
+      <h3 id="columns-heading" className="text-sm font-semibold">Columns</h3>
+      {columns.length === 0 ? <p className="text-sm text-muted-foreground">No columns.</p> : (
+        <ul aria-labelledby="columns-heading" className="list-disc pl-5 text-sm">
+          {columns.map((c) => {
+            const where = `column-${c.symbol.id}-where`;
+            return (
+              <li key={c.symbol.id}>
+                <code>{c.symbol.name.slice(table.length + 1)}</code> <span className="text-muted-foreground">{c.symbol.signature}</span>
+                {(c.symbol.refs ?? []).map((t) => (
+                  <Button key={t} type="button" variant="outline" size="sm" className="ml-2" aria-describedby={where} onClick={() => onFocusSection(row.path, t)}>
+                    References {t}
+                  </Button>
+                ))}
+                <span id={where} className="sr-only">{row.path} line {c.symbol.line_start}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** A column's table, and the table its foreign key references. */
+function ColumnParent({ row, onFocusSection }: { row: SymbolGridRow; onFocusSection: FocusSection }) {
+  const name = row.symbol.symbol.name;
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return null;
+  const table = name.slice(0, dot);
+  const where = `column-${row.symbol.symbol.id}-table`;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <Button type="button" variant="outline" size="sm" aria-describedby={where} onClick={() => onFocusSection(row.path, table)}>Table {table}</Button>
+      {(row.symbol.symbol.refs ?? []).map((t) => (
+        <Button key={t} type="button" variant="outline" size="sm" aria-describedby={where} onClick={() => onFocusSection(row.path, t)}>References {t}</Button>
+      ))}
+      <span id={where} className="sr-only">{row.path} line {row.symbol.symbol.line_start}</span>
+    </div>
   );
 }

@@ -1,6 +1,15 @@
 /// Bumped whenever the DDL below changes. The index is derived data: on a mismatch
-/// `Store::init` drops every table and rebuilds from scratch.
-pub const SCHEMA_VERSION: i64 = 6;
+/// `Store::init` drops every table except the content-hash caches (`CACHE_TABLES`) and
+/// rebuilds from scratch, so a re-index drains from the caches without a model call.
+pub const SCHEMA_VERSION: i64 = 8;
+
+/// Bumped whenever the DDL of a table in `CACHE_TABLES` changes. On a mismatch (or a
+/// store from before schema v5, when the key did not exist) `Store::init` drops the
+/// caches too.
+pub const CACHE_VERSION: i64 = 1;
+
+/// Keyed by content hash (and model), valid across any change to the derived tables.
+pub const CACHE_TABLES: &[&str] = &["extraction_cache", "embedding_cache", "steps_cache"];
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -15,7 +24,11 @@ CREATE TABLE IF NOT EXISTS files (
   mtime_ms       INTEGER NOT NULL,
   size           INTEGER NOT NULL,
   indexed_at_ms  INTEGER NOT NULL,
-  skipped_reason TEXT
+  skipped_reason TEXT,
+  -- vocab_hash of the table-name vocabulary this file was indexed under (spec §3);
+  -- NULL for a skipped file. Lets a code file be re-indexed exactly once per actual
+  -- vocabulary change, surviving a deadline cutoff mid-run (no run-level meta to miss).
+  vocab          TEXT
 );
 CREATE TABLE IF NOT EXISTS symbols (
   id         INTEGER PRIMARY KEY,
@@ -145,4 +158,11 @@ CREATE TABLE IF NOT EXISTS step_systems (
   PRIMARY KEY (step_id, entity_id)
 );
 CREATE TABLE IF NOT EXISTS steps_cache (hash TEXT PRIMARY KEY, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS table_names (
+  alias      TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  PRIMARY KEY (alias, file_id)
+);
+CREATE INDEX IF NOT EXISTS table_names_file ON table_names(file_id);
 "#;

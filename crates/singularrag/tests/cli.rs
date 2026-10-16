@@ -729,6 +729,7 @@ fn walk_runs_all_four_kinds_on_the_fixtures_without_a_model() {
     let dir = tempfile::tempdir().unwrap();
     singularrag_core::fixture::write_docs_mini(dir.path());
     singularrag_core::fixture::write_prose(dir.path());
+    singularrag_core::fixture::write_schema_mini(dir.path());
     // the change walk needs a git checkout: init and commit the fixture
     for args in [
         vec!["init", "-q"],
@@ -770,14 +771,19 @@ fn walk_runs_all_four_kinds_on_the_fixtures_without_a_model() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(stdout.lines().any(|l| l == "walks 1/1 locate"), "{stdout}");
-    assert!(stdout.lines().any(|l| l == "walks 1/1 process"), "{stdout}");
+    assert!(stdout.lines().any(|l| l == "walks 2/2 locate"), "{stdout}");
+    assert!(stdout.lines().any(|l| l == "walks 2/2 process"), "{stdout}");
     assert!(
-        stdout.lines().any(|l| l == "walks 2/2 connection"),
+        stdout.lines().any(|l| l == "walks 3/3 connection"),
         "{stdout}"
     );
-    assert!(stdout.lines().any(|l| l == "walks 1/1 change"), "{stdout}");
-    assert!(stdout.ends_with("walks 5/5\n"), "{stdout}");
+    assert!(stdout.lines().any(|l| l == "walks 2/2 change"), "{stdout}");
+    // the implemented-by link resolved for real, not by accident
+    assert!(
+        !stdout.contains("not among the steps' implemented-by links"),
+        "{stdout}"
+    );
+    assert!(stdout.ends_with("walks 9/9\n"), "{stdout}");
     // the checkout is clean again after the change walk
     let st = std::process::Command::new("git")
         .arg("-C")

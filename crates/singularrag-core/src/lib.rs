@@ -21,6 +21,7 @@ pub mod lang;
 pub mod map;
 pub mod models;
 pub mod rank;
+pub mod schema;
 pub mod secrets;
 pub mod store;
 pub mod time;

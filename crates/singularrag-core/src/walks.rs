@@ -30,6 +30,8 @@ pub struct Walk {
     #[serde(default)]
     pub step_text: Option<String>, // process only
     #[serde(default)]
+    pub implemented_by: Option<String>, // process only: a path::name among a step's implemented-by links
+    #[serde(default)]
     pub from: Option<String>, // connection only
     #[serde(default)]
     pub hops: Option<u32>, // connection only
@@ -113,6 +115,20 @@ pub fn validate(file: &WalkFile) -> Result<()> {
                 "{}: role/step_text belongs to process walks only",
                 w.id
             )));
+        }
+        if w.implemented_by.is_some() && w.kind != WalkKind::Process {
+            return Err(Error::Config(format!(
+                "{}: implemented_by belongs to process walks only",
+                w.id
+            )));
+        }
+        if let Some(key) = &w.implemented_by {
+            if !key.contains("::") {
+                return Err(Error::Config(format!(
+                    "{}: implemented_by \"{key}\" is not path::name",
+                    w.id
+                )));
+            }
         }
         if (w.from.is_some() || w.hops.is_some()) && w.kind != WalkKind::Connection {
             return Err(Error::Config(format!(
@@ -229,6 +245,22 @@ gold = ["src/auth/session.ts::createSession"]
                 .unwrap_err()
                 .to_string();
         assert!(e.contains("browse"), "{e}");
+    }
+
+    #[test]
+    fn implemented_by_belongs_to_process_walks_and_is_path_name() {
+        let ok: WalkFile = toml::from_str("[[walk]]\nid = \"P\"\nkind = \"process\"\nquery = \"q\"\nimplemented_by = \"prisma/schema.prisma::website_event\"\ngold = [\"docs/a.md::S\"]\n").unwrap();
+        validate(&ok).unwrap();
+        let wrong_kind: WalkFile = toml::from_str("[[walk]]\nid = \"L\"\nkind = \"locate\"\nquery = \"q\"\nimplemented_by = \"a.ts::f\"\ngold = [\"docs/a.md::S\"]\n").unwrap();
+        assert!(validate(&wrong_kind)
+            .unwrap_err()
+            .to_string()
+            .contains("implemented_by belongs to process walks only"));
+        let bare: WalkFile = toml::from_str("[[walk]]\nid = \"P\"\nkind = \"process\"\nquery = \"q\"\nimplemented_by = \"website_event\"\ngold = [\"docs/a.md::S\"]\n").unwrap();
+        assert!(validate(&bare)
+            .unwrap_err()
+            .to_string()
+            .contains("is not path::name"));
     }
 
     #[test]

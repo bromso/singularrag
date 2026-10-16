@@ -1,6 +1,8 @@
 # The harness's own walk file: the prose fixture (`fixture::write_prose`) plus the code and docs
-# mini fixture (`fixture::write_docs_mini`), the checked-in prose extraction loaded with
-# --extraction, no model. One walk per kind (two for connection: an entity and a symbol start).
+# mini fixture (`fixture::write_docs_mini`), plus the schema fixture (`fixture::write_schema_mini`),
+# the checked-in prose extraction loaded with --extraction, no model. Two for locate, two for
+# process, three for connection (an entity start, a symbol start, and a schema start), two for
+# change: nine walks.
 budget = 4096
 
 [[walk]]
@@ -35,3 +37,32 @@ id = "C5"
 kind = "change"
 patch = "patches/ci-session.patch"
 gold = ["src/auth/session.ts::createSession"]
+
+# The schema fixture (`fixture::write_schema_mini`): tables and columns as symbols (schema spec §5).
+
+[[walk]]
+id = "C6"
+kind = "locate"
+query = "which table holds each event a website records"
+gold = ["prisma/schema.prisma::website_event", "prisma/migrations/01_init/migration.sql::website_event"]
+
+[[walk]]
+id = "C7"
+kind = "process"
+query = "what happens when a visitor opens a page"
+step_text = "writes one row"
+implemented_by = "prisma/schema.prisma::website_event"
+gold = ["docs/data-model.md::Recording a visit"]
+
+[[walk]]
+id = "C8"
+kind = "connection"
+from = "prisma/schema.prisma::website"
+hops = 1
+gold = ["src/queries/website.ts::getWebsite"]
+
+[[walk]]
+id = "C9"
+kind = "change"
+patch = "patches/ci-schema.patch"
+gold = ["prisma/schema.prisma::website"]

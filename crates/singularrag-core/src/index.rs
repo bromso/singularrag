@@ -21,6 +21,45 @@ use crate::{Error, Result};
 
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Alias → table name (schema spec §3): every table name, plus a Prisma model's name and
+/// its lower-camel form. Rebuilt from `table_names` after the schema files of a run.
+pub type Vocab = HashMap<String, String>;
+
+pub fn load_vocab(conn: &Connection) -> Result<Vocab> {
+    let mut stmt =
+        conn.prepare("SELECT alias, table_name FROM table_names ORDER BY alias, table_name")?;
+    let mut v = Vocab::new();
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let (alias, table) = row?;
+        v.entry(alias).or_insert(table);
+    }
+    Ok(v)
+}
+
+/// A stable digest of the vocabulary, stamped onto each code file's `files.vocab` row
+/// (spec §3) as it's indexed; a code file whose stamp differs from the vocabulary just
+/// loaded is re-indexed once, content hash or not.
+pub fn vocab_hash(v: &Vocab) -> String {
+    let mut pairs: Vec<(&String, &String)> = v.iter().collect();
+    pairs.sort();
+    let mut h = blake3::Hasher::new();
+    for (a, t) in pairs {
+        h.update(a.as_bytes());
+        h.update(b"\t");
+        h.update(t.as_bytes());
+        h.update(b"\n");
+    }
+    h.finalize().to_hex()[..12].to_string()
+}
+
+fn is_schema_path(p: &str) -> bool {
+    Language::from_path(p).is_some_and(|l| l.is_schema())
+}
+
+fn is_code_path(p: &str) -> bool {
+    Language::from_path(p).is_some_and(|l| !l.is_schema() && !l.is_document())
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct IndexStats {
     pub scanned: usize,
@@ -46,6 +85,9 @@ struct Known {
     mtime_ms: i64,
     size: u64,
     content_hash: Option<String>,
+    /// The `vocab_hash` of the table-name vocabulary this file was last indexed under
+    /// (spec §3); `None` for a skipped file or one indexed before this column existed.
+    vocab: Option<String>,
 }
 
 /// What `index_file` did with one changed file.
@@ -68,7 +110,7 @@ impl<'a> Indexer<'a> {
         let mut stmt = self
             .store
             .conn()
-            .prepare("SELECT id, path, mtime_ms, size, content_hash FROM files")?;
+            .prepare("SELECT id, path, mtime_ms, size, content_hash, vocab FROM files")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(1)?,
@@ -77,6 +119,7 @@ impl<'a> Indexer<'a> {
                     mtime_ms: r.get(2)?,
                     size: r.get::<_, i64>(3)? as u64,
                     content_hash: r.get(4)?,
+                    vocab: r.get(5)?,
                 },
             ))
         })?;
@@ -129,45 +172,29 @@ impl<'a> Indexer<'a> {
             stats.skipped += 1;
         }
 
-        let mut seen: Vec<&str> = Vec::with_capacity(w.entries.len());
-        for e in &w.entries {
-            seen.push(&e.rel_path);
-            if !Self::changed(&known, e) {
-                stats.unchanged += 1;
-                on_file();
-                continue;
-            }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                stats.remaining += 1;
-                on_file();
-                continue;
-            }
-            let prior = known.get(&e.rel_path);
-            // One unreadable or unparseable file must never abort the refresh: it becomes
-            // a skip row like any other skipped file, and the walk carries on. Only store
-            // errors (which mean the index itself is unusable) propagate.
-            match self.index_file(e, prior, now) {
-                Ok(Outcome::Indexed) => stats.indexed += 1,
-                Ok(Outcome::Unchanged) => stats.unchanged += 1,
-                Ok(Outcome::Skipped) => stats.skipped += 1,
-                Err(Error::Io(_)) => {
-                    self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "unreadable", now)?;
-                    stats.skipped += 1;
-                }
-                Err(Error::Tags(_)) => {
-                    self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "parse-error", now)?;
-                    stats.skipped += 1;
-                }
-                Err(other) => return Err(other),
-            }
+        // Schema files first (spec §3): the vocabulary the code pass needs comes from them.
+        // Then everything else: a code file whose own `files.vocab` stamp doesn't match the
+        // vocabulary just loaded is re-indexed once, content hash or not. The stamp lives on
+        // the file's own row rather than in a run-level meta, so a deadline cutoff mid-run
+        // never loses track of which files still need the new vocabulary: whatever got
+        // stamped stays stamped, and whatever didn't is still behind next time, with no
+        // window where every code file looks forced just because no run has finished yet.
+        let (schema, rest): (Vec<&WalkEntry>, Vec<&WalkEntry>) =
+            w.entries.iter().partition(|e| is_schema_path(&e.rel_path));
+        let empty = Vocab::new();
+        let empty_hash = vocab_hash(&empty);
+        for e in schema {
+            self.process(e, &known, &empty, &empty_hash, deadline, now, &mut stats)?;
             on_file();
         }
 
-        // Remove rows for files that no longer exist (or are now gitignored), and write
-        // meta, atomically: either both land or neither does.
-        let present: std::collections::HashSet<&str> = seen
+        // Remove rows for files that no longer exist (or are now gitignored) before the
+        // vocabulary is loaded: a removed schema file's aliases go with its row, so the code
+        // pass below stamps files with the post-removal vocabulary, not a stale one.
+        let present: std::collections::HashSet<&str> = w
+            .entries
             .iter()
-            .copied()
+            .map(|e| e.rel_path.as_str())
             .chain(w.skipped.iter().map(|s| s.rel_path.as_str()))
             .collect();
         let conn = self.store.conn();
@@ -179,9 +206,69 @@ impl<'a> Indexer<'a> {
                 stats.removed += 1;
             }
         }
+        tx.commit()?;
+
+        let vocab = load_vocab(self.store.conn())?;
+        let hash = vocab_hash(&vocab);
+        for e in rest {
+            self.process(e, &known, &vocab, &hash, deadline, now, &mut stats)?;
+            on_file();
+        }
+
+        let tx = conn.unchecked_transaction()?;
         self.write_meta(now)?;
         tx.commit()?;
         Ok(stats)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process(
+        &self,
+        e: &WalkEntry,
+        known: &HashMap<String, Known>,
+        vocab: &Vocab,
+        hash: &str,
+        deadline: Option<Instant>,
+        now: i64,
+        stats: &mut IndexStats,
+    ) -> Result<()> {
+        let prior = known.get(&e.rel_path);
+        // Only a code file's own stamp can force it, and only when it was actually indexed
+        // before (`content_hash` is set): a skipped file (secret-like, binary, too-large,
+        // parse-error, unreadable) has no stamp to be stale, and forcing it anyway would
+        // re-read and re-scan it on every single run forever, inflating `skipped` and, under
+        // a deadline, `remaining`/STALE on a corpus where nothing changed. A skipped file that
+        // later becomes indexable changes content, so the ordinary mtime/size check catches
+        // it. Documents and schema files are only ever reindexed by that same check (a schema
+        // file's vocabulary stamp is irrelevant and never compared).
+        let force = is_code_path(&e.rel_path)
+            && prior.is_some_and(|p| p.content_hash.is_some() && p.vocab.as_deref() != Some(hash));
+        if !force && !Self::changed(known, e) {
+            stats.unchanged += 1;
+            return Ok(());
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            stats.remaining += 1;
+            return Ok(());
+        }
+        // One unreadable or unparseable file must never abort the refresh: it becomes
+        // a skip row like any other skipped file, and the walk carries on. Only store
+        // errors (which mean the index itself is unusable) propagate.
+        match self.index_file(e, prior, now, vocab, hash, force) {
+            Ok(Outcome::Indexed) => stats.indexed += 1,
+            Ok(Outcome::Unchanged) => stats.unchanged += 1,
+            Ok(Outcome::Skipped) => stats.skipped += 1,
+            Err(Error::Io(_)) => {
+                self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "unreadable", now)?;
+                stats.skipped += 1;
+            }
+            Err(Error::Tags(_)) => {
+                self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "parse-error", now)?;
+                stats.skipped += 1;
+            }
+            Err(other) => return Err(other),
+        }
+        Ok(())
     }
 
     fn upsert_skipped(
@@ -195,10 +282,11 @@ impl<'a> Indexer<'a> {
         let conn = self.store.conn();
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason)
-             VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5)
+            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason, vocab)
+             VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, NULL)
              ON CONFLICT(path) DO UPDATE SET lang = NULL, content_hash = NULL, mtime_ms = excluded.mtime_ms,
-               size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = excluded.skipped_reason",
+               size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = excluded.skipped_reason,
+               vocab = NULL",
             params![path, mtime_ms, size as i64, now, reason],
         )?;
         let id: i64 = tx.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))?;
@@ -212,7 +300,15 @@ impl<'a> Indexer<'a> {
     /// stored (only mtime/size moved) so nothing besides those two columns was touched;
     /// `Outcome::Skipped` means the file was written to `files` with a `skipped_reason` and
     /// has no symbols; `Outcome::Indexed` means symbols/refs/FTS rows were (re)written.
-    fn index_file(&self, e: &WalkEntry, prior: Option<&Known>, now: i64) -> Result<Outcome> {
+    fn index_file(
+        &self,
+        e: &WalkEntry,
+        prior: Option<&Known>,
+        now: i64,
+        vocab: &Vocab,
+        vocab_tag: &str,
+        force: bool,
+    ) -> Result<Outcome> {
         if e.size > MAX_FILE_BYTES {
             self.upsert_skipped(&e.rel_path, e.mtime_ms, e.size, "too-large", now)?;
             return Ok(Outcome::Skipped);
@@ -248,7 +344,7 @@ impl<'a> Indexer<'a> {
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let conn = self.store.conn();
 
-        if prior.and_then(|p| p.content_hash.as_deref()) == Some(hash.as_str()) {
+        if !force && prior.and_then(|p| p.content_hash.as_deref()) == Some(hash.as_str()) {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "UPDATE files SET mtime_ms = ?2, size = ?3 WHERE path = ?1",
@@ -264,25 +360,54 @@ impl<'a> Indexer<'a> {
             .map(|(s, _)| s)
             .unwrap_or(stem)
             .to_string();
-        let (tags, bodies, mentions) = if lang.is_document() {
+        let (tags, bodies, mentions, aliases) = if lang.is_document() {
             let d = crate::doc::extract(lang, source, &stem)?;
-            (d.tags, d.bodies, d.mentions)
+            (d.tags, d.bodies, d.mentions, Vec::new())
+        } else if lang.is_schema() {
+            let s = crate::schema::extract(lang, source)?;
+            (s.tags, Vec::new(), Vec::new(), s.aliases)
         } else {
-            (extract_tags(lang, source)?, Vec::new(), Vec::new())
+            let mentions = if vocab.is_empty() {
+                Vec::new()
+            } else {
+                crate::schema::table_mentions(lang, source, vocab)?
+            };
+            (
+                extract_tags(lang, source)?,
+                Vec::new(),
+                mentions,
+                Vec::new(),
+            )
         };
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+            "INSERT INTO files(path, lang, content_hash, mtime_ms, size, indexed_at_ms, skipped_reason, vocab)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)
              ON CONFLICT(path) DO UPDATE SET lang = excluded.lang, content_hash = excluded.content_hash,
-               mtime_ms = excluded.mtime_ms, size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = NULL",
-            params![e.rel_path, lang.as_str(), hash, e.mtime_ms, e.size as i64, now],
+               mtime_ms = excluded.mtime_ms, size = excluded.size, indexed_at_ms = excluded.indexed_at_ms, skipped_reason = NULL,
+               vocab = excluded.vocab",
+            params![
+                e.rel_path,
+                lang.as_str(),
+                hash,
+                e.mtime_ms,
+                e.size as i64,
+                now,
+                vocab_tag
+            ],
         )?;
         let file_id: i64 =
             tx.query_row("SELECT id FROM files WHERE path = ?1", [&e.rel_path], |r| {
                 r.get(0)
             })?;
         delete_symbols_for(&tx, file_id)?;
+
+        for (alias, table) in &aliases {
+            tx.execute(
+                "INSERT OR REPLACE INTO table_names(alias, table_name, file_id) VALUES (?1, ?2, ?3)",
+                params![alias, table, file_id],
+            )?;
+        }
 
         let mut ids: Vec<i64> = Vec::with_capacity(tags.len());
         for t in &tags {
@@ -380,6 +505,7 @@ impl<'a> Indexer<'a> {
 /// itself), so the caller can either re-insert fresh ones or leave the file skipped.
 fn delete_symbols_for(conn: &Connection, file_id: i64) -> Result<()> {
     crate::knowledge::delete_for_symbols(conn, file_id)?;
+    conn.execute("DELETE FROM table_names WHERE file_id = ?1", [file_id])?;
     conn.execute(
         "DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
         [file_id],
@@ -422,7 +548,7 @@ pub fn git_head(root: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::MapConfig;
-    use crate::fixture::{write_rust_mini, write_ts_mini};
+    use crate::fixture::{write_rust_mini, write_schema_mini, write_ts_mini};
     use crate::store::Store;
     use crate::workspace::Workspace;
 
@@ -435,6 +561,325 @@ mod tests {
 
     fn count(store: &Store, sql: &str) -> i64 {
         store.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    fn index_dir(dir: &Path) -> Store {
+        Store::open(&dir.join(".singularrag/index.db")).unwrap()
+    }
+
+    fn refresh(store: &Store, dir: &Path) -> IndexStats {
+        let cfg = MapConfig::default();
+        Indexer::new(store, &Workspace::single(dir).unwrap(), &cfg)
+            .unwrap()
+            .refresh(None)
+            .unwrap()
+    }
+
+    fn symbols_of(store: &Store, path: &str, kind: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT s.name FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1 AND s.kind = ?2 ORDER BY s.line_start")
+            .unwrap();
+        stmt.query_map([path, kind], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn refs_named(store: &Store, name: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT DISTINCT f.path FROM refs r JOIN files f ON f.id = r.file_id WHERE r.name = ?1 ORDER BY f.path")
+            .unwrap();
+        stmt.query_map([name], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn schema_files_index_tables_columns_foreign_keys_and_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        let store = index_dir(dir.path());
+        let stats = refresh(&store, dir.path());
+        assert_eq!(stats.remaining, 0);
+        assert_eq!(
+            symbols_of(&store, "prisma/schema.prisma", "table"),
+            vec!["user", "website", "website_event"]
+        );
+        assert!(symbols_of(&store, "prisma/schema.prisma", "column")
+            .contains(&"website_event.website_id".to_string()));
+        assert_eq!(
+            symbols_of(
+                &store,
+                "prisma/migrations/02_add_event_name/migration.sql",
+                "column"
+            ),
+            vec!["website_event.event_name"]
+        );
+        assert_eq!(symbols_of(&store, "db/dump.sql", "table"), vec!["report"]);
+        // foreign keys: the schema, the init migration and the dump all reference `website`
+        // (`contains`, not equality: Task 4 adds the code file to this list)
+        let website_refs = refs_named(&store, "website");
+        for p in [
+            "db/dump.sql",
+            "prisma/migrations/01_init/migration.sql",
+            "prisma/schema.prisma",
+        ] {
+            assert!(
+                website_refs.contains(&p.to_string()),
+                "{p} missing from {website_refs:?}"
+            );
+        }
+        let lang: String = store
+            .conn()
+            .query_row(
+                "SELECT lang FROM files WHERE path = 'prisma/schema.prisma'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lang, "prisma");
+        let vocab = load_vocab(store.conn()).unwrap();
+        assert_eq!(
+            vocab.get("websiteEvent").map(String::as_str),
+            Some("website_event")
+        );
+        assert_eq!(
+            vocab.get("WebsiteEvent").map(String::as_str),
+            Some("website_event")
+        );
+        assert_eq!(vocab.get("report").map(String::as_str), Some("report"));
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue q JOIN symbols s ON s.id = q.symbol_id WHERE s.kind IN ('table', 'column')"),
+            0,
+            "a table is never queued for extraction"
+        );
+        assert!(
+            count(&store, "SELECT COUNT(*) FROM extract_queue") >= 1,
+            "the document section is queued"
+        );
+    }
+
+    #[test]
+    fn code_references_tables_through_properties_and_strings_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        let store = index_dir(dir.path());
+        refresh(&store, dir.path());
+        assert!(
+            refs_named(&store, "website").contains(&"src/queries/website.ts".to_string()),
+            "prisma.client.website"
+        );
+        assert!(
+            refs_named(&store, "website_event").contains(&"src/queries/website.ts".to_string()),
+            "from website_event in a template string"
+        );
+        assert!(!refs_named(&store, "user").contains(&"src/queries/website.ts".to_string()));
+        // `const session = ...` is a plain identifier, and there is no `session` table anyway;
+        // the negative case that matters is `user`, which is a table and appears nowhere as a property or string
+        let from_ts: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id WHERE f.path = 'src/queries/website.ts' AND r.name IN ('user', 'session')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(from_ts, 0);
+    }
+
+    #[test]
+    fn a_vocabulary_change_reindexes_code_files_once() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        std::fs::write(
+            dir.path().join("src/queries/team.ts"),
+            "import { prisma } from \"../lib/prisma\";\nexport function getTeams() {\n  return prisma.client.team.findUnique({});\n}\n",
+        )
+        .unwrap();
+        let store = index_dir(dir.path());
+        refresh(&store, dir.path());
+        assert!(
+            refs_named(&store, "team").is_empty(),
+            "no `team` table yet, so no ref"
+        );
+        let second = refresh(&store, dir.path());
+        assert_eq!(second.indexed, 0, "nothing changed, nothing re-indexed");
+
+        // a new model appears; the code files' mtimes do not change
+        let schema = dir.path().join("prisma/schema.prisma");
+        let mut src = std::fs::read_to_string(&schema).unwrap();
+        src.push_str("\nmodel Team {\n  id String @id\n\n  @@map(\"team\")\n}\n");
+        std::fs::write(&schema, src).unwrap();
+        let third = refresh(&store, dir.path());
+        // `team.ts` is reindexed under the new vocabulary, and its `prisma.client.team`
+        // use now resolves against the vocabulary that includes the new model.
+        assert_eq!(refs_named(&store, "team"), vec!["src/queries/team.ts"]);
+        // the schema file plus every code file (website.ts, prisma.ts, db.ts, team.ts), not the documents
+        assert_eq!(third.indexed, 5, "{third:?}");
+        let fourth = refresh(&store, dir.path());
+        assert_eq!(
+            fourth.indexed, 0,
+            "the forced re-index happens once: {fourth:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_vocabulary_forces_nothing_and_emits_nothing() {
+        let (dir, store) = setup();
+        let first = refresh(&store, dir.path());
+        assert!(first.indexed > 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM table_names"), 0);
+        let empty_hash = vocab_hash(&Vocab::new());
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT path, vocab FROM files WHERE skipped_reason IS NULL")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for (path, vocab) in &rows {
+            if is_code_path(path) {
+                assert_eq!(vocab.as_deref(), Some(empty_hash.as_str()), "{path}");
+            }
+        }
+        let second = refresh(&store, dir.path());
+        assert_eq!(second.indexed, 0, "{second:?}");
+        // Only the walk-level `.env` denylist row: `src/config.ts` (secret-like, so never
+        // indexed and never stamped) must not be force-rechecked every run just because its
+        // `vocab` column is NULL — it now counts as unchanged, like any other skipped file
+        // whose mtime/size haven't moved.
+        assert_eq!(
+            second.skipped, 1,
+            "only the walk-level .env denylist row: {second:?}"
+        );
+        // An already-expired deadline must not make an unchanged corpus look STALE: there is
+        // nothing left for the deadline check to even see, because every file either hit the
+        // walk-level skip (unconditional, not deadline-gated) or the cheap unchanged shortcut.
+        let third = Indexer::new(
+            &store,
+            &Workspace::single(dir.path()).unwrap(),
+            &MapConfig::default(),
+        )
+        .unwrap()
+        .refresh(Some(std::time::Instant::now()))
+        .unwrap();
+        assert_eq!(third.remaining, 0, "{third:?}");
+    }
+
+    #[test]
+    fn removing_a_schema_file_removes_its_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        let store = index_dir(dir.path());
+        refresh(&store, dir.path());
+        assert!(load_vocab(store.conn()).unwrap().contains_key("report"));
+        std::fs::remove_file(dir.path().join("db/dump.sql")).unwrap();
+        refresh(&store, dir.path());
+        let vocab = load_vocab(store.conn()).unwrap();
+        assert!(!vocab.contains_key("report"));
+        assert!(vocab.contains_key("website"));
+        // The removal run already indexed code under the post-removal vocabulary, so
+        // every code file carries its hash and the next run has nothing to force.
+        let hash = vocab_hash(&vocab);
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT path, vocab FROM files WHERE skipped_reason IS NULL")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for (path, stamp) in &rows {
+            if is_code_path(path) {
+                assert_eq!(stamp.as_deref(), Some(hash.as_str()), "{path}");
+            }
+        }
+        let again = refresh(&store, dir.path());
+        assert_eq!(again.indexed, 0, "{again:?}");
+    }
+
+    /// A deadline that expires partway through phase 2 (the code/document pass, after the
+    /// vocabulary has already changed) must not corrupt or lose track of which code files
+    /// still carry the old stamp: whatever the cut run didn't reach keeps its old stamp and
+    /// is still owed a reindex; a later uninterrupted run finishes the job exactly once per
+    /// file, no more and no less.
+    #[test]
+    fn a_deadline_mid_run_leaves_no_code_file_with_a_stale_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        std::fs::write(
+            dir.path().join("src/queries/team.ts"),
+            "import { prisma } from \"../lib/prisma\";\nexport function getTeams() {\n  return prisma.client.team.findUnique({});\n}\n",
+        )
+        .unwrap();
+        let store = index_dir(dir.path());
+        refresh(&store, dir.path());
+        let old_hash = vocab_hash(&load_vocab(store.conn()).unwrap());
+
+        let schema = dir.path().join("prisma/schema.prisma");
+        let mut src = std::fs::read_to_string(&schema).unwrap();
+        src.push_str("\nmodel Team {\n  id String @id\n\n  @@map(\"team\")\n}\n");
+        std::fs::write(&schema, src).unwrap();
+
+        let cfg = MapConfig::default();
+        let ix = Indexer::new(&store, &Workspace::single(dir.path()).unwrap(), &cfg).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let mut calls = 0usize;
+        let cut = ix
+            .refresh_with(Some(deadline), || {
+                calls += 1;
+                // The fixture has one Prisma file and three SQL files: once all four
+                // schema entries have been processed (and the vocabulary has changed),
+                // sleep past the deadline so the cut lands inside phase 2, not before
+                // the vocabulary even changes.
+                if calls == 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+            })
+            .unwrap();
+        assert!(cut.remaining > 0, "{cut:?}");
+
+        let code_stamps = |store: &Store| -> Vec<(String, Option<String>)> {
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT path, vocab FROM files WHERE skipped_reason IS NULL")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .filter(|(path, _): &(String, Option<String>)| is_code_path(path))
+                .collect()
+        };
+        assert!(
+            code_stamps(&store)
+                .iter()
+                .any(|(_, vocab)| vocab.as_deref() == Some(old_hash.as_str())),
+            "at least one code file must still carry the old stamp: {:?}",
+            code_stamps(&store)
+        );
+
+        let caught_up = refresh(&store, dir.path());
+        assert_eq!(caught_up.remaining, 0, "{caught_up:?}");
+        assert_eq!(
+            cut.indexed + caught_up.indexed,
+            5,
+            "the schema file plus four code files, split across the two runs: cut={cut:?} caught_up={caught_up:?}"
+        );
+
+        let new_hash = vocab_hash(&load_vocab(store.conn()).unwrap());
+        assert_ne!(new_hash, old_hash);
+        for (path, vocab) in code_stamps(&store) {
+            assert_eq!(vocab.as_deref(), Some(new_hash.as_str()), "{path}");
+        }
+
+        let fourth = refresh(&store, dir.path());
+        assert_eq!(fourth.indexed, 0, "{fourth:?}");
     }
 
     #[test]

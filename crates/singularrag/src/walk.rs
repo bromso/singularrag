@@ -95,18 +95,36 @@ pub fn grade_process(w: &Walk, dto: &ProcessesDto) -> (bool, Vec<String>, Option
             .as_ref()
             .is_none_or(|text| p.steps.iter().any(|s| contains_ci(&s.text, text)))
     };
-    if citing.iter().any(|p| role_ok(p) && text_ok(p)) {
+    let impl_ok = |p: &ProcessDto| {
+        w.implemented_by.as_ref().is_none_or(|key| {
+            p.steps.iter().any(|s| {
+                s.code
+                    .iter()
+                    .any(|c| format!("{}::{}", c.path, c.name) == *key)
+            })
+        })
+    };
+    if citing
+        .iter()
+        .any(|p| role_ok(p) && text_ok(p) && impl_ok(p))
+    {
         return (true, reached, None);
     }
-    // Some citing process has the role (or none was asked for), so the text is what failed.
-    let reason = match &w.role {
-        Some(role) if !citing.iter().any(|p| role_ok(p)) => {
-            format!("step with role {role} not found")
-        }
-        _ => format!(
+    let reason = if w.role.is_some() && !citing.iter().any(|p| role_ok(p)) {
+        format!(
+            "step with role {} not found",
+            w.role.as_deref().unwrap_or_default()
+        )
+    } else if w.implemented_by.is_some() && citing.iter().any(|p| role_ok(p) && text_ok(p)) {
+        format!(
+            "{} not among the steps' implemented-by links",
+            w.implemented_by.as_deref().unwrap_or_default()
+        )
+    } else {
+        format!(
             "step text \"{}\" not found",
             w.step_text.as_deref().unwrap_or_default()
-        ),
+        )
     };
     (false, reached, Some(reason))
 }
@@ -576,7 +594,7 @@ pub fn render_report(results: &[WalkResult]) -> String {
 mod tests {
     use super::*;
     use crate::serve::queries::{
-        EntityDto, EntityMentionDto, EntityRelationDto, SectionRefDto, StepDto,
+        CodeLinkDto, EntityDto, EntityMentionDto, EntityRelationDto, SectionRefDto, StepDto,
     };
     use std::collections::HashMap;
 
@@ -659,6 +677,7 @@ mod tests {
             budget: None,
             role: None,
             step_text: None,
+            implemented_by: None,
             from: None,
             hops: None,
             patch: None,
@@ -1024,6 +1043,52 @@ mod tests {
         assert_eq!(
             reason.as_deref(),
             Some("step text \"within 5 days\" not found")
+        );
+    }
+
+    #[test]
+    fn a_process_walk_can_require_a_step_to_be_implemented_by_a_symbol() {
+        let mut d = dto(vec![(
+            "Recording a visit",
+            vec![
+                (
+                    "The tracker posts to the collector",
+                    "",
+                    "docs/data-model.md::Recording a visit",
+                ),
+                (
+                    "The collector writes one row to website_event",
+                    "",
+                    "docs/data-model.md::Recording a visit",
+                ),
+            ],
+        )]);
+        d.processes[0].steps[1].code.push(CodeLinkDto {
+            symbol_id: 5,
+            path: "prisma/schema.prisma".into(),
+            name: "website_event".into(),
+            line: 30,
+            via: serde_json::json!("mention"),
+        });
+        let mut w = walk(
+            WalkKind::Process,
+            &["docs/data-model.md::Recording a visit"],
+        );
+        w.step_text = Some("writes one row".into());
+        w.implemented_by = Some("prisma/schema.prisma::website_event".into());
+        assert!(grade_process(&w, &d).0);
+        w.implemented_by = Some("prisma/schema.prisma::website".into());
+        let (pass, _, reason) = grade_process(&w, &d);
+        assert!(!pass);
+        assert_eq!(
+            reason.as_deref(),
+            Some("prisma/schema.prisma::website not among the steps' implemented-by links")
+        );
+        // the text failing still reports the text, as before
+        w.step_text = Some("rolls back".into());
+        assert_eq!(
+            grade_process(&w, &d).2.as_deref(),
+            Some("step text \"rolls back\" not found")
         );
     }
 
