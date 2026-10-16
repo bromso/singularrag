@@ -364,11 +364,15 @@ impl<'a> Indexer<'a> {
             let s = crate::schema::extract(lang, source)?;
             (s.tags, Vec::new(), Vec::new(), s.aliases)
         } else {
-            let _ = vocab; // Task 4 turns the vocabulary into table mentions here
+            let mentions = if vocab.is_empty() {
+                Vec::new()
+            } else {
+                crate::schema::table_mentions(lang, source, vocab)?
+            };
             (
                 extract_tags(lang, source)?,
                 Vec::new(),
-                Vec::new(),
+                mentions,
                 Vec::new(),
             )
         };
@@ -656,6 +660,34 @@ mod tests {
     }
 
     #[test]
+    fn code_references_tables_through_properties_and_strings_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write_schema_mini(dir.path());
+        let store = index_dir(dir.path());
+        refresh(&store, dir.path());
+        assert!(
+            refs_named(&store, "website").contains(&"src/queries/website.ts".to_string()),
+            "prisma.client.website"
+        );
+        assert!(
+            refs_named(&store, "website_event").contains(&"src/queries/website.ts".to_string()),
+            "from website_event in a template string"
+        );
+        assert!(!refs_named(&store, "user").contains(&"src/queries/website.ts".to_string()));
+        // `const session = ...` is a plain identifier, and there is no `session` table anyway;
+        // the negative case that matters is `user`, which is a table and appears nowhere as a property or string
+        let from_ts: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id WHERE f.path = 'src/queries/website.ts' AND r.name IN ('user', 'session')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(from_ts, 0);
+    }
+
+    #[test]
     fn a_vocabulary_change_reindexes_code_files_once() {
         let dir = tempfile::tempdir().unwrap();
         write_schema_mini(dir.path());
@@ -679,13 +711,9 @@ mod tests {
         src.push_str("\nmodel Team {\n  id String @id\n\n  @@map(\"team\")\n}\n");
         std::fs::write(&schema, src).unwrap();
         let third = refresh(&store, dir.path());
-        // `team.ts` is reindexed under the new vocabulary, but table mentions (Task 4's
-        // `schema::table_mentions` call) are not wired into `index_file` yet, so no ref
-        // is written from its `prisma.client.team` use.
-        assert!(
-            refs_named(&store, "team").is_empty(),
-            "table mentions land in Task 4"
-        );
+        // `team.ts` is reindexed under the new vocabulary, and its `prisma.client.team`
+        // use now resolves against the vocabulary that includes the new model.
+        assert_eq!(refs_named(&store, "team"), vec!["src/queries/team.ts"]);
         // the schema file plus every code file (website.ts, prisma.ts, db.ts, team.ts), not the documents
         assert_eq!(third.indexed, 5, "{third:?}");
         let fourth = refresh(&store, dir.path());

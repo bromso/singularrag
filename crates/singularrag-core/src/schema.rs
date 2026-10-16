@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use regex::Regex;
-#[allow(unused_imports)]
 use tree_sitter::Parser;
 
 use crate::lang::{Language, Tag, SIGNATURE_MAX};
@@ -544,6 +543,108 @@ fn sql_regexes() -> &'static (Regex, Regex, Regex, Regex) {
     })
 }
 
+// ---- Code mentions of tables (spec §3) ----
+
+/// Where code names a table: a property identifier after a dot (`prisma.client.website`)
+/// or a token inside a string or template literal (`from website_event`). Plain
+/// identifiers never count. Returns `(table name, 1-based line)`, deduplicated, in order.
+pub fn table_mentions(
+    lang: Language,
+    source: &str,
+    vocab: &HashMap<String, String>,
+) -> Result<Vec<(String, u32)>> {
+    if vocab.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (language, props, strings): (tree_sitter::Language, &[&str], &[&str]) = match lang {
+        Language::TypeScript => (
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            &["property_identifier"],
+            &["string_fragment"],
+        ),
+        Language::Tsx => (
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            &["property_identifier"],
+            &["string_fragment"],
+        ),
+        Language::JavaScript => (
+            tree_sitter_javascript::LANGUAGE.into(),
+            &["property_identifier"],
+            &["string_fragment"],
+        ),
+        Language::Rust => (
+            tree_sitter_rust::LANGUAGE.into(),
+            &["field_identifier"],
+            &["string_content"],
+        ),
+        _ => return Ok(Vec::new()),
+    };
+    let mut parser = Parser::new();
+    parser
+        .set_language(&language)
+        .map_err(|e| Error::Tags(format!("{e:?}")))?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| Error::Tags("parse returned nothing".into()))?;
+    let mut out: Vec<(String, u32)> = Vec::new();
+    let mut seen: HashSet<(String, u32)> = HashSet::new();
+    let mut cursor = tree.walk();
+    let mut push = |table: &str, line: u32, out: &mut Vec<(String, u32)>| {
+        if seen.insert((table.to_string(), line)) {
+            out.push((table.to_string(), line));
+        }
+    };
+    // Pre-order walk without recursion.
+    loop {
+        let node = cursor.node();
+        let kind = node.kind();
+        let line = node.start_position().row as u32 + 1;
+        if props.contains(&kind) {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                if let Some(table) = vocab.get(text) {
+                    push(table, line, &mut out);
+                }
+            }
+        } else if strings.contains(&kind) {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                for (i, tok) in text
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .enumerate()
+                {
+                    if tok.is_empty() {
+                        continue;
+                    }
+                    if let Some(table) = vocab.get(tok) {
+                        // a multi-line template: the token's own line
+                        let offset = text
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .take(i)
+                            .map(|s| s.len() + 1)
+                            .sum::<usize>();
+                        let extra = text.as_bytes()[..offset.min(text.len())]
+                            .iter()
+                            .filter(|&&b| b == b'\n')
+                            .count() as u32;
+                        push(table, line + extra, &mut out);
+                    }
+                }
+            }
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+                return Ok(out);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,5 +1003,60 @@ ALTER TABLE "website" DROP COLUMN "labels";
         let t = x.tags.iter().find(|t| t.name == table).unwrap();
         assert_eq!(t.signature.chars().count(), SIGNATURE_MAX);
         assert!(t.signature.ends_with('…'));
+    }
+
+    fn vocab() -> HashMap<String, String> {
+        [
+            ("website", "website"),
+            ("Website", "website"),
+            ("websiteEvent", "website_event"),
+            ("website_event", "website_event"),
+            ("session", "session"),
+            ("user", "user"),
+        ]
+        .into_iter()
+        .map(|(a, t)| (a.to_string(), t.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn properties_and_strings_reference_tables_but_plain_identifiers_do_not() {
+        let src = "import { Website } from './types';\nconst session = create();\nexport function f(websiteId: string) {\n  prisma.client.websiteEvent.findMany();\n  return db.raw(`select 1 from website_event where id = ${websiteId}`);\n}\nconst s = \"session\";\nconst u = user;\n";
+        let m = table_mentions(Language::TypeScript, src, &vocab()).unwrap();
+        assert_eq!(
+            m,
+            vec![
+                ("website_event".to_string(), 4),
+                ("website_event".to_string(), 5),
+                ("session".to_string(), 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_field_names_and_string_contents_count_too() {
+        let src = "fn q(conn: &Conn) {\n    let user = 1;\n    conn.execute(\"INSERT INTO session(id) VALUES (1)\", []);\n    let n = row.website;\n}\n";
+        let m = table_mentions(Language::Rust, src, &vocab()).unwrap();
+        assert_eq!(
+            m,
+            vec![("session".to_string(), 3), ("website".to_string(), 4)]
+        );
+    }
+
+    #[test]
+    fn documents_and_schema_files_get_no_table_mentions_and_an_empty_vocabulary_yields_nothing() {
+        assert!(table_mentions(Language::Markdown, "`website`", &vocab())
+            .unwrap()
+            .is_empty());
+        assert!(
+            table_mentions(Language::Sql, "select * from website", &vocab())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            table_mentions(Language::TypeScript, "x.website", &HashMap::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 }
