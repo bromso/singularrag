@@ -10,4 +10,9 @@ describe("langGroup", () => {
     expect(langGroup("css")).toBe("styles");
     expect(langGroup(null)).toBe("code");
   });
+
+  test("schema files form their own group", () => {
+    expect(langGroup("prisma")).toBe("schema");
+    expect(langGroup("sql")).toBe("schema");
+  });
 });

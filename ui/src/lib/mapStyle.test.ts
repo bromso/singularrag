@@ -3,7 +3,7 @@ import { edgeStyle, nodeSize, nodeStyle, readPalette, type EdgeCtx, type NodeCtx
 
 const SIGMA_COLOR = /^#[0-9a-fA-F]{6}$|^rgba?\(/;
 
-const pal: Palette = { served: "#0a0", cut: "#a60", untouched: "#888", focus: "#00f", edge: "#666", edgeDim: "#ddd", label: "#000", background: "#fff", docs: "#70c", config: "#0aa", styles: "#c07", entityPerson: "#a00001", entityOrganisation: "#a00002", entitySystem: "#a00003", entityConcept: "#a00004", entityEvent: "#a00005", entityPlace: "#a00006", entityDocument: "#a00007" };
+const pal: Palette = { served: "#0a0", cut: "#a60", untouched: "#888", focus: "#00f", edge: "#666", edgeDim: "#ddd", label: "#000", background: "#fff", docs: "#70c", config: "#0aa", styles: "#c07", schema: "#07c", entityPerson: "#a00001", entityOrganisation: "#a00002", entitySystem: "#a00003", entityConcept: "#a00004", entityEvent: "#a00005", entityPlace: "#a00006", entityDocument: "#a00007" };
 const base: NodeCtx = { status: null, focused: false, blastDepth: null, blastActive: false, symbols: 4, hovered: false, zoomRatio: 1, group: "code" };
 
 describe("nodeStyle", () => {
@@ -97,7 +97,7 @@ describe("readPalette", () => {
 
 describe("sigma-parsable colours", () => {
   test("every colour the reducers emit is sigma-parsable", () => {
-    const pal6: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff", docs: "#7c3aed", config: "#0e7490", styles: "#be185d", entityPerson: "#a00001", entityOrganisation: "#a00002", entitySystem: "#a00003", entityConcept: "#a00004", entityEvent: "#a00005", entityPlace: "#a00006", entityDocument: "#a00007" };
+    const pal6: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff", docs: "#7c3aed", config: "#0e7490", styles: "#be185d", schema: "#0369a1", entityPerson: "#a00001", entityOrganisation: "#a00002", entitySystem: "#a00003", entityConcept: "#a00004", entityEvent: "#a00005", entityPlace: "#a00006", entityDocument: "#a00007" };
     const statuses: (NodeCtx["status"])[] = [null, "served", "cut", "untouched"];
     const bools = [false, true];
     const collected: string[] = [];

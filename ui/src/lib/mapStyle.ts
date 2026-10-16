@@ -3,7 +3,7 @@ import type { FileRow } from "./join";
 import type { LangGroup } from "./langGroup";
 
 export type Palette = {
-  served: string; cut: string; untouched: string; focus: string; edge: string; edgeDim: string; label: string; background: string; docs: string; config: string; styles: string;
+  served: string; cut: string; untouched: string; focus: string; edge: string; edgeDim: string; label: string; background: string; docs: string; config: string; styles: string; schema: string;
   entityPerson: string; entityOrganisation: string; entitySystem: string; entityConcept: string; entityEvent: string; entityPlace: string; entityDocument: string;
 };
 /** `entityType` marks an entity node (the overlay); `mentions` sizes it. */
@@ -11,7 +11,7 @@ export type NodeCtx = { status: ItemStatus | null; focused: boolean; blastDepth:
 export type NodeStyle = { size: number; color: string; borderColor?: string; type: "circle" | "border"; label: string | null; zIndex: number };
 export type EdgeCtx = { touchesFocused: boolean; blastActive: boolean; touchesBlast: boolean };
 
-const DEFAULTS: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff", docs: "#7c3aed", config: "#0e7490", styles: "#be185d",
+const DEFAULTS: Palette = { served: "#047857", cut: "#b45309", untouched: "#9ca3af", focus: "#2563eb", edge: "#6b7280", edgeDim: "#e5e7eb", label: "#111827", background: "#ffffff", docs: "#7c3aed", config: "#0e7490", styles: "#be185d", schema: "#0369a1",
   entityPerson: "#c2410c", entityOrganisation: "#1d4ed8", entitySystem: "#0f766e", entityConcept: "#a21caf", entityEvent: "#b91c1c", entityPlace: "#4d7c0f", entityDocument: "#475569",
 };
 
@@ -72,7 +72,7 @@ export function readPalette(el: HTMLElement): Palette {
     served: v("--map-served", DEFAULTS.served), cut: v("--map-cut", DEFAULTS.cut), untouched: v("--map-untouched", DEFAULTS.untouched),
     focus: v("--map-focus", DEFAULTS.focus), edge: v("--map-edge", DEFAULTS.edge), edgeDim: v("--map-edge-dim", DEFAULTS.edgeDim),
     label: v("--map-label", DEFAULTS.label), background: v("--map-bg", DEFAULTS.background),
-    docs: v("--map-docs", DEFAULTS.docs), config: v("--map-config", DEFAULTS.config), styles: v("--map-styles", DEFAULTS.styles),
+    docs: v("--map-docs", DEFAULTS.docs), config: v("--map-config", DEFAULTS.config), styles: v("--map-styles", DEFAULTS.styles), schema: v("--map-schema", DEFAULTS.schema),
     entityPerson: v("--map-entity-person", DEFAULTS.entityPerson), entityOrganisation: v("--map-entity-organisation", DEFAULTS.entityOrganisation),
     entitySystem: v("--map-entity-system", DEFAULTS.entitySystem), entityConcept: v("--map-entity-concept", DEFAULTS.entityConcept),
     entityEvent: v("--map-entity-event", DEFAULTS.entityEvent), entityPlace: v("--map-entity-place", DEFAULTS.entityPlace),
