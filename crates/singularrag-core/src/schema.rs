@@ -30,9 +30,12 @@ pub fn extract(lang: Language, source: &str) -> Result<SchemaExtract> {
 }
 
 fn sql(source: &str) -> SchemaExtract {
-    let (re_table, re_view, re_alter, re_refs) = sql_regexes();
+    let (re_table, re_view, re_alter, _, _) = sql_regexes();
     let mut out = SchemaExtract::default();
     let mut seen: HashSet<String> = HashSet::new();
+    // `table.column` → its line, for every column this file has defined so far, so a
+    // constraint-form foreign key can sit on the column's line (spec §3).
+    let mut known: HashMap<String, u32> = HashMap::new();
     for (off, stmt) in statements(source) {
         let s = stmt.as_str();
         if let Some(m) = re_table.captures(s) {
@@ -47,25 +50,17 @@ fn sql(source: &str) -> SchemaExtract {
                     let body = &s[body_off..after + close];
                     for (po, piece) in pieces(body) {
                         let line = line_of(source, off + body_off + po);
-                        let first = first_word_upper(piece);
-                        if CONSTRAINT_WORDS.contains(&first.as_str()) {
-                            if let Some(r) = re_refs.captures(piece) {
-                                refs.push(fk(unquote(&r[1]), line));
-                            }
-                            continue;
-                        }
-                        let (col, ty) =
-                            piece.split_once(char::is_whitespace).unwrap_or((piece, ""));
-                        if let Some(r) = re_refs.captures(ty) {
-                            refs.push(fk(unquote(&r[1]), line));
-                        }
-                        columns.push(def(
-                            format!("{name}.{}", unquote(col)),
-                            "column",
+                        let constraint =
+                            CONSTRAINT_WORDS.contains(&first_word_upper(piece).as_str());
+                        column_piece(
+                            &name,
+                            piece,
+                            constraint,
                             line,
-                            line,
-                            truncate(ty),
-                        ));
+                            &mut columns,
+                            &mut refs,
+                            &mut known,
+                        );
                     }
                 }
             }
@@ -99,6 +94,8 @@ fn sql(source: &str) -> SchemaExtract {
         } else if let Some(m) = re_alter.captures(s) {
             let table = unquote(&m[1]);
             let actions_off = m.get(2).expect("group 2").start();
+            let mut columns = Vec::new();
+            let mut refs = Vec::new();
             for (po, action) in pieces(&m[2]) {
                 let line = line_of(source, off + actions_off + po);
                 let Some(rest) = strip_prefix_ci(action, "ADD") else {
@@ -109,9 +106,15 @@ fn sql(source: &str) -> SchemaExtract {
                 }
                 let rest = rest.trim_start();
                 if CONSTRAINT_WORDS.contains(&first_word_upper(rest).as_str()) {
-                    if let Some(r) = re_refs.captures(action) {
-                        out.tags.push(fk(unquote(&r[1]), line));
-                    }
+                    column_piece(
+                        &table,
+                        rest,
+                        true,
+                        line,
+                        &mut columns,
+                        &mut refs,
+                        &mut known,
+                    );
                     continue;
                 }
                 let rest = strip_prefix_ci(rest, "COLUMN")
@@ -120,21 +123,55 @@ fn sql(source: &str) -> SchemaExtract {
                 let rest = strip_prefix_ci(rest, "IF NOT EXISTS")
                     .map(str::trim_start)
                     .unwrap_or(rest);
-                let (col, ty) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-                if let Some(r) = re_refs.captures(ty) {
-                    out.tags.push(fk(unquote(&r[1]), line));
-                }
-                out.tags.push(def(
-                    format!("{table}.{}", unquote(col)),
-                    "column",
+                column_piece(
+                    &table,
+                    rest,
+                    false,
                     line,
-                    line,
-                    truncate(ty),
-                ));
+                    &mut columns,
+                    &mut refs,
+                    &mut known,
+                );
             }
+            out.tags.extend(columns);
+            out.tags.extend(refs);
         }
     }
     out
+}
+
+/// One piece of a `CREATE TABLE` body or one `ALTER TABLE ... ADD` action, at `line`.
+/// A column definition becomes a `column` tag (and a ref for an inline `REFERENCES`) and
+/// is remembered in `known`; a constraint yields only its foreign key, if any, at the
+/// line of the first column in its `FOREIGN KEY (...)` list when this file has defined
+/// that column, else at the constraint's own line.
+fn column_piece(
+    table: &str,
+    piece: &str,
+    constraint: bool,
+    line: u32,
+    columns: &mut Vec<Tag>,
+    refs: &mut Vec<Tag>,
+    known: &mut HashMap<String, u32>,
+) {
+    let (_, _, _, re_refs, re_fk_col) = sql_regexes();
+    if constraint {
+        if let Some(r) = re_refs.captures(piece) {
+            let at = re_fk_col
+                .captures(piece)
+                .and_then(|c| known.get(&format!("{table}.{}", unquote(&c[1]))).copied())
+                .unwrap_or(line);
+            refs.push(fk(unquote(&r[1]), at));
+        }
+        return;
+    }
+    let (col, ty) = piece.split_once(char::is_whitespace).unwrap_or((piece, ""));
+    if let Some(r) = re_refs.captures(ty) {
+        refs.push(fk(unquote(&r[1]), line));
+    }
+    let name = format!("{table}.{}", unquote(col));
+    known.insert(name.clone(), line);
+    columns.push(def(name, "column", line, line, truncate(ty)));
 }
 
 /// Whitespace-collapsed and cut at `SIGNATURE_MAX` with an ellipsis, like `lang::signature_for`.
@@ -531,14 +568,17 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     p.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
 }
 
-fn sql_regexes() -> &'static (Regex, Regex, Regex, Regex) {
-    static R: OnceLock<(Regex, Regex, Regex, Regex)> = OnceLock::new();
+type SqlRegexes = (Regex, Regex, Regex, Regex, Regex);
+
+fn sql_regexes() -> &'static SqlRegexes {
+    static R: OnceLock<SqlRegexes> = OnceLock::new();
     R.get_or_init(|| {
         (
             Regex::new(r"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED)\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(;]+)").unwrap(),
             Regex::new(r"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(;]+)").unwrap(),
             Regex::new(r"(?is)^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?([^\s(;]+)\s+(.*)$").unwrap(),
             Regex::new(r"(?is)\bREFERENCES\s+([^\s(,;]+)").unwrap(),
+            Regex::new(r"(?is)\bFOREIGN\s+KEY\s*\(\s*([^\s,)]+)").unwrap(),
         )
     })
 }
@@ -900,10 +940,24 @@ ALTER TABLE "website" DROP COLUMN "labels";
             .filter(|t| !t.is_definition)
             .map(|t| (t.name.clone(), t.line_start))
             .collect();
+        // The constraint-form key on `website.user_id` sits at the column's line too.
         assert_eq!(
             fks,
-            vec![("user".to_string(), 17), ("user".to_string(), 20)]
+            vec![("user".to_string(), 17), ("user".to_string(), 17)]
         );
+    }
+
+    #[test]
+    fn a_constraint_key_on_a_column_defined_elsewhere_stays_at_the_constraint() {
+        let src = "CREATE TABLE report (\n  report_id uuid\n);\nALTER TABLE ONLY report\n    ADD CONSTRAINT report_website_fk FOREIGN KEY (website_id) REFERENCES website(website_id);\n";
+        let x = extract(Language::Sql, src).unwrap();
+        let fks: Vec<(String, u32)> = x
+            .tags
+            .iter()
+            .filter(|t| !t.is_definition)
+            .map(|t| (t.name.clone(), t.line_start))
+            .collect();
+        assert_eq!(fks, vec![("website".to_string(), 5)]);
     }
 
     #[test]
@@ -967,17 +1021,21 @@ ALTER TABLE "website" DROP COLUMN "labels";
 
     #[test]
     fn a_copy_data_block_and_inserts_are_dropped() {
-        let src = "CREATE TABLE public.report (\n    report_id uuid NOT NULL\n);\n\nCOPY public.report (report_id) FROM stdin;\n0b1c\tCREATE TABLE phantom (x int);\n\\.\n\nINSERT INTO public.report VALUES ('CREATE TABLE phantom2 (y int);');\nALTER TABLE ONLY public.report\n    ADD CONSTRAINT report_website_fk FOREIGN KEY (website_id) REFERENCES public.website(website_id);\n";
+        let src = "CREATE TABLE public.report (\n    report_id uuid NOT NULL,\n    website_id uuid\n);\nCOPY public.report (report_id) FROM stdin;\n0b1c\tCREATE TABLE phantom (x int);\n\\.\n\nINSERT INTO public.report VALUES ('CREATE TABLE phantom2 (y int);');\nALTER TABLE ONLY public.report\n    ADD CONSTRAINT report_website_fk FOREIGN KEY (website_id) REFERENCES public.website(website_id);\n";
         let x = extract(Language::Sql, src).unwrap();
         assert_eq!(names(&x.tags, "table"), vec!["report"]);
-        assert_eq!(names(&x.tags, "column"), vec!["report.report_id"]);
+        assert_eq!(
+            names(&x.tags, "column"),
+            vec!["report.report_id", "report.website_id"]
+        );
         let fks: Vec<(String, u32)> = x
             .tags
             .iter()
             .filter(|t| !t.is_definition)
             .map(|t| (t.name.clone(), t.line_start))
             .collect();
-        assert_eq!(fks, vec![("website".to_string(), 11)]);
+        // The ALTER-form key lands on `report.website_id`'s line.
+        assert_eq!(fks, vec![("website".to_string(), 3)]);
     }
 
     #[test]
