@@ -191,9 +191,10 @@ function TableColumns({ row, onFocusSection }: { row: SymbolGridRow; onFocusSect
 /** A column's table, and the table its foreign key references. */
 function ColumnParent({ row, onFocusSection }: { row: SymbolGridRow; onFocusSection: FocusSection }) {
   const name = row.symbol.symbol.name;
-  const table = name.slice(0, name.lastIndexOf("."));
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return null;
+  const table = name.slice(0, dot);
   const where = `column-${row.symbol.symbol.id}-table`;
-  if (!table) return null;
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm">
       <Button type="button" variant="outline" size="sm" aria-describedby={where} onClick={() => onFocusSection(row.path, table)}>Table {table}</Button>

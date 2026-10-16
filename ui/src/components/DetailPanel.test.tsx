@@ -66,3 +66,8 @@ test("a function shows neither section", () => {
   expect(screen.queryByRole("heading", { name: "Columns" })).toBeNull();
   expect(screen.queryByRole("button", { name: /^Table / })).toBeNull();
 });
+
+test("a column without a table prefix renders no table button", () => {
+  renderPanel(sym(11, "orphan", "column", 20, "String"));
+  expect(screen.queryByRole("button", { name: /^Table / })).toBeNull();
+});
