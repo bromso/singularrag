@@ -158,5 +158,23 @@
         {"text": "The captain then promotes the build to production.", "role": "Release captain", "systems": []},
         {"text": "If anything goes wrong after the release, the captain rolls back first and asks questions afterwards.", "role": "Release captain", "systems": []}
     ]}
+  },
+  "docs/data-model.md::Recording a visit": {
+    "entities": [
+      {"name": "Recording a visit", "type": "process", "description": "How a page view becomes a row in the website_event table."},
+      {"name": "Collector", "type": "system", "description": "The endpoint the tracker script posts to."},
+      {"name": "website_event", "type": "system", "description": "The table that stores page views and events."}
+    ],
+    "relations": [
+      {"source": "Collector", "target": "website_event", "description": "writes one row per page view to"}
+    ],
+    "steps": {
+      "process": "Recording a visit",
+      "steps": [
+        {"text": "The tracker script posts to the collect endpoint when a visitor opens a page.", "role": "", "systems": ["Collector"]},
+        {"text": "The collector looks up the website row by its tracking id and writes one row to the website_event table with the URL path and the event name.", "role": "", "systems": ["website_event"]},
+        {"text": "Reports read website_event through getWebsiteDateRange.", "role": "", "systems": ["website_event"]}
+      ]
+    }
   }
 }
