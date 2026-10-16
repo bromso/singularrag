@@ -44,6 +44,8 @@ Identifiers are unquoted: backticks and double quotes stripped, schema prefixes 
 
 **The vocabulary** is every table name plus, for Prisma tables, the model name and its lower-camel form (`WebsiteEvent`, `websiteEvent`, `website_event` all resolve to `website_event`). It lives in a new store table `table_names(alias PRIMARY KEY, table_name)`, rebuilt from the schema files' symbols at the start of each run and after each schema file is indexed. Within a run the indexer processes schema files before every other file (a sort by category, then path). When a run's schema files change the vocabulary (the alias set differs from the previous run's, stored as a hash in `meta`), every code file is re-indexed in that run regardless of its content hash, once, after the schema files; the re-index cannot change the vocabulary, so there is no loop. Columns get no code links: `created_at` appears in every table and nearly every file.
 
+*Amended 2026-10-16 (final review).* The table is `table_names(alias, table_name, file_id)` with `PRIMARY KEY (alias, file_id)`, not `alias PRIMARY KEY`: the same alias from two schema files (a table defined in both) keeps one row per file, and a file's rows go with it.
+
 *Amended 2026-10-16 (plan execution).* The implementation stores the vocabulary hash per file (`files.vocab`, the hash a file was indexed under; a code file is re-indexed when its stamp differs from the current hash, documents and schema files never by stamp) instead of a run-level `table_vocab` meta, because the meta was either quadratic on deadline-bounded drains or unsafe when a deadline interrupted the forced re-index.
 
 **Documents and processes** need nothing new. A document that names `website_event` in a code span already emits a mention ref. A process step whose system is "the website event table" reaches the `website_event` symbol through the existing implemented-by token matching, because the table's name tokens are `website event`. Tables are never queued for extraction; they are not sections.
@@ -63,6 +65,8 @@ No new route. The tree payload carries every symbol with kind, line and signatur
 ## 5. Walks, corpora and the gate
 
 **Fixture.** `write_schema_mini(root)` in `fixture.rs`: `prisma/schema.prisma` with three models (`User` → `user`, `Website` → `website`, `WebsiteEvent` → `website_event`, with `@@map`, `@map` and a relation), `prisma/migrations/01_init/migration.sql` with inline foreign keys, `prisma/migrations/02_add_visit/migration.sql` altering a table, `db/dump.sql` with a `COPY` block, `src/queries/website.ts` using `prisma.client.website.findUnique`, a raw `from website_event` template string and a `const session = ...` variable (the negative case), and `docs/handbook.md` with a process section whose step names the website event table and a code span naming `website`. The CI walk file `eval/walks-ci.toml` gains one walk per kind against it (five with the `implemented_by` walk), run in `cargo test` with no model as today.
+
+*Amended 2026-10-16 (final review).* Four walks, one per kind, not five: the `implemented_by` check is folded into the process walk C7 rather than a walk of its own.
 
 **One grader extension.** A `process` walk gains an optional `implemented_by`, a `path::name` that must be among the matched step's implemented-by links (the links the `entities` tool and Journeys render). Without it the fixture could not show that a step reaches a table. The harness is otherwise unchanged: a table is a symbol, so `locate`, `connection` with a symbol start and `change` already grade it.
 
